@@ -1,0 +1,6 @@
+{
+  "name": "Bvelt Radar",
+  "description": "Descubrimiento y prospección autónoma de negocios locales para Bvelt, con integración de Hunter, Groq/Gemini, D1, KV y avisos por Telegram.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
