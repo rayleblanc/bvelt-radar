@@ -124,37 +124,53 @@ export default {
 
       // 3. Security Verification for Admin/Worker Endpoints
       const authHeader = request.headers.get("Authorization");
+      const queryKey = url.searchParams.get("key");
       const serviceKey = env.FOUNDER_SERVICE_KEY;
-      if (!authHeader || !authHeader.startsWith("Bearer ") || authHeader.split(" ")[1] !== serviceKey) {
+
+      let isAuthorized = false;
+      if (authHeader && authHeader.startsWith("Bearer ") && authHeader.split(" ")[1] === serviceKey) {
+        isAuthorized = true;
+      } else if (queryKey && queryKey === serviceKey) {
+        isAuthorized = true;
+      }
+
+      // Special handling for /run supporting both GET and POST with either auth method
+      if (path === "/run") {
+        if (!isAuthorized) {
+          return Response.json({ error: "Unauthorized. Missing or invalid service key." }, { status: 401, headers: corsHeaders });
+        }
+        if (method === "GET" || method === "POST") {
+          const mode = url.searchParams.get("mode") || "founder";
+          const tenantId = url.searchParams.get("tenant_id") || null;
+          
+          ctx.waitUntil(
+            (async () => {
+              try {
+                await runProspectingPipeline(env, mode, tenantId);
+              } catch (err: any) {
+                console.error("Pipeline failure in background:", err);
+              }
+            })()
+          );
+
+          return Response.json({
+            message: "Autonomous prospecting pipeline started.",
+            mode,
+            tenant_id: tenantId,
+            timestamp: new Date().toISOString()
+          }, { headers: corsHeaders });
+        }
+        return Response.json({ error: "Method Not Allowed" }, { status: 405, headers: corsHeaders });
+      }
+
+      // Enforce authorization for remaining admin endpoints (/stats, /decision, /suppression)
+      if (!isAuthorized) {
         return Response.json({ error: "Unauthorized. Missing or invalid service key." }, { status: 401, headers: corsHeaders });
       }
 
       // 4. Stats Endpoint (Includes learning performance)
       if (path === "/stats" && method === "GET") {
         return await handleStats(env, corsHeaders);
-      }
-
-      // 5. Trigger Prospecting Pipeline Manual Execution
-      if (path === "/run" && method === "POST") {
-        const mode = url.searchParams.get("mode") || "founder";
-        const tenantId = url.searchParams.get("tenant_id") || null;
-        
-        ctx.waitUntil(
-          (async () => {
-            try {
-              await runProspectingPipeline(env, mode, tenantId);
-            } catch (err: any) {
-              console.error("Pipeline failure in background:", err);
-            }
-          })()
-        );
-
-        return Response.json({
-          message: "Autonomous prospecting pipeline started.",
-          mode,
-          tenant_id: tenantId,
-          timestamp: new Date().toISOString()
-        }, { headers: corsHeaders });
       }
 
       // 6. Decision API Endpoint (sent / discard / suppress)
