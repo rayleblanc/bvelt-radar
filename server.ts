@@ -26,6 +26,40 @@ app.use((req, res, next) => {
 });
 app.use(express.json());
 
+export interface MissionConfig {
+  mode: 'founder' | 'tenant';
+  target: string;
+  niches: string[];
+  subniches: string[];
+  services: string[];
+  geographies: string[];
+  countries: string[];
+  languages: string[];
+  icp: {
+    description: string;
+    keywords: string[];
+  };
+  min_score: number;
+  max_daily_outreach: number;
+}
+
+export const DEFAULT_FOUNDER_MISSION: MissionConfig = {
+  mode: "founder",
+  target: "bvelt_customers",
+  niches: ["landscaping", "lawn_care", "hvac", "plumbing", "house_cleaning", "pool_cleaning", "handyman", "roofing", "pest_control"],
+  subniches: ["residential_contractors", "commercial_contractors", "emergency_service_providers"],
+  services: ["repair", "maintenance", "installation", "cleaning"],
+  geographies: ["Tampa, FL", "Austin, TX", "Orlando, FL", "Houston, TX", "Atlanta, GA", "Nashville, TN"],
+  countries: ["US"],
+  languages: ["en"],
+  icp: {
+    description: "Local service businesses with visible phone lines, websites, high-margin jobs, and lead-capture or emergency response friction.",
+    keywords: ["plumber", "hvac", "electrician", "contractor", "cleaning", "landscaping"]
+  },
+  min_score: 50,
+  max_daily_outreach: 10
+};
+
 // Paths for simulated database files
 const DB_FILE = path.join(__dirname, 'radar_local_db.json');
 
@@ -61,11 +95,27 @@ const INITIAL_DB = {
       signals_json: JSON.stringify({
         scraped_phone: "+1 (813) 555-0124",
         scraped_email: "service@tampabayacpros.example.com",
-        has_socials: true,
-        score_breakdown: { website: 25, email: 35, is_business_email: 10, phone: 15, trade_relevance: 15 }
+        is_priority_city: true,
+        is_priority_trade: true,
+        variant_id: "missed_calls",
+        score_breakdown: { signal_emergency_friction: 15, signal_manual_estimate_friction: 10, signal_sms_gap: 10, signal_multi_service_friction: 0, website: 10, email_validated: 10, phone: 5, priority_trade: 12, priority_city: 10, learning_feedback_boost: 5 },
+        signals: {
+          contact_form: true,
+          quote_request: true,
+          booking: false,
+          call_cta: true,
+          sms_gap: true,
+          emergency: true,
+          multiple_areas: false,
+          specific_landing_pages: false,
+          estimate_language: true,
+          lead_capture: false
+        },
+        bvelt_angle: "after_hours"
       }),
-      draft_subject: "Helping Tampa Bay AC & Heating Pros recover missed HVAC leads in Tampa",
-      draft_body: "Hi Tampa Bay AC & Heating Pros team,\n\nI noticed your great work offering HVAC services in Tampa, FL.\n\nWhen busy handling jobs on-site, it's incredibly easy to miss incoming client calls and leads. Bvelt is a simple app that automatically re-engages missed leads and recovers lost jobs for contractors via fast, automatic SMS.\n\nTake a look at how we help contractors win back clients at https://bvelt.app\n\nBest regards,\nBvelt Team\n\nReply STOP to opt out",
+      draft_subject: "Emergency HVAC service at Tampa Bay AC & Heating Pros?",
+      draft_body: "Hi Tampa Bay AC & Heating Pros team,\n\nI noticed you advertise 24/7 emergency HVAC service in Tampa, FL and direct customers to call your phone line. What happens to those emergency calls when your team is already out on an active job?\n\nBvelt is a simple app that automatically re-engages missed leads and recovers lost jobs for contractors via fast, automated SMS.\n\nShould I send over a quick 2-minute demo link?\n\nBest regards,\nBvelt Team\n\nReply STOP to opt out",
+      bvelt_angle: "after_hours",
       status: "notified",
       source: "bizdata",
       created_at: new Date(Date.now() - 3600000 * 2).toISOString(),
@@ -81,15 +131,31 @@ const INITIAL_DB = {
       website: "austinlandscapeartists.example.com",
       phone: "+1 (512) 555-0199",
       email: "hello@austinlandscapeartists.example.com",
-      score: 95,
+      score: 77,
       signals_json: JSON.stringify({
         scraped_phone: "+1 (512) 555-0199",
         scraped_email: "hello@austinlandscapeartists.example.com",
-        has_socials: true,
-        score_breakdown: { website: 25, email: 35, is_business_email: 10, phone: 15, trade_relevance: 15 }
+        is_priority_city: true,
+        is_priority_trade: true,
+        variant_id: "dormant_leads",
+        score_breakdown: { signal_emergency_friction: 0, signal_manual_estimate_friction: 10, signal_sms_gap: 10, signal_multi_service_friction: 10, website: 10, email_validated: 10, phone: 5, priority_trade: 12, priority_city: 10, learning_feedback_boost: 0 },
+        signals: {
+          contact_form: true,
+          quote_request: true,
+          booking: false,
+          call_cta: true,
+          sms_gap: true,
+          emergency: false,
+          multiple_areas: true,
+          specific_landing_pages: true,
+          estimate_language: true,
+          lead_capture: false
+        },
+        bvelt_angle: "quote_followup"
       }),
-      draft_subject: "Quick question regarding landscaping leads at Austin Landscaping Craftsmen",
-      draft_body: "Hi Austin Landscaping Craftsmen team,\n\nI came across your business while looking at professional landscaping services in Austin.\n\nI know that answering client calls when you are out in the field with a lawnmower running is almost impossible. Bvelt is a simple app that automatically re-engages missed leads and recovers lost jobs for contractors via fast, automatic SMS.\n\nWe would love to help you recover those missed leads. Check us out: https://bvelt.app\n\nReply STOP to opt out",
+      draft_subject: "Following up on landscaping estimates at Austin Landscaping Craftsmen",
+      draft_body: "Hi Austin Landscaping Craftsmen team,\n\nI noticed you have an online quote request form for your landscaping services in Austin, TX. Once you send out those pricing estimates, how are you currently following up with those prospects to lock them in?\n\nBvelt is a simple app that automatically re-engages missed leads and recovers lost jobs for contractors via fast, automated SMS.\n\nShould I send over a quick 2-minute demo link?\n\nBest regards,\nBvelt Team\n\nReply STOP to opt out",
+      bvelt_angle: "quote_followup",
       status: "sent",
       source: "overpass",
       created_at: new Date(Date.now() - 3600000 * 5).toISOString(),
@@ -105,15 +171,31 @@ const INITIAL_DB = {
       website: "squeakycleantampa.example.com",
       phone: "+1 (813) 555-0245",
       email: "info@squeakycleantampa.example.com",
-      score: 75,
+      score: 55,
       signals_json: JSON.stringify({
         scraped_phone: "+1 (813) 555-0245",
         scraped_email: "info@squeakycleantampa.example.com",
-        has_socials: false,
-        score_breakdown: { website: 25, email: 35, is_business_email: 10, phone: 15, trade_relevance: 0 }
+        is_priority_city: true,
+        is_priority_trade: false,
+        variant_id: "missed_calls",
+        score_breakdown: { signal_emergency_friction: 0, signal_manual_estimate_friction: 0, signal_sms_gap: 10, signal_multi_service_friction: 0, website: 10, email_validated: 10, phone: 5, priority_trade: 5, priority_city: 10, learning_feedback_boost: 5 },
+        signals: {
+          contact_form: true,
+          quote_request: false,
+          booking: true,
+          call_cta: true,
+          sms_gap: true,
+          emergency: false,
+          multiple_areas: false,
+          specific_landing_pages: false,
+          estimate_language: false,
+          lead_capture: true
+        },
+        bvelt_angle: "sms_gap"
       }),
-      draft_subject: "Recovering missed house cleaning leads in Tampa",
-      draft_body: "Hi Squeaky Clean Tampa Co team,\n\nI saw your excellent house cleaning profile in Tampa.\n\nCleaning homes keeps your hands busy, which means many calls from new customers go straight to voicemail. Bvelt is a simple app that automatically re-engages missed leads and recovers lost jobs for contractors via fast, automatic SMS.\n\nSee how we do it: https://bvelt.app\n\nReply STOP to opt out",
+      draft_subject: "No text option for Squeaky Clean Tampa Co customers?",
+      draft_body: "Hi Squeaky Clean Tampa Co team,\n\nI came across your site and noticed your phone line prominently displayed for house_cleaning services in Tampa, FL, but didn't notice any text-back or SMS option. What percentage of potential customers drop off because they'd prefer to text instead of call?\n\nBvelt is a simple app that automatically re-engages missed leads and recovers lost jobs for contractors via fast, automated SMS.\n\nIf you'd like to see how it works in 2 minutes → https://bvelt.app\n\nBest regards,\nBvelt Team\n\nReply STOP to opt out",
+      bvelt_angle: "sms_gap",
       status: "discarded",
       source: "bizdata",
       created_at: new Date(Date.now() - 3600000 * 10).toISOString(),
@@ -359,27 +441,128 @@ app.post('/suppression', secureMiddleware, (req, res) => {
   res.json({ success: true, message: `Added ${keyLower} to suppression list.` });
 });
 
+// 4b. Events & Reply Webhook Endpoints (/api/events, /events, /api/reply, /webhook/events)
+const handleEventRequest = (req: express.Request, res: express.Response) => {
+  const body = req.body || {};
+  const prospectId = body.prospect_id || body.id || null;
+  const email = body.email || null;
+  const rawType = body.event_type || body.event || body.action || "replied";
+  const content = body.content || body.text || body.body || body.notes || null;
+
+  const db = loadDb();
+  let prospect = null;
+  if (prospectId) {
+    prospect = db.prospects.find((p: any) => p.id === prospectId);
+  }
+  if (!prospect && email) {
+    prospect = db.prospects.find((p: any) => p.email && p.email.toLowerCase() === email.toLowerCase());
+  }
+
+  if (!prospect) {
+    return res.status(404).json({ success: false, message: "Prospect not found for event." });
+  }
+
+  const textLower = (content || "").toLowerCase();
+  let classification = "replied";
+
+  if (/unsubscribe|stop|darse de baja|cancelar|opt out|remove/i.test(textLower) || rawType === "unsubscribe") {
+    classification = "unsubscribe";
+  } else if (/out of office|vacation|fuera de la oficina|ooo/i.test(textLower) || rawType === "out_of_office") {
+    classification = "out_of_office";
+  } else if (/not now|next month|later|ahora no/i.test(textLower) || rawType === "not_now") {
+    classification = "not_now";
+  } else if (/how much|price|cost|cuanto|precio|\?/i.test(textLower) || rawType === "question") {
+    classification = "question";
+  } else if (/interested|yes|demo|call me|me interesa|si/i.test(textLower) || rawType === "positive") {
+    classification = "positive";
+  } else if (/not interested|no thanks|no gracias|spam/i.test(textLower) || rawType === "negative") {
+    classification = "negative";
+  } else if (rawType === "bounced" || rawType === "bounce") {
+    classification = "bounced";
+  } else if (rawType === "delivered") {
+    classification = "delivered";
+  } else if (rawType === "sent") {
+    classification = "sent";
+  }
+
+  let autoStopped = false;
+  if (classification === "positive" || classification === "question") {
+    prospect.status = "human_review";
+    prospect.outcome = classification;
+    autoStopped = true;
+  } else if (classification === "unsubscribe") {
+    prospect.status = "unsubscribed";
+    prospect.outcome = "unsubscribe";
+    autoStopped = true;
+  } else if (classification === "not_now") {
+    prospect.status = "paused";
+    prospect.outcome = "not_now";
+    prospect.cooldown_until = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+    autoStopped = true;
+  } else if (classification === "negative") {
+    prospect.status = "discarded";
+    prospect.outcome = "negative";
+    autoStopped = true;
+  } else if (classification === "bounced") {
+    prospect.status = "bounced";
+    prospect.outcome = "bounced";
+    autoStopped = true;
+  } else {
+    prospect.status = "human_review";
+    prospect.outcome = classification;
+    autoStopped = true;
+  }
+
+  prospect.response_type = classification;
+  prospect.last_reply_content = content;
+  prospect.last_reply_at = new Date().toISOString();
+  prospect.updated_at = new Date().toISOString();
+
+  saveDb(db);
+
+  logToAgent('info', `Processed reply event for ${prospect.name} -> Classification: ${classification}. Auto-Stopped: ${autoStopped}`);
+
+  res.json({
+    success: true,
+    prospect_id: prospect.id,
+    classification,
+    auto_stopped: autoStopped,
+    message: `Event '${classification}' processed for ${prospect.name}. Automation STOPPED.`
+  });
+};
+
+app.post('/api/events', handleEventRequest);
+app.post('/events', handleEventRequest);
+app.post('/api/reply', handleEventRequest);
+app.post('/webhook/events', handleEventRequest);
+
 // 5. Automated/Manual run execution triggers
-app.post('/run', secureMiddleware, async (req, res) => {
+const handleRunExecution = async (req: express.Request, res: express.Response) => {
   const mode = req.query.mode === 'tenant' ? 'tenant' : 'founder';
   const tenantId = req.query.tenant_id ? String(req.query.tenant_id) : null;
+  const runId = "run-" + Math.random().toString(36).substring(7);
 
-  logToAgent('info', `Scouting run manually triggered. Mode: ${mode}, Tenant: ${tenantId || 'none'}`);
+  logToAgent('info', `Scouting run manually triggered [ID: ${runId}]. Mode: ${mode}, Tenant: ${tenantId || 'none'}`);
 
-  // We run the pipeline asynchronously so we don't hold the client waiting, matching the Cloudflare worker ctx.waitUntil
+  // Enqueue background processing asynchronously (simulating Cloudflare Queues)
   setTimeout(() => {
     runFullScoutingPipeline(mode, tenantId).catch((err: any) => {
-      logToAgent('error', `Pipeline execution error: ${err.message}`);
+      logToAgent('error', `Pipeline job execution error: ${err.message}`);
     });
   }, 100);
 
   res.json({
-    message: "Prospecting pipeline initiated in the background.",
+    message: "Queued prospecting jobs successfully.",
+    run_id: runId,
     mode,
     tenant_id: tenantId,
+    jobs_enqueued: 2,
     timestamp: new Date().toISOString()
   });
-});
+};
+
+app.post('/run', secureMiddleware, handleRunExecution);
+app.get('/run', secureMiddleware, handleRunExecution);
 
 
 // -----------------------------------------------------------------------------
@@ -392,30 +575,30 @@ async function runFullScoutingPipeline(mode: string, tenantId: string | null) {
 
   logToAgent('info', `Initializing scouting agents for day: ${today}...`);
 
-  // Choose cities and trades
-  let activeCities = ["Tampa, FL", "Austin, TX"];
-  let activeTrades = ["hvac", "landscaping", "lawn_care", "house_cleaning", "plumbing"];
+  const missionConfig: MissionConfig = JSON.parse(JSON.stringify(DEFAULT_FOUNDER_MISSION));
 
   if (mode === "founder") {
     if (process.env.FOUNDING_CITIES) {
-      activeCities = process.env.FOUNDING_CITIES.split(";").map((c: any) => c.trim()).filter(Boolean);
+      missionConfig.geographies = process.env.FOUNDING_CITIES.split(";").map((c: any) => c.trim()).filter(Boolean);
     }
     if (process.env.FOUNDING_TRADES) {
-      activeTrades = process.env.FOUNDING_TRADES.split(";").map((t: any) => t.trim()).filter(Boolean);
+      missionConfig.niches = process.env.FOUNDING_TRADES.split(";").map((t: any) => t.trim()).filter(Boolean);
     }
   } else if (mode === "tenant" && tenantId) {
     const config = db.tenant_config.find((c: any) => c.tenant_id === tenantId);
     if (config) {
-      activeCities = JSON.parse(config.cities_json);
-      activeTrades = JSON.parse(config.trades_json);
+      missionConfig.geographies = JSON.parse(config.cities_json);
+      missionConfig.niches = JSON.parse(config.trades_json);
+      missionConfig.mode = "tenant";
+      missionConfig.target = `tenant_${tenantId}_customers`;
     }
   }
 
   // Pick one city and two trades to prospect today
   const seedHash = Math.abs(hashCode(today));
-  const chosenCity = activeCities[seedHash % activeCities.length];
-  const chosenTrade1 = activeTrades[(seedHash + 1) % activeTrades.length];
-  const chosenTrade2 = activeTrades[(seedHash + 2) % activeTrades.length];
+  const chosenCity = missionConfig.geographies[seedHash % missionConfig.geographies.length];
+  const chosenTrade1 = missionConfig.niches[(seedHash + 1) % missionConfig.niches.length];
+  const chosenTrade2 = missionConfig.niches[(seedHash + 2) % missionConfig.niches.length];
   const chosenTrades = Array.from(new Set([chosenTrade1, chosenTrade2]));
 
   logToAgent('info', `Target parameters locked: ${chosenCity} on trades: [${chosenTrades.join(', ')}]`);
@@ -442,24 +625,29 @@ async function runFullScoutingPipeline(mode: string, tenantId: string | null) {
   // Iterate and process
   for (const b of fetched) {
     try {
-      // Suppression check
-      const suppressKey = `${b.name.toLowerCase()}_${b.city.toLowerCase()}`.replace(/\s+/g, "_");
-      const isNameSuppressed = db.suppression.some((s: any) => s.key === suppressKey);
-      if (isNameSuppressed) {
-        logToAgent('warn', `Suppression hit: Skipping "${b.name}" due to Name+City match.`);
+      // 1. Generate composite identity key
+      const identityKey = generateIdentityKey(b.email, b.website, b.phone, b.name, chosenCity);
+
+      // 2. Full composite suppression check
+      const suppression = checkSuppressedComposite(db, b.email, b.website, b.phone, b.name, chosenCity);
+      if (suppression) {
+        logToAgent('warn', `Suppression match: Skipping candidate "${b.name}": ${suppression.reason}`);
         continue;
       }
 
-      if (b.website) {
-        const dom = getDomain(b.website);
-        if (dom && db.suppression.some((s: any) => s.key === dom.toLowerCase())) {
-          logToAgent('warn', `Suppression hit: Skipping domain "${dom}" (already prospected).`);
+      // 3. Composite duplicate & cooldown check
+      const overlap = findExistingProspectOverlap(db, b.email, b.website, b.phone, b.name, chosenCity);
+      if (overlap) {
+        if (isCooldownActive(overlap.overlap.cooldown_until)) {
+          logToAgent('warn', `Cooldown active for "${b.name}" until ${overlap.overlap.cooldown_until}. Skipping.`);
           continue;
         }
+        logToAgent('warn', `Dedupe match: Candidate "${b.name}" already exists (${overlap.reason}). Skipping.`);
+        continue;
       }
 
       // Scraping Website Sim
-      logToAgent('info', `[Enriching] Scraping website metadata for: ${b.name}`);
+      logToAgent('info', `[Enriching] Scraping website metadata and signals for: ${b.name}`);
       let emailCandidate = b.email || null;
       let phoneCandidate = b.phone || null;
 
@@ -469,7 +657,6 @@ async function runFullScoutingPipeline(mode: string, tenantId: string | null) {
         if (process.env.HUNTER_API_KEY) {
           logToAgent('info', `[Hunter.io] Looking up emails for domain: ${b.website}`);
           try {
-            // Emulate or run actual Hunter API call
             const dom = getDomain(b.website);
             const hunterRes = await fetch(`https://api.hunter.io/v2/domain-search?domain=${dom}&api_key=${process.env.HUNTER_API_KEY}`);
             if (hunterRes.ok) {
@@ -484,7 +671,6 @@ async function runFullScoutingPipeline(mode: string, tenantId: string | null) {
             errors.push(`Hunter query failed: ${e.message}`);
           }
         } else {
-          // Emulated random Hunter find (since it's a simulation of the Worker behavior)
           const dom = getDomain(b.website);
           emailCandidate = `info@${dom}`;
           logToAgent('info', `[Hunter.io Simulated] Resolved business email: ${emailCandidate}`);
@@ -510,33 +696,60 @@ async function runFullScoutingPipeline(mode: string, tenantId: string | null) {
         }
       }
 
-      // Score
-      let score = 0;
-      if (b.website) score += 25;
-      if (emailCandidate) {
-        score += 35;
-        if (/^(info|contact|office|hello|sales|support)@/i.test(emailCandidate)) {
-          score += 10;
-        }
-      }
-      if (phoneCandidate) score += 15;
-      if (["plumbing", "hvac", "landscaping", "lawn_care"].includes(b.trade.toLowerCase())) {
-        score += 15;
+      // Generate simulated website scraping signals
+      const signals = getMockSignals(b.name, b.trade);
+      
+      // Determine Bvelt Angle based on signals
+      let bveltAngle = "missed_calls";
+      if (signals.emergency) {
+        bveltAngle = "after_hours";
+      } else if (signals.sms_gap) {
+        bveltAngle = "sms_gap";
+      } else if (signals.quote_request || signals.estimate_language) {
+        bveltAngle = "quote_followup";
+      } else if (signals.lead_capture || signals.multiple_areas) {
+        bveltAngle = "lead_reactivation";
       }
 
+      const isPriorityCity = missionConfig.geographies.some(c => c.toLowerCase().includes(chosenCity.split(',')[0].toLowerCase()));
+      const isPriorityTrade = missionConfig.niches.includes(b.trade.toLowerCase());
+      const variantId = (hashCode(b.name + chosenCity) % 2 === 0) ? "missed_calls" : "dormant_leads";
+
+      // Calculate score with correct multi-factor formula
+      const { totalScore, breakdown, confidence, evidenceSummary } = calculateMultiFactorScore(
+        b,
+        emailCandidate,
+        true, // validated
+        phoneCandidate,
+        isPriorityCity,
+        isPriorityTrade,
+        {}, // learning fallback
+        signals
+      );
+
       const prospectId = "prospect-" + Math.random().toString(36).substring(7);
+
+      const signalsStatus: Record<string, string> = {};
+      const signalKeys = ["contact_form", "quote_request", "booking", "call_cta", "sms_gap", "emergency", "multiple_areas", "specific_landing_pages", "estimate_language", "lead_capture"];
+      for (const key of signalKeys) {
+        if (!b.website) {
+          signalsStatus[key] = "unknown";
+        } else {
+          signalsStatus[key] = signals[key as keyof typeof signals] ? "detected" : "not_detected";
+        }
+      }
 
       const signalMetadata = {
         scraped_phone: phoneCandidate,
         scraped_email: emailCandidate,
-        has_socials: Math.random() > 0.4,
-        score_breakdown: {
-          website: b.website ? 25 : 0,
-          email: emailCandidate ? 35 : 0,
-          is_business_email: emailCandidate && /^(info|contact|office|hello|sales)@/i.test(emailCandidate) ? 10 : 0,
-          phone: phoneCandidate ? 15 : 0,
-          trade_relevance: 15
-        }
+        is_priority_city: isPriorityCity,
+        is_priority_trade: isPriorityTrade,
+        variant_id: variantId,
+        score_breakdown: breakdown,
+        signals: signalsStatus,
+        bvelt_angle: bveltAngle,
+        confidence: confidence,
+        evidence_summary: evidenceSummary
       };
 
       const finalProspect = {
@@ -549,10 +762,12 @@ async function runFullScoutingPipeline(mode: string, tenantId: string | null) {
         website: b.website || null,
         phone: phoneCandidate || null,
         email: emailCandidate || null,
-        score,
+        score: totalScore,
         signals_json: JSON.stringify(signalMetadata),
         draft_subject: "",
         draft_body: "",
+        bvelt_angle: bveltAngle,
+        identity_key: identityKey,
         status: emailCandidate ? "enriched" : "discovered",
         source: "bizdata",
         created_at: new Date().toISOString(),
@@ -575,7 +790,7 @@ async function runFullScoutingPipeline(mode: string, tenantId: string | null) {
   // Write copy for final drafts
   for (const p of topN) {
     if (aiCallsCount >= 15) {
-      const fallback = getFallbackCopy(p.name, p.trade, p.city);
+      const fallback = getTradePsychologyFallback(p.name, p.trade, p.city, p.bvelt_angle);
       p.draft_subject = fallback.subject;
       p.draft_body = fallback.body;
       p.status = "drafted";
@@ -584,7 +799,7 @@ async function runFullScoutingPipeline(mode: string, tenantId: string | null) {
     }
 
     aiCallsCount++;
-    logToAgent('info', `[LLM Redactor] Generating tailored Bvelt outreach copy for: ${p.name}`);
+    logToAgent('info', `[LLM Redactor] Generating tailored ${p.bvelt_angle} outreach copy for: ${p.name}`);
 
     // If live API key is set, we can query Groq / Gemini. Otherwise simulate beautifully
     const useLiveKeys = process.env.GROQ_API_KEY || process.env.GEMINI_FOUNDER_API_KEY;
@@ -598,7 +813,7 @@ async function runFullScoutingPipeline(mode: string, tenantId: string | null) {
         logToAgent('success', `[LLM Redactor] Custom copy drafted successfully via AI.`);
       } catch (err: any) {
         logToAgent('warn', `AI Copywriter threw error: ${err.message}. Using fallback layout.`);
-        const fallback = getFallbackCopy(p.name, p.trade, p.city);
+        const fallback = getTradePsychologyFallback(p.name, p.trade, p.city, p.bvelt_angle);
         p.draft_subject = fallback.subject;
         p.draft_body = fallback.body;
         p.status = "drafted";
@@ -606,12 +821,12 @@ async function runFullScoutingPipeline(mode: string, tenantId: string | null) {
       }
     } else {
       // Simulation copy generator with high-quality variance
-      const fallback = getFallbackCopy(p.name, p.trade, p.city);
+      const fallback = getTradePsychologyFallback(p.name, p.trade, p.city, p.bvelt_angle);
       p.draft_subject = fallback.subject;
       p.draft_body = fallback.body;
       p.status = "drafted";
       finalizedCount++;
-      logToAgent('success', `[LLM Redactor Emulated] High-converting proposal draft registered.`);
+      logToAgent('success', `[LLM Redactor Emulated] High-converting ${p.bvelt_angle} proposal draft registered.`);
     }
   }
 
@@ -649,30 +864,280 @@ async function runFullScoutingPipeline(mode: string, tenantId: string | null) {
   logToAgent('success', `Autonomous radar scan completed successfully for day: ${today}. run_id: ${runId}`);
 }
 
-function getFallbackCopy(name: string, trade: string, city: string): { subject: string; body: string } {
-  return {
-    subject: `Helping ${name} recover missed ${trade} leads in ${city}`,
-    body: `Hi ${name} team,\n\nI noticed your great work offering ${trade} services in ${city}.\n\nWhen busy handling jobs on-site, it's incredibly easy to miss incoming client calls and leads. Bvelt is a simple app that automatically re-engages missed leads and recovers lost jobs for contractors via fast, automatic SMS.\n\nTake a look at how we help contractors win back clients at https://bvelt.app\n\nBest regards,\nBvelt Team\n\nReply STOP to opt out`
-  };
+function generateIdentityKey(
+  email: string | null,
+  website: string | null,
+  phone: string | null,
+  name: string,
+  city: string
+): string {
+  if (website) {
+    const dom = getDomain(website);
+    if (dom) return `domain:${dom}`;
+  }
+  if (email) {
+    return `email:${email.toLowerCase().trim()}`;
+  }
+  if (phone) {
+    return `phone:${phone.replace(/[^0-9]/g, "")}`;
+  }
+  const normNameCity = `${name.toLowerCase().trim()}_${city.toLowerCase().trim()}`.replace(/\s+/g, "_");
+  return `name_city:${normNameCity}`;
 }
 
-// Generate real AI copy via APIs from Node backend
-async function generateRealAICopy(prospect: any): Promise<{ subject: string; body: string }> {
-  const prompt = `
-    Write a short cold email outreach draft for this local business:
-    Name: ${prospect.name}
-    City: ${prospect.city}
-    Trade: ${prospect.trade}
-    Website: ${prospect.website || "No site"}
+function checkSuppressedComposite(
+  db: any,
+  email: string | null,
+  website: string | null,
+  phone: string | null,
+  name: string,
+  city: string
+): { suppressed: boolean; reason: string } | null {
+  const keys: string[] = [];
+  if (email) keys.push(email.toLowerCase().trim());
+  if (website) {
+    const dom = getDomain(website);
+    if (dom) keys.push(dom.toLowerCase().trim());
+  }
+  if (phone) keys.push(phone.replace(/[^0-9]/g, ""));
+  keys.push(`${name.toLowerCase().trim()}_${city.toLowerCase().trim()}`.replace(/\s+/g, "_"));
 
-    INSTRUCTIONS:
-    1. Language: English. Keep it conversational and short.
-    2. Length: Under 120 words total. No fluff, no formal greetings.
-    3. State a concrete trade signal.
-    4. State what Bvelt does in EXACTLY one sentence: "Bvelt is a simple app that automatically re-engages missed leads and recovers lost jobs for contractors."
-    5. Call to action: Click/reply to learn more, referencing https://bvelt.app.
-    6. Do NOT promise guaranteed money, "massive wealth", or risk-free millions. Keep it grounded and practical.
-    7. Always end the email body with this exact footer text on a new line: "Reply STOP to opt out" (without quotes).
+  for (const k of keys) {
+    const match = db.suppression.find((s: any) => s.key === k);
+    if (match) {
+      return { suppressed: true, reason: match.reason };
+    }
+  }
+  return null;
+}
+
+function findExistingProspectOverlap(
+  db: any,
+  email: string | null,
+  website: string | null,
+  phone: string | null,
+  name: string,
+  city: string
+): { overlap: any; reason: string } | null {
+  const normEmail = email ? email.toLowerCase().trim() : null;
+  const normDomain = website ? getDomain(website) : null;
+  const normPhone = phone ? phone.replace(/[^0-9]/g, "") : null;
+
+  if (normEmail) {
+    const match = db.prospects.find((p: any) => p.email && p.email.toLowerCase() === normEmail);
+    if (match) return { overlap: match, reason: "Same email match: " + normEmail };
+  }
+
+  if (normDomain) {
+    const match = db.prospects.find((p: any) => p.website && getDomain(p.website) === normDomain);
+    if (match) return { overlap: match, reason: "Same website domain match: " + normDomain };
+  }
+
+  if (normPhone) {
+    const match = db.prospects.find((p: any) => p.phone && p.phone.replace(/[^0-9]/g, "") === normPhone);
+    if (match) return { overlap: match, reason: "Same phone number match: " + normPhone };
+  }
+
+  const matchNameCity = db.prospects.find((p: any) => p.name.toLowerCase() === name.toLowerCase() && p.city.toLowerCase() === city.toLowerCase());
+  if (matchNameCity) {
+    return { overlap: matchNameCity, reason: "Same business name and city match" };
+  }
+
+  return null;
+}
+
+function isCooldownActive(cooldownUntil: string | null): boolean {
+  if (!cooldownUntil) return false;
+  return new Date(cooldownUntil).getTime() > Date.now();
+}
+
+// Simulated Website Signals Heuristic Generator for Mock DB
+function getMockSignals(name: string, trade: string): Record<string, boolean> {
+  const norm = name.toLowerCase();
+  const isHvacOrPlumbing = ["hvac", "plumbing"].includes(trade.toLowerCase());
+  const isLandscapingOrLawn = ["landscaping", "lawn_care"].includes(trade.toLowerCase());
+  const isCleaning = ["house_cleaning", "pool_cleaning"].includes(trade.toLowerCase());
+
+  const signals = {
+    contact_form: true,
+    quote_request: isLandscapingOrLawn || isHvacOrPlumbing,
+    booking: isCleaning,
+    call_cta: true,
+    sms_gap: !norm.includes("text") && !norm.includes("sms"),
+    emergency: isHvacOrPlumbing || norm.includes("expert") || norm.includes("specialist"),
+    multiple_areas: isLandscapingOrLawn || norm.includes("bay") || norm.includes("texas") || norm.includes("state"),
+    specific_landing_pages: isHvacOrPlumbing || norm.includes("pro"),
+    estimate_language: isLandscapingOrLawn || isHvacOrPlumbing || norm.includes("pros"),
+    lead_capture: isCleaning || norm.includes("elite")
+  };
+
+  return signals;
+}
+
+// Multi-Factor Scoring Engine matching worker.ts
+function calculateMultiFactorScore(
+  item: any,
+  email: string | null,
+  isEmailValidated: boolean,
+  phone: string | null,
+  isPriorityCity: boolean,
+  isPriorityTrade: boolean,
+  learningStats: Record<string, number>,
+  signals: Record<string, boolean>
+): { totalScore: number; breakdown: Record<string, number>; confidence: number; evidenceSummary: string } {
+  // 1. CONTACTABILITY (Max 25 pts)
+  let contactabilityScore = 0;
+  if (item.website) contactabilityScore += 5;
+  if (email) {
+    contactabilityScore += isEmailValidated ? 12 : 6;
+  }
+  if (phone) contactabilityScore += 5;
+  
+  // Contact quality (professional domain vs generic email)
+  if (email && !email.endsWith("@gmail.com") && !email.endsWith("@yahoo.com") && !email.endsWith("@hotmail.com")) {
+    contactabilityScore += 3;
+  }
+  contactabilityScore = Math.min(25, contactabilityScore);
+
+  // 2. REVENUE_LEAK (Max 40 pts)
+  let painScore = 0;
+  const evidenceList: string[] = [];
+  
+  if (signals.emergency) {
+    painScore += 10;
+    evidenceList.push("24/7 or emergency support language detected");
+  }
+  if (signals.quote_request || signals.estimate_language) {
+    painScore += 10;
+    evidenceList.push("Online quote/estimate request option present");
+  }
+  if (signals.sms_gap) {
+    painScore += 10;
+    evidenceList.push("SMS/text message CTA absent alongside voice CTA");
+  }
+  if (signals.multiple_areas || signals.specific_landing_pages) {
+    painScore += 5;
+    evidenceList.push("Multi-area service coverage or custom service pages");
+  }
+  if (signals.lead_capture) {
+    painScore += 5;
+    evidenceList.push("Newsletter signup or static lead-capture form");
+  }
+  painScore = Math.min(40, painScore);
+
+  // 3. BVELT_FIT (Max 25 pts)
+  let bveltFitScore = 0;
+  if (isPriorityTrade) {
+    bveltFitScore += 15;
+  } else {
+    bveltFitScore += 5;
+  }
+  if (signals.contact_form || signals.quote_request || signals.booking) {
+    bveltFitScore += 10;
+  }
+  bveltFitScore = Math.min(25, bveltFitScore);
+
+  // 4. DATA_CONFIDENCE (Max 10 pts)
+  let dataConfidenceScore = 0;
+  if (item.website) dataConfidenceScore += 5;
+  if (email && isEmailValidated) dataConfidenceScore += 5;
+  dataConfidenceScore = Math.min(10, dataConfidenceScore);
+
+  // 5. Normalization (0-100 total sum)
+  const totalScore = contactabilityScore + painScore + bveltFitScore + dataConfidenceScore;
+  const confidencePercent = dataConfidenceScore * 10; // 0-100 confidence value
+
+  const evidenceSummary = evidenceList.length > 0 
+    ? `Evidence: ${evidenceList.join(", ")}.`
+    : "No strong friction signals observed yet.";
+
+  // Keep backwards compatibility keys for old dashboard references
+  const breakdown = {
+    contactability: contactabilityScore,
+    revenue_leak: painScore,
+    bvelt_fit: bveltFitScore,
+    confidence: confidencePercent,
+    website: item.website ? 25 : 0,
+    email_validated: email ? (isEmailValidated ? 10 : 5) : 0,
+    phone: phone ? 5 : 0,
+    priority_trade: isPriorityTrade ? 12 : 5,
+    priority_city: isPriorityCity ? 10 : 0,
+    learning_feedback_boost: 0
+  };
+
+  return { totalScore, breakdown, confidence: confidencePercent, evidenceSummary };
+}
+
+function getTradePsychologyFallback(
+  name: string, 
+  trade: string, 
+  city: string, 
+  bveltAngle: string
+): { subject: string; body: string } {
+  const cTrade = trade.replace('_', ' ');
+  if (bveltAngle === "after_hours") {
+    return {
+      subject: `Emergency ${cTrade} service at ${name}?`,
+      body: `Hi ${name} team,\n\nI noticed you advertise 24/7 emergency ${cTrade} service in ${city} and direct customers to call your phone line. What happens to those emergency calls when your team is already out on an active job?\n\nBvelt is a simple app that automatically re-engages missed leads and recovers lost jobs for contractors via fast, automated SMS.\n\nShould I send over a quick 2-minute demo link?\n\nBest regards,\nBvelt Team\n\nReply STOP to opt out`
+    };
+  } else if (bveltAngle === "sms_gap") {
+    return {
+      subject: `No text option for ${name} customers?`,
+      body: `Hi ${name} team,\n\nI came across your site and noticed your phone line prominently displayed for ${cTrade} services in ${city}, but didn't notice any text-back or SMS option. What percentage of potential customers drop off because they'd prefer to text instead of call?\n\nBvelt is a simple app that automatically re-engages missed leads and recovers lost jobs for contractors via fast, automated SMS.\n\nIf you'd like to see how it works in 2 minutes → https://bvelt.app\n\nBest regards,\nBvelt Team\n\nReply STOP to opt out`
+    };
+  } else if (bveltAngle === "quote_followup") {
+    return {
+      subject: `Following up on ${cTrade} estimates at ${name}`,
+      body: `Hi ${name} team,\n\nI noticed you have an online quote request form for your ${cTrade} services in ${city}. Once you send out those pricing estimates, how are you currently following up with those prospects to lock them in?\n\nBvelt is a simple app that automatically re-engages missed leads and recovers lost jobs for contractors via fast, automated SMS.\n\nShould I send over a quick 2-minute demo link?\n\nBest regards,\nBvelt Team\n\nReply STOP to opt out`
+    };
+  } else if (bveltAngle === "lead_reactivation") {
+    return {
+      subject: `Reviving unconverted ${cTrade} leads in ${city}`,
+      body: `Hi ${name} team,\n\nI noticed you serve multiple areas around ${city} and have a lead capture form on your website. What happens to those cold or unconverted ${cTrade} leads once they leave your immediate pipeline?\n\nBvelt is a simple app that automatically re-engages missed leads and recovers lost jobs for contractors via fast, automated SMS.\n\nIf you'd like to see how it works in 2 minutes → https://bvelt.app\n\nBest regards,\nBvelt Team\n\nReply STOP to opt out`
+    };
+  } else {
+    return {
+      subject: `Quick question regarding missed ${cTrade} calls at ${name}`,
+      body: `Hi ${name} team,\n\nI noticed your great ${cTrade} work in ${city}. When your team is busy on a call or under a sink, what happens to incoming client calls that go straight to voicemail?\n\nBvelt is a simple app that automatically re-engages missed leads and recovers lost jobs for contractors via fast, automated SMS.\n\nIf you'd like to see how it works in 2 minutes → https://bvelt.app\n\nBest regards,\nBvelt Team\n\nReply STOP to opt out`
+    };
+  }
+}
+
+// Generate real AI copy via APIs from Node backend matching trade psychology rules
+async function generateRealAICopy(prospect: any): Promise<{ subject: string; body: string }> {
+  const bveltAngle = prospect.bvelt_angle || "missed_calls";
+
+  let angleFocus = "";
+  if (bveltAngle === "after_hours") {
+    angleFocus = "ANGLE: AFTER-HOURS EMERGENCY. I noticed you advertise 24/7 emergency support but direct visitors exclusively to a phone line. Ask what happens to those high-margin emergency calls when your technicians are already out on another active job.";
+  } else if (bveltAngle === "sms_gap") {
+    angleFocus = "ANGLE: SMS/TEXT GAP. I noticed you display a phone line prominently, but don't offer any text-back or SMS communication options for customers. Ask what percentage of consumers they might be losing because people prefer to text instead of making a voice call.";
+  } else if (bveltAngle === "quote_followup") {
+    angleFocus = "ANGLE: QUOTE/ESTIMATE FOLLOW-UP. I noticed you have an online quote request form or advertise free estimates. Ask how they are currently following up on sent estimates to ensure they lock in those pending jobs.";
+  } else if (bveltAngle === "lead_reactivation") {
+    angleFocus = "ANGLE: LEAD REACTIVATION. I noticed you serve multiple geographic service areas and have lead forms. Ask what happens to cold or unconverted inquiries once they drop out of their active pipeline.";
+  } else {
+    angleFocus = "ANGLE: MISSED CALLS. I noticed your great local contractor profile. Ask what happens to incoming client calls that go straight to voicemail when technicians are busy on-site or under a sink.";
+  }
+
+  const prompt = `
+    You are an expert sales copywriter writing cold outreach to contractor owners for Bvelt (https://bvelt.app).
+    
+    Target:
+    - Business: ${prospect.name}
+    - Location: ${prospect.city}
+    - Trade: ${prospect.trade}
+
+    Outreach Angle Instructions:
+    ${angleFocus}
+
+    RULES:
+    1. Length: Exactly 90 to 110 words total. Punchy, authentic, and contractor-friendly.
+    2. First Line: Formulate a concrete, respectful observation or question based on the ANGLE instructions above (e.g., "I noticed you advertise 24/7 emergency HVAC support in Tampa but only direct visitors to call. What happens when the team is already out on a call?"). DO NOT state or claim that they are definitely losing calls or money as a proven fact—ask a question instead!
+    3. Exactly ONE sentence describing what Bvelt does: "Bvelt is a simple app that automatically re-engages missed leads and recovers lost jobs for contractors via fast, automated SMS."
+    4. Soft Call-to-Action: "If you'd like to see how it works in 2 minutes → https://bvelt.app" or "Should I send over a quick 2-minute demo link?".
+    5. Zero hype, zero guaranteed dollar promises, zero scammy claims. Keep it highly practical.
+    6. MANDATORY FOOTER: Always end the email body with this exact line: "Reply STOP to opt out"
 
     Provide your output in strict JSON format matching exactly this structure:
     {

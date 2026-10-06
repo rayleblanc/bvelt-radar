@@ -26,6 +26,16 @@ database_name = "bvelt-radar-db"
 database_id = "f1b1f311-c1e4-4318-be0f-aa84c38e0cc1"
 migrations_dir = "migrations"
 
+# Cloudflare Queues Producer & Consumer for background job processing
+[[queues.producers]]
+queue = "bvelt-radar-queue"
+binding = "RADAR_QUEUE"
+
+[[queues.consumers]]
+queue = "bvelt-radar-queue"
+max_batch_size = 5
+max_batch_timeout = 5
+
 # Automated daily prospecting scheduled cron (runs once a day at 12:00 PM UTC)
 [triggers]
 crons = ["0 12 * * *"]

@@ -9,7 +9,6 @@ import React, { useState, useEffect } from 'react';
 import { 
   Radar, 
   Settings, 
-  Terminal, 
   ShieldAlert, 
   Sparkles, 
   CheckCircle2, 
@@ -25,7 +24,13 @@ import {
   Check,
   ChevronDown,
   ChevronUp,
-  Download
+  Download,
+  ExternalLink,
+  Phone,
+  Mail,
+  FileText,
+  Clock,
+  Ban
 } from 'lucide-react';
 
 interface Prospect {
@@ -37,10 +42,20 @@ interface Prospect {
   phone: string | null;
   email: string | null;
   score: number;
+  signals_json: string;
+  score_breakdown: string;
   draft_subject: string;
   draft_body: string;
+  bvelt_angle: string;
   status: string;
+  outcome?: string;
+  response_type?: string;
+  last_reply_content?: string;
+  suppression_reason?: string | null;
+  cooldown_until?: string | null;
+  last_contact_at?: string | null;
   created_at: string;
+  updated_at?: string;
 }
 
 interface Health {
@@ -48,6 +63,12 @@ interface Health {
   prospects_today: number;
   hunter_remaining_estimate: number;
   last_run: string | null;
+  queue?: {
+    pending_or_processing: number;
+    completed_jobs: number;
+    failed_jobs: number;
+    last_error: string | null;
+  };
   timestamp: string;
 }
 
@@ -57,6 +78,8 @@ interface StatsSummary {
   suppression_list_size: number;
 }
 
+export type StatusCategory = 'ALL' | 'SCOUTED' | 'QUALIFIED' | 'APPROVED' | 'QUEUED' | 'SENT' | 'REPLIED' | 'SUPPRESSED' | 'BLOCKED';
+
 export default function App() {
   // Service configuration stored in localStorage
   const [apiKey, setApiKey] = useState(() => localStorage.getItem('FOUNDER_SERVICE_KEY') || 'FOUNDER_SERVICE_KEY_LOCAL');
@@ -65,12 +88,17 @@ export default function App() {
   // Pipeline/Telemetries data states
   const [health, setHealth] = useState<Health | null>(null);
   const [stats, setStats] = useState<StatsSummary | null>(null);
-  const [recentDrafts, setRecentDrafts] = useState<Prospect[]>([]);
+  const [prospects, setProspects] = useState<Prospect[]>([]);
+  const [activeFilter, setActiveFilter] = useState<StatusCategory>('ALL');
   const [loading, setLoading] = useState(true);
   const [errorState, setErrorState] = useState<string | null>(null);
 
-  // App UI states
+  // Run execution states
   const [isScrubbing, setIsScrubbing] = useState(false);
+  const [runState, setRunState] = useState<'idle' | 'queued' | 'running' | 'completed' | 'failed'>('idle');
+  const [lastRunError, setLastRunError] = useState<string | null>(null);
+
+  // App UI states
   const [showConfig, setShowConfig] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [inspectedProspect, setInspectedProspect] = useState<Prospect | null>(null);
@@ -83,15 +111,18 @@ export default function App() {
 
   // Load all telemetry endpoints
   const fetchTelemetry = async () => {
-    setErrorState(null);
     try {
-      // 1. GET /health
+      // 1. GET /health (public)
       const healthRes = await fetch(`${apiUrl}/health`).catch(() => null);
       if (!healthRes || !healthRes.ok) {
         throw new Error('No se pudo conectar con el motor de Bvelt Radar.');
       }
-      const healthData = await healthRes.json();
+      const healthData: Health = await healthRes.json();
       setHealth(healthData);
+
+      if (healthData.queue?.last_error) {
+        setLastRunError(healthData.queue.last_error);
+      }
 
       // 2. GET /stats
       const statsRes = await fetch(`${apiUrl}/stats`, {
@@ -102,7 +133,6 @@ export default function App() {
         const statsData = await statsRes.json();
         setStats(statsData);
       } else {
-        // Fallback or request credentials trigger
         if (statsRes?.status === 401) {
           setErrorState("Credenciales inválidas. Verifica tu FOUNDER_SERVICE_KEY.");
         } else {
@@ -110,17 +140,18 @@ export default function App() {
         }
       }
 
-      // 3. GET /api/prospects (Recent drafts)
-      const prospectsRes = await fetch(`${apiUrl}/api/prospects`).catch(() => null);
+      // 3. GET /prospects (SINGLE REAL PRODUCTION ROUTE)
+      const prospectsRes = await fetch(`${apiUrl}/prospects`, {
+        headers: { 'Authorization': `Bearer ${apiKey}` }
+      }).catch(() => null);
+      
       if (prospectsRes && prospectsRes.ok) {
         const pList: Prospect[] = await prospectsRes.json();
-        // Filter and sort for drafted/notified/sent ones
-        const sorted = pList
-          .filter(p => p.status === 'drafted' || p.status === 'notified' || p.status === 'sent')
-          .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-        setRecentDrafts(sorted.slice(0, 10)); // Top 10 most recent
+        const sorted = pList.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+        setProspects(sorted);
       }
 
+      setErrorState(null);
       setLoading(false);
     } catch (err: any) {
       setErrorState(err.message || 'Error de conexión.');
@@ -167,26 +198,95 @@ export default function App() {
     setTimeout(() => setCopiedId(null), 1500);
   };
 
-  // Run scouting pipeline manually
+  // Run decision state mutate via endpoint
+  const submitDecision = async (prospectId: string, action: 'sent' | 'discard' | 'suppress') => {
+    try {
+      const res = await fetch(`${apiUrl}/decision`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`
+        },
+        body: JSON.stringify({ id: prospectId, action })
+      });
+      if (res.ok) {
+        fetchTelemetry();
+        if (inspectedProspect && inspectedProspect.id === prospectId) {
+          setInspectedProspect(null);
+        }
+      }
+    } catch (e) {
+      alert("Error al enviar la decisión: " + e);
+    }
+  };
+
+  // Instant Trigger + Non-blocking Light Polling Pipeline Execution
   const executeRadarScout = async () => {
     setIsScrubbing(true);
+    setRunState('queued');
+    setLastRunError(null);
+
     try {
-      const res = await fetch(`${apiUrl}/run?mode=founder`, {
+      // 1. Send POST /run - returns IMMEDIATELY without waiting
+      const startRes = await fetch(`${apiUrl}/run?mode=founder`, {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${apiKey}` }
       });
-      if (res.ok) {
-        // Success feedback
-        setTimeout(() => {
-          setIsScrubbing(false);
-          fetchTelemetry();
-        }, 5000); // 5s wait time
-      } else {
-        alert("Fallo al iniciar el radar.");
-        setIsScrubbing(false);
+      
+      if (!startRes.ok) {
+        const errJson = await startRes.json().catch(() => ({ error: 'Fallo al iniciar el run.' }));
+        throw new Error(errJson.error || 'Fallo al iniciar el run.');
       }
-    } catch (e) {
-      alert("Error ejecutando pipeline: " + e);
+
+      setRunState('running');
+
+      // 2. Light background polling of /health to track Cloudflare Queue progress
+      let pollCount = 0;
+      const maxPolls = 15; // 30 seconds max UI polling loop
+      
+      const interval = setInterval(async () => {
+        pollCount++;
+        try {
+          const checkRes = await fetch(`${apiUrl}/health`);
+          if (checkRes.ok) {
+            const checkData: Health = await checkRes.json();
+            setHealth(checkData);
+
+            if (checkData.queue) {
+              if (checkData.queue.last_error) {
+                setLastRunError(checkData.queue.last_error);
+              }
+
+              if (checkData.queue.pending_or_processing === 0) {
+                clearInterval(interval);
+                setIsScrubbing(false);
+                if (checkData.queue.failed_jobs > 0 && checkData.queue.completed_jobs === 0) {
+                  setRunState('failed');
+                } else {
+                  setRunState('completed');
+                }
+                fetchTelemetry(); // Refresh prospects
+                return;
+              } else {
+                setRunState('running');
+              }
+            }
+          }
+        } catch (e) {
+          console.warn("Error polling health status: ", e);
+        }
+
+        if (pollCount >= maxPolls) {
+          clearInterval(interval);
+          setIsScrubbing(false);
+          setRunState('completed'); // Work continues on Cloudflare Workers Queues
+          fetchTelemetry();
+        }
+      }, 2000);
+
+    } catch (e: any) {
+      setLastRunError(e.message || String(e));
+      setRunState('failed');
       setIsScrubbing(false);
     }
   };
@@ -203,34 +303,115 @@ export default function App() {
     }
   };
 
-  // Compute status metrics directly from stats object
-  const getCountByStatus = (status: string) => {
-    if (!stats) return 0;
-    const item = stats.prospects_by_status.find(s => s.status === status);
-    return item ? item.count : 0;
+  // Status Category Categorizer & Badge Styles (8 Required States)
+  const getCategory = (p: Prospect): StatusCategory => {
+    const s = (p.status || '').toLowerCase();
+    
+    if (p.cooldown_until && new Date(p.cooldown_until).getTime() > Date.now()) {
+      return 'BLOCKED';
+    }
+    if (p.suppression_reason || s === 'suppressed' || s === 'unsubscribed') {
+      return 'SUPPRESSED';
+    }
+    if (s === 'blocked' || s === 'hold' || s === 'discarded') {
+      return 'BLOCKED';
+    }
+    if (s === 'replied' || s === 'human_review' || s === 'positive' || s === 'question') {
+      return 'REPLIED';
+    }
+    if (s === 'sent' || s === 'delivered') {
+      return 'SENT';
+    }
+    if (s === 'queued' || s === 'notified' || s === 'pending') {
+      return 'QUEUED';
+    }
+    if (s === 'approved' || s === 'drafted') {
+      return 'APPROVED';
+    }
+    if (s === 'qualified' || s === 'scored') {
+      return 'QUALIFIED';
+    }
+    return 'SCOUTED';
   };
 
-  // Render state helper
-  const getEngineState = () => {
-    if (!health) return { label: 'Desconectado', color: 'bg-red-500 text-red-50', border: 'border-red-500/20' };
-    
-    // Check if pipeline has processed today
-    const hasRunToday = health.prospects_today > 0;
-    if (health.status === 'healthy') {
-      if (hasRunToday) {
-        return { label: 'Radar Activo (Corrida OK)', color: 'bg-emerald-500/10 text-emerald-400', border: 'border-emerald-500/20' };
-      }
-      return { label: 'Radar Listo (Sin Corrida Hoy)', color: 'bg-amber-500/10 text-amber-400', border: 'border-amber-500/20' };
+  const getStatusBadge = (p: Prospect) => {
+    const category = getCategory(p);
+    switch (category) {
+      case 'SUPPRESSED':
+        return { label: 'SUPPRESSED', color: 'bg-rose-950/50 text-rose-400 border-rose-800/40' };
+      case 'BLOCKED':
+        return { label: p.cooldown_until ? 'COOLDOWN' : 'BLOCKED', color: 'bg-zinc-800/80 text-zinc-400 border-zinc-700/40' };
+      case 'REPLIED':
+        return { label: 'REPLIED', color: 'bg-orange-950/50 text-orange-400 border-orange-800/40' };
+      case 'SENT':
+        return { label: 'SENT', color: 'bg-emerald-950/50 text-emerald-400 border-emerald-800/40' };
+      case 'QUEUED':
+        return { label: 'QUEUED', color: 'bg-blue-950/50 text-blue-400 border-blue-800/40' };
+      case 'APPROVED':
+        return { label: 'APPROVED', color: 'bg-indigo-950/50 text-indigo-400 border-indigo-800/40' };
+      case 'QUALIFIED':
+        return { label: 'QUALIFIED', color: 'bg-cyan-950/50 text-cyan-400 border-cyan-800/40' };
+      case 'SCOUTED':
+      default:
+        return { label: 'SCOUTED', color: 'bg-slate-900 text-slate-400 border-slate-800' };
     }
-    return { label: 'Error de Engine', color: 'bg-rose-500/10 text-rose-400', border: 'border-rose-500/20' };
+  };
+
+  // Filter prospects list based on active pill filter
+  const filteredProspects = prospects.filter(p => {
+    if (activeFilter === 'ALL') return true;
+    return getCategory(p) === activeFilter;
+  });
+
+  // Parse evidence/signals from JSON
+  const parseSignals = (prospect: Prospect): string[] => {
+    try {
+      const parsedMeta = JSON.parse(prospect.signals_json);
+      const activeSignals: string[] = [];
+      if (parsedMeta.signals) {
+        if (parsedMeta.signals.emergency) activeSignals.push("24/7 / Urgencias");
+        if (parsedMeta.signals.sms_gap) activeSignals.push("SMS Gap");
+        if (parsedMeta.signals.quote_request) activeSignals.push("Presupuesto");
+        if (parsedMeta.signals.booking) activeSignals.push("Reserva");
+        if (parsedMeta.signals.multiple_areas) activeSignals.push("Multi-área");
+        if (parsedMeta.signals.lead_capture) activeSignals.push("Captura Leads");
+        if (parsedMeta.signals.contact_form) activeSignals.push("Contacto");
+      }
+      return activeSignals.slice(0, 4);
+    } catch (e) {
+      return [];
+    }
+  };
+
+  const getEngineState = () => {
+    if (isScrubbing || runState === 'running' || runState === 'queued') {
+      return { label: `RUNNING (${runState.toUpperCase()})...`, color: 'bg-blue-500/10 text-blue-400 animate-pulse', border: 'border-blue-500/20' };
+    }
+    if (!health) {
+      return { label: 'Desconectado', color: 'bg-red-500 text-red-50', border: 'border-red-500/20' };
+    }
+    if (health.status === 'healthy') {
+      return { label: 'Radar Listo (Cloudflare Queues OK)', color: 'bg-emerald-500/10 text-emerald-400', border: 'border-emerald-500/20' };
+    }
+    return { label: 'Degradado', color: 'bg-amber-500/10 text-amber-400', border: 'border-amber-500/20' };
   };
 
   const currentEngine = getEngineState();
 
+  const getAngleLabel = (angle: string) => {
+    switch(angle) {
+      case 'after_hours': return 'After-Hours Emergency';
+      case 'sms_gap': return 'SMS Gap';
+      case 'quote_followup': return 'Quote/Estimate';
+      case 'lead_reactivation': return 'Lead Reactivation';
+      default: return 'Missed Calls';
+    }
+  };
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans select-none antialiased pb-safe">
       
-      {/* 1. Slim Header Zone (Notch & Safe Area padding) */}
+      {/* 1. Slim Header Zone */}
       <header className="px-5 pt-8 pb-4 border-b border-slate-900 bg-slate-950 flex items-center justify-between shrink-0">
         <div className="flex items-center gap-2.5">
           <div className="bg-blue-600/10 p-2 rounded-xl border border-blue-500/10">
@@ -242,7 +423,6 @@ export default function App() {
           </div>
         </div>
 
-        {/* PWA / Install action banner or indicator */}
         <div className="flex items-center gap-2">
           {!isPwaInstalled && (
             isIOS ? (
@@ -273,9 +453,9 @@ export default function App() {
         </div>
       </header>
 
-      {/* API / Local Configurations Settings Modal/Drawer */}
+      {/* Config Drawer */}
       {showConfig && (
-        <div className="bg-slate-900/90 border-b border-slate-800 p-5 space-y-4 font-mono text-xs">
+        <div className="bg-slate-900/95 border-b border-slate-800 p-5 space-y-4 font-mono text-xs">
           <h3 className="font-bold text-slate-300 text-xs">Ajustes del Fundador (Mobile Cache)</h3>
           <div className="space-y-3">
             <div>
@@ -318,16 +498,16 @@ export default function App() {
         </div>
       )}
 
-      {/* Main content scroll container */}
+      {/* Main scrolling viewport */}
       <div className="flex-1 overflow-y-auto px-5 py-4 space-y-5">
 
-        {/* Resilience error card */}
-        {errorState && (
+        {/* Connection or Run Errors */}
+        {(errorState || lastRunError) && (
           <div className="bg-rose-950/20 border border-rose-900/40 rounded-2xl p-4 flex items-start gap-3">
             <AlertTriangle className="w-5 h-5 text-rose-500 shrink-0 mt-0.5" />
             <div className="flex-1 space-y-1">
-              <h4 className="text-xs font-bold text-rose-300">Error de conexión</h4>
-              <p className="text-[11px] text-slate-400 leading-relaxed">{errorState}</p>
+              <h4 className="text-xs font-bold text-rose-300">Aviso del Sistema</h4>
+              <p className="text-[11px] text-slate-400 leading-relaxed">{lastRunError || errorState}</p>
               <button 
                 onClick={() => {
                   setLoading(true);
@@ -335,13 +515,12 @@ export default function App() {
                 }}
                 className="text-[11px] font-bold text-blue-400 flex items-center gap-1 pt-1.5"
               >
-                <RefreshCw className="w-3 h-3" /> Reintentar conexión
+                <RefreshCw className="w-3 h-3 text-blue-400 animate-spin" /> Actualizar Estado
               </button>
             </div>
           </div>
         )}
 
-        {/* App state content loader spinner */}
         {loading ? (
           <div className="flex flex-col items-center justify-center py-16 gap-3">
             <RefreshCw className="w-6 h-6 text-blue-500 animate-spin" />
@@ -349,7 +528,7 @@ export default function App() {
           </div>
         ) : (
           <>
-            {/* 2. Large Engine Status Bar */}
+            {/* Engine Status Bar */}
             <div className={`p-4 rounded-2xl border ${currentEngine.border} ${currentEngine.color} flex items-center justify-between`}>
               <div className="space-y-1">
                 <span className="text-[10px] text-slate-500 uppercase tracking-wider block font-bold">Estado del Engine</span>
@@ -370,108 +549,209 @@ export default function App() {
               </div>
             </div>
 
-            {/* 3. Single Large Action Button */}
+            {/* Action Trigger Button */}
             <button
               onClick={executeRadarScout}
               disabled={isScrubbing}
               className={`w-full h-14 min-h-[48px] rounded-2xl bg-blue-600 hover:bg-blue-500 active:scale-95 disabled:bg-slate-900 disabled:text-slate-500 font-bold text-sm tracking-wide transition-all shadow-xl shadow-blue-600/10 flex items-center justify-center gap-3`}
             >
               <RefreshCw className={`w-4 h-4 ${isScrubbing ? 'animate-spin' : ''}`} />
-              {isScrubbing ? 'BUSCANDO NEGOCIOS...' : '▶ CORRER RADAR AHORA'}
+              {isScrubbing ? 'CORRIENDO EN CLOUDFLARE...' : '▶ CORRER RADAR AHORA'}
             </button>
 
-            {/* 4. Compact 2x2 Metric Scoreboard */}
-            <div>
-              <div className="grid grid-cols-2 gap-3.5 font-mono text-slate-200">
-                <div className="bg-slate-900/40 p-4 rounded-2xl border border-slate-900">
-                  <span className="text-[10px] text-slate-500 block uppercase font-sans font-bold">Scouted</span>
-                  <span className="text-xl font-bold tracking-tight text-slate-100 tabular-nums">
-                    {stats?.runs_summary?.total_discovered || 0}
-                  </span>
-                </div>
-                <div className="bg-slate-900/40 p-4 rounded-2xl border border-slate-900">
-                  <span className="text-[10px] text-slate-500 block uppercase font-sans font-bold">Drafted</span>
-                  <span className="text-xl font-bold tracking-tight text-purple-400 tabular-nums">
-                    {getCountByStatus('drafted') + getCountByStatus('notified')}
-                  </span>
-                </div>
-                <div className="bg-slate-900/40 p-4 rounded-2xl border border-slate-900">
-                  <span className="text-[10px] text-slate-500 block uppercase font-sans font-bold">Telegram (Pending)</span>
-                  <span className="text-xl font-bold tracking-tight text-blue-400 tabular-nums">
-                    {getCountByStatus('notified')}
-                  </span>
-                </div>
-                <div className="bg-slate-900/40 p-4 rounded-2xl border border-slate-900">
-                  <span className="text-[10px] text-slate-500 block uppercase font-sans font-bold">Suppressed</span>
-                  <span className="text-xl font-bold tracking-tight text-red-400 tabular-nums">
-                    {stats?.suppression_list_size || 0}
-                  </span>
-                </div>
+            {/* Metric Scoreboard */}
+            <div className="grid grid-cols-2 gap-3.5 font-mono text-slate-200">
+              <div className="bg-slate-900/40 p-4 rounded-2xl border border-slate-900">
+                <span className="text-[10px] text-slate-500 block uppercase font-sans font-bold">Total Encontrados</span>
+                <span className="text-xl font-bold tracking-tight text-slate-100 tabular-nums">
+                  {prospects.length}
+                </span>
+              </div>
+              <div className="bg-slate-900/40 p-4 rounded-2xl border border-slate-900">
+                <span className="text-[10px] text-slate-500 block uppercase font-sans font-bold">Pendientes Aprobar</span>
+                <span className="text-xl font-bold tracking-tight text-purple-400 tabular-nums">
+                  {prospects.filter(p => getCategory(p) === 'APPROVED' || getCategory(p) === 'QUEUED').length}
+                </span>
               </div>
             </div>
 
-            {/* 5. Minimal list of recent drafts */}
+            {/* 8 Status Filter Tabs */}
             <div className="space-y-3">
-              <div className="flex items-center justify-between border-b border-slate-900 pb-2.5">
-                <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Últimos Leads Draftados</h3>
+              <div className="flex items-center justify-between border-b border-slate-900 pb-2">
+                <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Directorio de Prospectos Real</h3>
                 <Database className="w-3.5 h-3.5 text-slate-500" />
               </div>
 
-              {recentDrafts.length === 0 ? (
+              {/* Status Filter Pills */}
+              <div className="flex items-center gap-1.5 overflow-x-auto pb-1 no-scrollbar text-[10px] font-mono font-bold">
+                {(['ALL', 'SCOUTED', 'QUALIFIED', 'APPROVED', 'QUEUED', 'SENT', 'REPLIED', 'SUPPRESSED', 'BLOCKED'] as StatusCategory[]).map(cat => (
+                  <button
+                    key={cat}
+                    onClick={() => setActiveFilter(cat)}
+                    className={`px-2.5 py-1 rounded-lg border whitespace-nowrap transition-all ${
+                      activeFilter === cat 
+                        ? 'bg-blue-600 border-blue-500 text-white' 
+                        : 'bg-slate-900/60 border-slate-800 text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    {cat}
+                  </button>
+                ))}
+              </div>
+
+              {filteredProspects.length === 0 ? (
                 <div className="text-center py-10 bg-slate-900/10 rounded-2xl border border-slate-900 p-5">
                   <Info className="w-6 h-6 text-slate-600 mx-auto mb-2" />
-                  <p className="text-xs text-slate-500 leading-normal">Ningún lead procesado recientemente. Ejecuta el radar para comenzar.</p>
+                  <p className="text-xs text-slate-500 leading-normal">
+                    No se encontraron prospectos en la categoría '{activeFilter}'. Ejecuta el radar para prospectar.
+                  </p>
                 </div>
               ) : (
                 <div className="space-y-3">
-                  {recentDrafts.map(p => (
-                    <div 
-                      key={p.id}
-                      onClick={() => setInspectedProspect(inspectedProspect?.id === p.id ? null : p)}
-                      className="bg-slate-900/30 border border-slate-900 rounded-2xl p-4 space-y-3 active:bg-slate-900/50 transition-colors"
-                    >
-                      <div className="flex items-start justify-between">
-                        <div>
-                          <h4 className="text-xs font-bold text-slate-200">{p.name}</h4>
-                          <div className="flex items-center gap-1.5 text-[10px] text-slate-500 mt-0.5">
-                            <span className="uppercase text-blue-400 font-mono tracking-tight font-semibold">{p.trade}</span>
-                            <span>·</span>
-                            <span>{p.city}</span>
-                          </div>
-                        </div>
-                        <span className="text-xs font-mono font-bold text-emerald-400">
-                          {p.score}/100
-                        </span>
-                      </div>
+                  {filteredProspects.map(p => {
+                    const badge = getStatusBadge(p);
+                    const signalsList = parseSignals(p);
+                    const isExpanded = inspectedProspect?.id === p.id;
 
-                      {/* Expandable details/body viewer */}
-                      {inspectedProspect?.id === p.id && (
-                        <div className="pt-3.5 border-t border-slate-900/80 space-y-3.5" onClick={(e) => e.stopPropagation()}>
-                          <div className="bg-slate-950 p-3 rounded-xl border border-slate-900 font-mono text-[11px] text-slate-300 whitespace-pre-wrap leading-relaxed">
-                            <span className="text-slate-500 font-bold block mb-1 text-[9px] uppercase">Subject: {p.draft_subject}</span>
-                            {p.draft_body}
+                    return (
+                      <div 
+                        key={p.id}
+                        onClick={() => setInspectedProspect(isExpanded ? null : p)}
+                        className="bg-slate-900/30 border border-slate-900 rounded-2xl p-4 space-y-3 active:bg-slate-900/50 transition-colors"
+                      >
+                        {/* Upper card section */}
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="space-y-1">
+                            <div className="flex items-center gap-2">
+                              <h4 className="text-xs font-bold text-slate-100">{p.name}</h4>
+                              <span className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-bold border ${badge.color}`}>
+                                {badge.label}
+                              </span>
+                            </div>
+                            <div className="flex items-center gap-1.5 text-[10px] text-slate-500 font-mono">
+                              <span className="uppercase text-blue-400 font-semibold">{p.trade}</span>
+                              <span>·</span>
+                              <span>{p.city}</span>
+                            </div>
                           </div>
-                          
-                          <button
-                            onClick={() => copyToClipboard(p.draft_body, p.id)}
-                            className="w-full h-11 min-h-[48px] rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold flex items-center justify-center gap-2"
-                          >
-                            {copiedId === p.id ? (
-                              <>
-                                <Check className="w-4 h-4 text-emerald-400" />
-                                Copiado en Portapapeles
-                              </>
-                            ) : (
-                              <>
-                                <Copy className="w-4 h-4 text-slate-400" />
-                                Copiar Mensaje
-                              </>
-                            )}
-                          </button>
+                          <span className="text-xs font-mono font-bold text-emerald-400 shrink-0">
+                            {p.score}/100
+                          </span>
                         </div>
-                      )}
-                    </div>
-                  ))}
+
+                        {/* Angle & Pain Signals Evidence Badges */}
+                        <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+                          <span className="px-2 py-0.5 rounded bg-blue-900/30 text-[9px] text-blue-400 font-mono border border-blue-500/10">
+                            Ángulo: {getAngleLabel(p.bvelt_angle)}
+                          </span>
+                          
+                          {signalsList.map((sig, sIdx) => (
+                            <span key={sIdx} className="px-1.5 py-0.5 rounded bg-rose-950/20 text-[9px] text-rose-300 font-mono border border-rose-500/10">
+                              • {sig}
+                            </span>
+                          ))}
+                        </div>
+
+                        {/* Contact & Location details */}
+                        <div className="flex flex-wrap items-center gap-2.5 text-[11px] text-slate-400 font-mono">
+                          {p.phone && (
+                            <span className="flex items-center gap-1">
+                              <Phone className="w-3 h-3 text-slate-500" />
+                              {p.phone}
+                            </span>
+                          )}
+                          {p.email && (
+                            <span className="flex items-center gap-1">
+                              <Mail className="w-3 h-3 text-slate-500" />
+                              {p.email}
+                            </span>
+                          )}
+                          {p.website && (
+                            <a href={`https://${p.website}`} target="_blank" rel="noreferrer" className="flex items-center gap-1 text-slate-400 hover:text-blue-400" onClick={(e) => e.stopPropagation()}>
+                              <ExternalLink className="w-3 h-3 text-slate-500" />
+                              {p.website}
+                            </a>
+                          )}
+                        </div>
+
+                        {/* Suppression or Cooldown Banner */}
+                        {(p.suppression_reason || p.cooldown_until) && (
+                          <div className="bg-rose-950/20 border border-rose-900/30 p-2 rounded-xl text-[10px] text-rose-300 font-mono flex items-center gap-2">
+                            <Ban className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+                            <span>
+                              {p.suppression_reason ? `Supresión: ${p.suppression_reason}` : `Cooldown activo hasta ${new Date(p.cooldown_until!).toLocaleDateString()}`}
+                            </span>
+                          </div>
+                        )}
+
+                        {/* Expandable details drawer */}
+                        {isExpanded && (
+                          <div className="pt-3.5 border-t border-slate-900/80 space-y-3 font-sans text-xs" onClick={(e) => e.stopPropagation()}>
+                            
+                            {/* Score Breakdown if present */}
+                            {p.score_breakdown && (
+                              <div className="bg-slate-950 p-2.5 rounded-xl border border-slate-900 font-mono text-[10px] text-slate-400 space-y-1">
+                                <span className="text-slate-500 font-bold uppercase block">Score Breakdown:</span>
+                                <div>{p.score_breakdown}</div>
+                              </div>
+                            )}
+
+                            {/* Draft copy preview */}
+                            {p.draft_body && (
+                              <div className="bg-slate-950 p-3 rounded-xl border border-slate-900 font-mono text-[11px] text-slate-300 whitespace-pre-wrap leading-relaxed">
+                                <span className="text-slate-500 font-bold block mb-1 text-[9px] uppercase">Asunto: {p.draft_subject}</span>
+                                {p.draft_body}
+                              </div>
+                            )}
+
+                            {/* Last contact date */}
+                            {p.last_contact_at && (
+                              <div className="text-[10px] text-slate-500 font-mono flex items-center gap-1">
+                                <Clock className="w-3 h-3 text-slate-500" />
+                                Último Contacto: {new Date(p.last_contact_at).toLocaleString()}
+                              </div>
+                            )}
+                            
+                            {/* Action Buttons */}
+                            <div className="grid grid-cols-2 gap-2 pt-1">
+                              {p.draft_body && (
+                                <button
+                                  onClick={() => copyToClipboard(p.draft_body, p.id)}
+                                  className="col-span-2 h-11 min-h-[48px] rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold flex items-center justify-center gap-2"
+                                >
+                                  {copiedId === p.id ? (
+                                    <>
+                                      <Check className="w-4 h-4 text-emerald-400" />
+                                      Copiado en Portapapeles
+                                    </>
+                                  ) : (
+                                    <>
+                                      <Copy className="w-4 h-4 text-slate-200" />
+                                      Copiar Mensaje
+                                    </>
+                                  )}
+                                </button>
+                              )}
+
+                              <button
+                                onClick={() => submitDecision(p.id, 'sent')}
+                                className="h-10 text-xs font-semibold rounded-lg bg-emerald-600/20 border border-emerald-500/20 text-emerald-400 hover:bg-emerald-600 hover:text-white"
+                              >
+                                ✓ Enviar (Lock)
+                              </button>
+
+                              <button
+                                onClick={() => submitDecision(p.id, 'discard')}
+                                className="h-10 text-xs font-semibold rounded-lg bg-slate-900 border border-slate-800 text-slate-400 hover:bg-slate-800 hover:text-white"
+                              >
+                                ✕ Descartar
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -479,7 +759,7 @@ export default function App() {
         )}
       </div>
 
-      {/* 9. iOS Safari PWA Install Modal guide */}
+      {/* iOS Safari PWA Install Modal guide */}
       {showIOSGuide && (
         <div className="fixed inset-0 z-50 bg-black/85 flex items-end justify-center p-5 animate-fade-in" onClick={() => setShowIOSGuide(false)}>
           <div className="w-full max-w-sm rounded-3xl bg-slate-900 border border-slate-800 p-6 space-y-4 shadow-2xl" onClick={(e) => e.stopPropagation()}>
