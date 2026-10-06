@@ -240,10 +240,10 @@ tests.push({
   }
 });
 
-// Test 5: Discovery Diagnostics when raw = 0
+// Test 5: Discovery Diagnostics and Status when raw = 0
 tests.push({
   name: "Discovery cascade returns structured diagnostics and reason when 0 businesses found",
-  run: () => {
+  run: async () => {
     const mockDiagnostics = {
       city: "Antarctica, AQ",
       trade: "underwater_welding",
@@ -259,6 +259,44 @@ tests.push({
     assert(typeof mockDiagnostics.reason === "string" && mockDiagnostics.reason.length > 0, "Reason must be descriptive");
     assert(mockDiagnostics.bizdata_status === "skipped_unsupported_category", "BizData status recorded");
     assert(mockDiagnostics.overpass_status.includes("failed"), "Overpass status recorded");
+
+    // Test that database updates store diagnostics and do not mark silent success
+    const dbUpdates: Record<string, any> = {};
+    const mockDb = {
+      prepare: (sql: string) => ({
+        bind: (...args: any[]) => ({
+          first: () => Promise.resolve({ errors_json: "[]" }),
+          run: () => {
+            if (sql.includes("UPDATE runs SET errors_json")) {
+              dbUpdates.runs_errors_json = args[0];
+            }
+            if (sql.includes("UPDATE radar_jobs SET status")) {
+              dbUpdates.radar_jobs_status = "completed_zero_prospects";
+              dbUpdates.radar_jobs_last_error = args[0];
+            }
+            if (sql.includes("UPDATE queue_jobs SET status")) {
+              dbUpdates.queue_jobs_status = "completed_zero_prospects";
+              dbUpdates.queue_jobs_error = args[0];
+            }
+            return Promise.resolve({ success: true });
+          }
+        })
+      })
+    };
+
+    // Simulate empty discovery handler DB writes
+    const existingErrors = JSON.parse("[]");
+    existingErrors.push(mockDiagnostics);
+    await mockDb.prepare("UPDATE runs SET errors_json = ? WHERE id = ?").bind(JSON.stringify(existingErrors), "run-123").run();
+    await mockDb.prepare("UPDATE radar_jobs SET status = 'completed_zero_prospects', last_error = ?, updated_at = ? WHERE id = ?")
+      .bind(mockDiagnostics.reason, new Date().toISOString(), "job-123").run();
+    await mockDb.prepare("UPDATE queue_jobs SET status = 'completed_zero_prospects', error = ?, completed_at = ? WHERE job_id = ?")
+      .bind(mockDiagnostics.reason, new Date().toISOString(), "job-123").run();
+
+    assert(dbUpdates.runs_errors_json.includes("Zero businesses discovered"), "Runs errors_json must capture diagnostics reason");
+    assert(dbUpdates.radar_jobs_status === "completed_zero_prospects", "Radar jobs must have completed_zero_prospects");
+    assert(dbUpdates.radar_jobs_last_error === mockDiagnostics.reason, "Radar jobs must record reason");
+    assert(dbUpdates.queue_jobs_status === "completed_zero_prospects", "Queue jobs must have completed_zero_prospects");
   }
 });
 

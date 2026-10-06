@@ -855,11 +855,11 @@ export default {
         // Execute job router safely
         await processQueueJob(body, env);
 
-        // Mark completed in radar_jobs & acknowledge
+        // Mark completed in radar_jobs & acknowledge (protecting completed_zero_prospects status)
         if (env.RADAR_DB) {
           try {
             await env.RADAR_DB.prepare(
-              "UPDATE radar_jobs SET status = 'completed', updated_at = ? WHERE id = ?"
+              "UPDATE radar_jobs SET status = 'completed', updated_at = ? WHERE id = ? AND status != 'completed_zero_prospects'"
             ).bind(new Date().toISOString(), jobId).run();
           } catch (e) {}
         }
@@ -1236,7 +1236,7 @@ export async function recordQueueJobStatus(
       await db.prepare(`
         UPDATE queue_jobs
         SET status = ?, error = ?, completed_at = ?
-        WHERE job_id = ?
+        WHERE job_id = ? AND status != 'completed_zero_prospects'
       `).bind(status, error || null, timestamp, job_id).run();
     }
   } catch (e) {
@@ -1366,6 +1366,9 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
         
         await env.RADAR_DB.prepare("UPDATE radar_jobs SET status = 'completed_zero_prospects', last_error = ?, updated_at = ? WHERE id = ?")
           .bind(diagnostics.reason, new Date().toISOString(), job.job_id).run();
+
+        await env.RADAR_DB.prepare("UPDATE queue_jobs SET status = 'completed_zero_prospects', error = ?, completed_at = ? WHERE job_id = ?")
+          .bind(diagnostics.reason, new Date().toISOString(), job.job_id).run();
       } catch (e) {}
     }
     return;
@@ -1373,17 +1376,33 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
 
   const bounded = scraped.slice(0, LIMITS.max_discover_per_day);
   let enqueuedEnrich = 0;
+  let filteredCount = 0;
 
   for (const candidate of bounded) {
+    // Prohibido example.com / datos simulados en producción
+    const isMock = (candidate.email && candidate.email.toLowerCase().includes("example.com")) ||
+                   (candidate.website && candidate.website.toLowerCase().includes("example.com")) ||
+                   (candidate.name && (candidate.name.toLowerCase().includes("test business") || candidate.name.toLowerCase().includes("test contractor")));
+    if (isMock) {
+      filteredCount++;
+      continue;
+    }
+
     const identityKey = generateIdentityKey(candidate.email, candidate.website, candidate.phone, candidate.name, candidate.city);
 
     // Composite suppression check
     const suppression = await checkSuppressedComposite(env.RADAR_DB, candidate.email, candidate.website, candidate.phone, candidate.name, candidate.city);
-    if (suppression) continue;
+    if (suppression) {
+      filteredCount++;
+      continue;
+    }
 
     // Duplicate & cooldown check
     const overlap = await findExistingProspectOverlap(env.RADAR_DB, candidate.email, candidate.website, candidate.phone, candidate.name, candidate.city);
-    if (overlap && isCooldownActive(overlap.overlap.cooldown_until)) continue;
+    if (overlap && isCooldownActive(overlap.overlap.cooldown_until)) {
+      filteredCount++;
+      continue;
+    }
 
     let prospectId = crypto.randomUUID();
     const existing = await env.RADAR_DB.prepare("SELECT id FROM prospects WHERE identity_key = ?").bind(identityKey).first() as any;
@@ -1432,7 +1451,19 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
   }
 
   try {
-    await env.RADAR_DB.prepare("UPDATE runs SET discovered = discovered + ? WHERE id = ?").bind(enqueuedEnrich, job.run_id).run();
+    diagnostics.discovered_raw = scraped.length;
+    diagnostics.filtered = (scraped.length - bounded.length) + filteredCount;
+    diagnostics.reason = `Discovered ${scraped.length} raw, ${enqueuedEnrich} enqueued for enrichment, ${diagnostics.filtered} filtered`;
+
+    const existingRun = await env.RADAR_DB.prepare("SELECT errors_json FROM runs WHERE id = ?").bind(job.run_id).first() as any;
+    let errorsArr: any[] = [];
+    if (existingRun && existingRun.errors_json) {
+      try { errorsArr = JSON.parse(existingRun.errors_json); } catch (e) {}
+    }
+    errorsArr.push(diagnostics);
+
+    await env.RADAR_DB.prepare("UPDATE runs SET discovered = discovered + ?, errors_json = ? WHERE id = ?")
+      .bind(enqueuedEnrich, JSON.stringify(errorsArr), job.run_id).run();
   } catch (e) {}
 }
 
@@ -3140,16 +3171,19 @@ async function dispatchInteractiveTelegramAlert(
       .slice(0, 3)
       .join(" · ");
 
+    const emailVal = p.email || p.emailCandidate || null;
+    const phoneVal = p.phone || p.websitePhone || null;
+
     let cardText = `*${idx + 1}. ${escapeMarkdown(p.name)}* ${scoreEmoji}\n`;
     cardText += `📍 ${escapeMarkdown(p.city)} · 🛠️ ${escapeMarkdown(p.trade)}\n`;
     cardText += `📊 Score: *${p.score}/100* (${shortReason || "high relevance"})\n`;
-    cardText += `📧 Email: ${p.emailCandidate ? `\`${escapeMarkdown(p.emailCandidate)}\`` : "None"}\n`;
-    cardText += `📞 Tel: ${p.websitePhone ? `\`${escapeMarkdown(p.websitePhone)}\`` : "None"}\n`;
+    cardText += `📧 Email: ${emailVal ? `\`${escapeMarkdown(emailVal)}\`` : "None"}\n`;
+    cardText += `📞 Tel: ${phoneVal ? `\`${escapeMarkdown(phoneVal)}\`` : "None"}\n`;
     cardText += `🌐 Web: ${p.website ? `[Link](${p.website})` : "None"}\n\n`;
     cardText += `📝 *Asunto:* _${escapeMarkdown(p.draft_subject)}_\n`;
     cardText += `💬 *Copy Propuesto:*\n\`\`\`\n${escapeMarkdown(p.draft_body)}\n\`\`\``;
 
-    const demoUrl = `https://bvelt-radar.rainerblanco405.workers.dev/demo?name=${encodeURIComponent(p.name)}&trade=${encodeURIComponent(p.trade || "contractor")}&phone=${encodeURIComponent(p.websitePhone || "")}`;
+    const demoUrl = `https://bvelt-radar.rainerblanco405.workers.dev/demo?name=${encodeURIComponent(p.name)}&trade=${encodeURIComponent(p.trade || "contractor")}&phone=${encodeURIComponent(phoneVal || "")}`;
     const inlineKeyboard = {
       inline_keyboard: [
         [
