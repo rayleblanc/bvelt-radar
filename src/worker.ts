@@ -728,14 +728,82 @@ export default {
     await startProspectingRun(env, "founder", null);
   },
 
-  // Cloudflare Queues Consumer Handler
+  // Cloudflare Queues Consumer Handler (Infrastructure Safe & Idempotent)
   async queue(batch: MessageBatch<RadarJobMessage>, env: Env, ctx: ExecutionContext): Promise<void> {
     for (const msg of batch.messages) {
       try {
-        await processQueueJob(msg.body, env);
+        const body: any = msg.body || {};
+        const jobId = body.job_id || msg.id;
+        const jobType = body.job_type || body.type || 'unknown';
+        const runId = body.run_id || null;
+        const prospectId = body.prospect_id || null;
+
+        // Structure Validation
+        if (!jobId || !jobType) {
+          console.warn(`[Queue Consumer] Invalid job message format received. Missing job_id or job_type:`, body);
+          msg.ack(); // Acknowledge malformed message
+          continue;
+        }
+
+        // Idempotency check against radar_jobs table
+        if (env.RADAR_DB) {
+          try {
+            const existing = await env.RADAR_DB.prepare(
+              "SELECT status FROM radar_jobs WHERE id = ?"
+            ).bind(jobId).first() as any;
+
+            if (existing && existing.status === 'completed') {
+              console.log(`[Queue Consumer] Job ${jobId} already completed. Acknowledging & skipping.`);
+              msg.ack();
+              continue;
+            }
+
+            const timestamp = new Date().toISOString();
+            await env.RADAR_DB.prepare(`
+              INSERT INTO radar_jobs (id, run_id, prospect_id, job_type, status, attempts, payload_json, created_at, updated_at)
+              VALUES (?, ?, ?, ?, 'processing', ?, ?, ?, ?)
+              ON CONFLICT(id) DO UPDATE SET
+                status = 'processing',
+                attempts = radar_jobs.attempts + 1,
+                updated_at = excluded.updated_at
+            `).bind(
+              jobId,
+              runId,
+              prospectId,
+              jobType,
+              msg.attempts || 1,
+              JSON.stringify(body.payload || {}),
+              timestamp,
+              timestamp
+            ).run();
+          } catch (e) {
+            console.warn(`[Queue Consumer DB Log Warning] Job ${jobId}:`, e);
+          }
+        }
+
+        // Execute job router safely
+        await processQueueJob(body, env);
+
+        // Mark completed in radar_jobs & acknowledge
+        if (env.RADAR_DB) {
+          try {
+            await env.RADAR_DB.prepare(
+              "UPDATE radar_jobs SET status = 'completed', updated_at = ? WHERE id = ?"
+            ).bind(new Date().toISOString(), jobId).run();
+          } catch (e) {}
+        }
         msg.ack();
+
       } catch (err: any) {
-        console.error(`[Queue Consumer Error] Job ${msg.body?.job_id} failed:`, err);
+        console.error(`[Queue Consumer Error] Job execution failed:`, err);
+        const jobId = msg.body?.job_id || msg.id;
+        if (jobId && env.RADAR_DB) {
+          try {
+            await env.RADAR_DB.prepare(
+              "UPDATE radar_jobs SET status = 'failed', last_error = ?, updated_at = ? WHERE id = ?"
+            ).bind(err.message || String(err), new Date().toISOString(), jobId).run();
+          } catch (e) {}
+        }
         msg.retry();
       }
     }

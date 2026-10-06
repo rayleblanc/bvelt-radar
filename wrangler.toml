@@ -3,6 +3,7 @@
 name = "bvelt-radar"
 main = "src/worker.ts"
 compatibility_date = "2024-03-01"
+keep_vars = true
 
 [vars]
 # Target regions (Sun Belt default pool active in code if unset)
@@ -28,14 +29,19 @@ migrations_dir = "migrations"
 
 # Cloudflare Queues Producer & Consumer for background job processing
 [[queues.producers]]
-queue = "bvelt-radar-queue"
+queue = "bvelt-radar-jobs"
 binding = "RADAR_QUEUE"
 
 [[queues.consumers]]
-queue = "bvelt-radar-queue"
-max_batch_size = 5
+queue = "bvelt-radar-jobs"
+max_batch_size = 1
 max_batch_timeout = 5
+max_retries = 3
+retry_delay = 60
+dead_letter_queue = "bvelt-radar-dlq"
+max_concurrency = 1
 
 # Automated daily prospecting scheduled cron (runs once a day at 12:00 PM UTC)
 [triggers]
 crons = ["0 12 * * *"]
+
