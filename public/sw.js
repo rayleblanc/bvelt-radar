@@ -1,10 +1,9 @@
-const CACHE_NAME = 'bvelt-radar-shell-v1';
-const ASSETS = [
+const CACHE_NAME = 'bvelt-radar-shell-v2';
+
+// Cache ONLY valid production shell assets (NEVER development /src/ paths)
+const PRECACHE_ASSETS = [
   '/',
   '/index.html',
-  '/src/main.tsx',
-  '/src/App.tsx',
-  '/src/index.css',
   '/manifest.json',
   '/icon-192.png',
   '/icon-512.png',
@@ -14,7 +13,7 @@ const ASSETS = [
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME).then((cache) => {
-      return cache.addAll(ASSETS);
+      return cache.addAll(PRECACHE_ASSETS);
     })
   );
   self.skipWaiting();
@@ -37,27 +36,56 @@ self.addEventListener('activate', (event) => {
 
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
-  
-  // Do NOT cache API endpoints or service controls
+
+  // Bypass caching for all API endpoints, auth, and dynamic actions
   if (
-    url.pathname.startsWith('/api/') || 
-    url.pathname === '/run' || 
-    url.pathname === '/stats' || 
-    url.pathname === '/decision' || 
+    url.pathname.startsWith('/api/') ||
+    url.pathname === '/run' ||
+    url.pathname === '/stats' ||
+    url.pathname === '/prospects' ||
     url.pathname === '/health' ||
-    url.pathname === '/telegram-webhook'
+    url.pathname === '/decision' ||
+    url.pathname === '/verify-key' ||
+    url.pathname === '/logout' ||
+    url.pathname === '/seeds' ||
+    url.pathname.startsWith('/telegram')
   ) {
-    return; // Let the browser handle standard network request
+    return; // Pass through to network
   }
 
-  event.respondWith(
-    caches.match(event.request).then((cachedResponse) => {
-      return cachedResponse || fetch(event.request).catch(() => {
-        // Fallback to index.html if request is navigation
-        if (event.request.mode === 'navigate') {
-          return caches.match('/');
+  // Cache-first strategy for bundled static /assets/ and precached icons
+  if (url.pathname.startsWith('/assets/') || PRECACHE_ASSETS.includes(url.pathname)) {
+    event.respondWith(
+      caches.match(event.request).then((cachedResponse) => {
+        if (cachedResponse) {
+          return cachedResponse;
         }
-      });
-    })
+        return fetch(event.request).then((networkResponse) => {
+          if (networkResponse && networkResponse.status === 200 && networkResponse.type === 'basic') {
+            const responseToCache = networkResponse.clone();
+            caches.open(CACHE_NAME).then((cache) => {
+              cache.put(event.request, responseToCache);
+            });
+          }
+          return networkResponse;
+        });
+      })
+    );
+    return;
+  }
+
+  // Navigation requests: Network-first with fallback to cached shell
+  if (event.request.mode === 'navigate') {
+    event.respondWith(
+      fetch(event.request).catch(() => {
+        return caches.match('/index.html') || caches.match('/');
+      })
+    );
+    return;
+  }
+
+  // Default network with cache fallback
+  event.respondWith(
+    fetch(event.request).catch(() => caches.match(event.request))
   );
 });

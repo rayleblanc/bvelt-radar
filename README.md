@@ -38,24 +38,29 @@ npx wrangler d1 migrations apply bvelt-radar-db --local   # Desarrollo
 npx wrangler d1 migrations apply bvelt-radar-db --remote  # Producción
 ```
 
-### 3. Configurar Secretos y Variables
+### 3. Configurar Secretos y Variables de Configuración
+
+**Secretos (Sensibles - Configurar vía Cloudflare Secrets o Dashboard):**
 ```bash
-npx wrangler secret put FOUNDER_SERVICE_KEY    # Token Bearer para peticiones API
+npx wrangler secret put FOUNDER_SERVICE_KEY    # Token de servicio del fundador
 npx wrangler secret put TELEGRAM_BOT_TOKEN     # Token de @BotFather
-npx wrangler secret put TELEGRAM_CHAT_ID       # Tu Chat ID de Telegram
-# Opcionales (mejoran copy y enriquecimiento pero no son obligatorios):
-npx wrangler secret put GEMINI_FOUNDER_API_KEY   # Key Principal (A) para Cascada Gemini (gemini-3.8-flash, gemini-3.5-flash-lite)
-npx wrangler secret put GEMINI_SECONDARY_API_KEY # Key Secundaria (B) para ampliación de cuota gratuita de Gemini
-npx wrangler secret put GROQ_API_KEY             # Key de Groq (Llama-3.3-70b-versatile) como respaldo de la cascada
+npx wrangler secret put TELEGRAM_CHAT_ID       # Chat ID de Telegram
+# Opcionales:
+npx wrangler secret put GEMINI_FOUNDER_API_KEY   # Key Principal para Cascada Gemini
+npx wrangler secret put GEMINI_SECONDARY_API_KEY # Key Secundaria para ampliación de cuota
+npx wrangler secret put GROQ_API_KEY             # Key de Groq (Llama-3.3-70b)
 npx wrangler secret put HUNTER_API_KEY           # Búsqueda de emails en dominio (max 8/día)
 npx wrangler secret put ABSTRACT_API_KEY         # Validación de entregabilidad
+```
 
-# Personalización de Mercado (en wrangler.toml o local .env):
-# FOUNDING_CITIES="Madrid, ES;Barcelona, ES;Bogota, CO;Ciudad de Mexico, MX"
-# FOUNDING_TRADES="plumbing;hvac;landscaping;lawn_care"
-# FOUNDING_COUNTRIES="ES;MX;CO"
-# FOUNDING_LANGUAGES="es"
-# FOUNDING_MIN_SCORE="50"
+**Variables de Configuración [vars] (No sensibles - en `wrangler.toml` o Dashboard > Variables):**
+```toml
+[vars]
+FOUNDING_CITIES = "Tampa, FL;Orlando, FL;Austin, TX;Houston, TX;Atlanta, GA;Nashville, TN"
+FOUNDING_TRADES = "landscaping;lawn_care;hvac;plumbing;house_cleaning;pool_cleaning;handyman;roofing;pest_control"
+FOUNDING_COUNTRIES = "US;MX;ES;CO;CA;GB"
+FOUNDING_LANGUAGES = "en;es"
+FOUNDING_MIN_SCORE = "50"
 ```
 
 ### 4. Configurar el Webhook de Telegram (Botones Interactivos)

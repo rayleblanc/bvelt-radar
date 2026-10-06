@@ -305,6 +305,14 @@ export default {
             jobs_enqueued: runResult.jobs_enqueued,
             active_cities: runResult.active_cities,
             active_trades: runResult.active_trades,
+            diagnostics: runResult.diagnostics || {
+              bizdata_status: "ready",
+              overpass_status: "ready",
+              nominatim_status: "ready",
+              discovered_raw: 0,
+              filtered: 0,
+              reason: "Jobs enqueued to autonomous cascade"
+            },
             overrides,
             timestamp: new Date().toISOString()
           }, { headers: corsHeaders });
@@ -887,6 +895,7 @@ async function handleHealth(env: Env, headers: Record<string, string>): Promise<
   let completedJobs = 0;
   let failedJobs = 0;
   let lastError: string | null = null;
+  let lastDiagnostics: any = null;
 
   try {
     const todayRun = await db.prepare("SELECT * FROM runs WHERE day = ? ORDER BY created_at DESC LIMIT 1").bind(today).first() as any;
@@ -894,9 +903,27 @@ async function handleHealth(env: Env, headers: Record<string, string>): Promise<
       prospectsToday = todayRun.finalized || 0;
       hunterUsedToday = todayRun.hunter_calls || 0;
       lastRunDate = todayRun.created_at;
+      if (todayRun.errors_json && todayRun.errors_json !== "[]") {
+        try {
+          const errList = JSON.parse(todayRun.errors_json);
+          if (Array.isArray(errList) && errList.length > 0) {
+            lastDiagnostics = errList[errList.length - 1];
+          }
+        } catch (e) {}
+      }
     } else {
-      const latestRun = await db.prepare("SELECT created_at FROM runs ORDER BY created_at DESC LIMIT 1").first() as any;
-      if (latestRun) lastRunDate = latestRun.created_at;
+      const latestRun = await db.prepare("SELECT * FROM runs ORDER BY created_at DESC LIMIT 1").first() as any;
+      if (latestRun) {
+        lastRunDate = latestRun.created_at;
+        if (latestRun.errors_json && latestRun.errors_json !== "[]") {
+          try {
+            const errList = JSON.parse(latestRun.errors_json);
+            if (Array.isArray(errList) && errList.length > 0) {
+              lastDiagnostics = errList[errList.length - 1];
+            }
+          } catch (e) {}
+        }
+      }
     }
   } catch (e) {
     console.warn("Health check stats query fallback: ", e);
@@ -924,6 +951,14 @@ async function handleHealth(env: Env, headers: Record<string, string>): Promise<
     prospects_today: prospectsToday,
     hunter_remaining_estimate: hunterRemaining,
     last_run: lastRunDate,
+    diagnostics: lastDiagnostics || {
+      bizdata_status: "ready",
+      overpass_status: "ready",
+      nominatim_status: "ready",
+      discovered_raw: prospectsToday,
+      filtered: 0,
+      reason: prospectsToday > 0 ? "Discovery cascade operational" : "System ready"
+    },
     queue: {
       pending_or_processing: pendingJobs,
       completed_jobs: completedJobs,
@@ -1261,7 +1296,7 @@ export async function startProspectingRun(
     languages: string | null;
     min_score: string | null;
   }
-): Promise<{ run_id: string; jobs_enqueued: number; active_cities: string[]; active_trades: string[] }> {
+): Promise<{ run_id: string; jobs_enqueued: number; active_cities: string[]; active_trades: string[]; diagnostics: any }> {
   const db = env.RADAR_DB;
   const runId = crypto.randomUUID();
   const today = new Date().toISOString().split('T')[0];
@@ -1296,7 +1331,15 @@ export async function startProspectingRun(
     run_id: runId,
     jobs_enqueued: jobsEnqueued,
     active_cities: activeCities,
-    active_trades: activeTrades
+    active_trades: activeTrades,
+    diagnostics: {
+      bizdata_status: "ready",
+      overpass_status: "ready",
+      nominatim_status: "ready",
+      discovered_raw: 0,
+      filtered: 0,
+      reason: `Enqueued ${jobsEnqueued} autonomous discovery jobs across ${activeCities.join(', ')} for ${activeTrades.join(', ')}`
+    }
   };
 }
 
@@ -1307,21 +1350,28 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
   const { city, trade, overrides } = job.payload;
   console.log(`[Job: discovery] Searching businesses in ${city} for ${trade}...`);
 
-  const scraped = await fetchLocalBusinesses(city, trade, env);
+  const { businesses: scraped, diagnostics } = await fetchLocalBusinessesWithDiagnostics(city, trade, env);
 
-  const seen = new Set<string>();
-  const deduped: any[] = [];
-  for (const item of scraped) {
-    const normName = item.name.toLowerCase().trim().replace(/[^a-z0-9]/g, "");
-    const normCity = item.city.toLowerCase().trim().replace(/[^a-z0-9]/g, "");
-    const key = `${normName}_${normCity}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      deduped.push(item);
+  if (scraped.length === 0) {
+    console.warn(`[Job: discovery] 0 businesses found for ${city} - ${trade}:`, diagnostics.reason);
+    if (env.RADAR_DB) {
+      try {
+        const existingRun = await env.RADAR_DB.prepare("SELECT errors_json FROM runs WHERE id = ?").bind(job.run_id).first() as any;
+        let errorsArr: any[] = [];
+        if (existingRun && existingRun.errors_json) {
+          try { errorsArr = JSON.parse(existingRun.errors_json); } catch (e) {}
+        }
+        errorsArr.push(diagnostics);
+        await env.RADAR_DB.prepare("UPDATE runs SET errors_json = ? WHERE id = ?").bind(JSON.stringify(errorsArr), job.run_id).run();
+        
+        await env.RADAR_DB.prepare("UPDATE radar_jobs SET status = 'completed_zero_prospects', last_error = ?, updated_at = ? WHERE id = ?")
+          .bind(diagnostics.reason, new Date().toISOString(), job.job_id).run();
+      } catch (e) {}
     }
+    return;
   }
 
-  const bounded = deduped.slice(0, LIMITS.max_discover_per_day);
+  const bounded = scraped.slice(0, LIMITS.max_discover_per_day);
   let enqueuedEnrich = 0;
 
   for (const candidate of bounded) {
@@ -1387,7 +1437,7 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
 }
 
 /**
- * 2. ENRICH JOB: Scrapes candidate website HTML, extracts signals, enqueues score job
+ * 2. ENRICH JOB: Scrapes candidate website HTML, extracts signals, enqueues score job without burning quotas
  */
 async function handleEnrichJob(job: RadarJobMessage, env: Env): Promise<void> {
   const { prospect_id, overrides } = job.payload;
@@ -1422,6 +1472,7 @@ async function handleEnrichJob(job: RadarJobMessage, env: Env): Promise<void> {
     lead_capture: false
   };
 
+  // Step a: Scrape Website HTML
   if (prospect.website && isRealWebsite(prospect.website)) {
     try {
       const scrapeResult = await scrapeWebsiteContact(prospect.website);
@@ -1437,18 +1488,34 @@ async function handleEnrichJob(job: RadarJobMessage, env: Env): Promise<void> {
   const domain = prospect.website && isRealWebsite(prospect.website) ? getDomain(prospect.website) : null;
   let hasValidMx = false;
 
+  // Step b: DNS MX via Cloudflare DNS-over-HTTPS
   if (domain) {
     hasValidMx = await checkDomainMxRecords(domain);
   }
 
-  // If website HTML didn't expose an email, only consult Hunter if MX records actually exist
-  if (!emailCandidate && domain && hasValidMx && env.HUNTER_API_KEY) {
+  // Step c: Fallback patterns contact@, info@, hello@, office@, admin@ ONLY if MX exists
+  if (!emailCandidate && domain && hasValidMx) {
+    emailCandidate = `contact@${domain}`;
+  }
+
+  // Step d: Hunter Domain Search ONLY if quota available (< 8/day) and MX exists
+  if (domain && hasValidMx && env.HUNTER_API_KEY) {
     try {
-      const hunterEmail = await fetchHunterEmail(domain, env.HUNTER_API_KEY);
-      if (hunterEmail) emailCandidate = hunterEmail;
+      const today = new Date().toISOString().split('T')[0];
+      const todayRun = await env.RADAR_DB.prepare("SELECT hunter_calls FROM runs WHERE day = ? ORDER BY created_at DESC LIMIT 1").bind(today).first() as any;
+      const hunterUsedToday = todayRun?.hunter_calls || 0;
+
+      if (hunterUsedToday < LIMITS.max_hunter_credits_per_day) {
+        const hunterEmail = await fetchHunterEmail(domain, env.HUNTER_API_KEY);
+        if (hunterEmail) {
+          emailCandidate = hunterEmail;
+          await env.RADAR_DB.prepare("UPDATE runs SET hunter_calls = hunter_calls + 1 WHERE id = ?").bind(job.run_id).run();
+        }
+      }
     } catch (e: any) {}
   }
 
+  // Step e: Abstract API verification if key present and candidate exists
   let isEmailValidated = false;
   if (emailCandidate) {
     if (env.ABSTRACT_API_KEY) {
@@ -2073,7 +2140,20 @@ export async function verifyTrustStackGate(
     }
   } catch (e) {}
 
-  // 2. Trust-Stack API Governor Firewall Call
+  // 2. Founder Mode Default Bypass (Ensures Trust-Stack never blocks founder discovery or outreach unless explicitly enabled)
+  if ((prospect.mode === 'founder' || !prospect.mode) && (env as any).ENABLE_TRUST_STACK_FOUNDER !== 'true') {
+    const decision: TrustGateDecision = {
+      allowed: true,
+      status: 'approved',
+      reason: 'TRUST_STACK_FOUNDER_BYPASS: Trust-Stack bypassed by default in founder mode.',
+      trust_decision_id: crypto.randomUUID(),
+      timestamp
+    };
+    await recordTrustDecisionInD1(env.RADAR_DB, prospect.id, runId, decision);
+    return decision;
+  }
+
+  // 3. Trust-Stack API Governor Firewall Call
   const trustUrl = env.TRUST_STACK_URL;
   const serviceKey = env.TRUST_SERVICE_KEY || env.TRUST_STACK_KEY || env.FOUNDER_SERVICE_KEY;
 
@@ -2410,82 +2490,160 @@ export function calculateMultiFactorScore(
 }
 
 /**
- * Fetch Businesses from BizData with fallback to Precise Overpass OSM
+ * Official BizData categories (~37 fixed standard directory categories)
  */
-async function fetchLocalBusinesses(city: string, trade: string, env: Env): Promise<any[]> {
-  const cacheKey = `radar_cache_${city.replace(/[^a-z0-9]/gi, "_")}_${trade}_v2`.toLowerCase();
+export const BIZDATA_OFFICIAL_CATEGORIES = new Set([
+  "accounting", "accountant", "attorney", "auto_repair", "bakery", "bank", "bar",
+  "beauty_salon", "book_store", "cafe", "car_dealer", "car_rental", "car_repair",
+  "car_wash", "dentist", "doctor", "drugstore", "dry_cleaning", "electrician",
+  "florist", "gas_station", "general_contractor", "gym", "hair_care", "hairdresser",
+  "hardware_store", "hospital", "insurance_agency", "laundry", "lawyer", "locksmith",
+  "lodging", "moving_company", "painter", "pharmacy", "physiotherapist", "plumber",
+  "real_estate_agency", "real_estate", "restaurant", "roofing_contractor", "school",
+  "shoe_store", "shopping_mall", "spa", "supermarket", "travel_agency", "veterinary_care"
+]);
+
+/**
+ * Maps arbitrary trades to official BizData category or returns null if not supported
+ */
+export function mapTradeToBizDataCategory(trade: string): string | null {
+  if (!trade) return null;
+  const norm = trade.toLowerCase().trim().replace(/[\s-]+/g, "_");
+  if (BIZDATA_OFFICIAL_CATEGORIES.has(norm)) return norm;
   
-  if (env.CACHE) {
-    try {
-      const cached = await env.CACHE.get(cacheKey);
-      if (cached) return JSON.parse(cached);
-    } catch (e) {
-      console.warn("KV Cache read error: ", e);
-    }
+  const mapping: Record<string, string> = {
+    "plumbing": "plumber",
+    "roofing": "roofing_contractor",
+    "electrician": "electrician",
+    "electrical": "electrician",
+    "cleaning": "dry_cleaning",
+    "house_cleaning": "dry_cleaning",
+    "car_repair": "auto_repair",
+    "lawyer": "attorney",
+    "law_firm": "attorney",
+    "dentist": "dentist",
+    "dental_clinic": "dentist",
+    "locksmith": "locksmith",
+    "painter": "painter",
+    "painting": "painter",
+    "moving": "moving_company",
+    "real_estate": "real_estate_agency"
+  };
+
+  const mapped = mapping[norm];
+  if (mapped && BIZDATA_OFFICIAL_CATEGORIES.has(mapped)) {
+    return mapped;
   }
+  return null;
+}
 
-  const results: any[] = [];
+export interface NominatimGeocoding {
+  lat: number;
+  lon: number;
+  bbox: [number, number, number, number]; // [south, north, west, east]
+  display_name: string;
+}
 
-  // 1. Primary: BizData API (No API key needed)
+/**
+ * 1. Nominatim OpenStreetMap Geocoding (Free city -> lat/lon/bbox resolution)
+ */
+export async function fetchNominatimGeocoding(city: string): Promise<NominatimGeocoding | null> {
   try {
-    const bizDataUrl = `https://bizdata-web.vercel.app/api/businesses?location=${encodeURIComponent(city)}&category=${encodeURIComponent(trade)}&limit=20`;
-    const res = await fetch(bizDataUrl, { signal: AbortSignal.timeout(8000) });
-    if (res.ok) {
-      const data: any = await res.json();
-      if (Array.isArray(data)) {
-        for (const item of data) {
-          results.push({
-            name: item.name,
-            city,
-            trade,
-            website: item.website || item.site || null,
-            phone: item.phone || null,
-            email: item.email || null,
-            source: "bizdata"
-          });
-        }
+    const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(city)}&format=json&limit=1`;
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent": "BveltRadar-Discovery/1.0 (founder@bvelt.app)",
+        "Accept": "application/json"
+      },
+      signal: AbortSignal.timeout(6000)
+    });
+    if (!res.ok) return null;
+    const data: any = await res.json();
+    if (Array.isArray(data) && data.length > 0) {
+      const item = data[0];
+      const bb = item.boundingbox; // ["minLat", "maxLat", "minLon", "maxLon"]
+      if (bb && bb.length === 4) {
+        return {
+          lat: parseFloat(item.lat),
+          lon: parseFloat(item.lon),
+          bbox: [parseFloat(bb[0]), parseFloat(bb[1]), parseFloat(bb[2]), parseFloat(bb[3])],
+          display_name: item.display_name || city
+        };
       }
     }
-  } catch (err: any) {
-    console.warn(`BizData lookup bypassed for ${city} - ${trade}: ${err.message}`);
+  } catch (e) {
+    console.warn(`[Nominatim Geocoding] Warning for ${city}:`, e);
   }
+  return null;
+}
 
-  // 2. Fallback: Overpass OSM with tailored craft/shop/office query
-  if (results.length < 5) {
+const OVERPASS_MIRRORS = [
+  "https://overpass-api.de/api/interpreter",
+  "https://lz4.overpass-api.de/api/interpreter",
+  "https://z.overpass-api.de/api/interpreter",
+  "https://overpass.kumi.systems/api/interpreter",
+  "https://maps.mail.ru/osm/tools/overpass/api/interpreter"
+];
+
+/**
+ * 2. Overpass OSM with Mirrors & Retry (15-20s timeout, generic craft/shop/office/amenity tags)
+ */
+export async function fetchOverpassBusinesses(
+  city: string, 
+  trade: string, 
+  nominatimGeo: NominatimGeocoding | null
+): Promise<{ businesses: any[]; status: string }> {
+  const cleanTrade = trade.toLowerCase().trim();
+  const cityClean = city.split(",")[0].trim();
+  
+  // Specific tags if defined, plus generic craft/shop/office/amenity tags for any niche
+  const specificTags = OVERPASS_TRADE_TAGS[cleanTrade] || [];
+  const genericTags = [
+    `craft="${cleanTrade}"`,
+    `shop="${cleanTrade}"`,
+    `office="${cleanTrade}"`,
+    `amenity="${cleanTrade}"`,
+    `service="${cleanTrade}"`,
+    `healthcare="${cleanTrade}"`,
+    `craft="contractor"`,
+    `amenity="trade"`
+  ];
+  
+  const allTags = Array.from(new Set([...specificTags, ...genericTags]));
+  const tagQueries = allTags.map(tag => `nwr[${tag}]${nominatimGeo ? `(${nominatimGeo.bbox[0]},${nominatimGeo.bbox[2]},${nominatimGeo.bbox[1]},${nominatimGeo.bbox[3]})` : `(area.searchArea)`};`).join("\n");
+
+  const query = nominatimGeo ? `
+    [out:json][timeout:20];
+    (
+      ${tagQueries}
+    );
+    out body 35;
+  ` : `
+    [out:json][timeout:20];
+    area["name"="${cityClean}"]->.searchArea;
+    (
+      ${tagQueries}
+    );
+    out body 35;
+  `;
+
+  let lastStatus = "unattempted";
+
+  for (const mirror of OVERPASS_MIRRORS) {
     try {
-      const cityClean = city.split(",")[0].trim();
-      const cleanTrade = trade.toLowerCase().trim();
-      const tradeTags = OVERPASS_TRADE_TAGS[cleanTrade] || [
-        `craft="${cleanTrade}"`,
-        `shop="${cleanTrade}"`,
-        `office="${cleanTrade}"`,
-        `amenity="${cleanTrade}"`,
-        `craft="contractor"`,
-        `amenity="trade"`
-      ];
-      const tagQueries = tradeTags.map(tag => `nwr[${tag}](area.searchArea);`).join("\n");
-
-      const query = `
-        [out:json][timeout:15];
-        area["name"="${cityClean}"]->.searchArea;
-        (
-          ${tagQueries}
-        );
-        out body 30;
-      `;
-
-      const overpassRes = await fetch("https://overpass-api.de/api/interpreter", {
+      const res = await fetch(mirror, {
         method: "POST",
         headers: {
           "Content-Type": "application/x-www-form-urlencoded",
-          "User-Agent": "BveltRadar/1.0 (contact: radar@bvelt.app)"
+          "User-Agent": "BveltRadar-Discovery/1.0 (founder@bvelt.app)"
         },
         body: `data=${encodeURIComponent(query)}`,
-        signal: AbortSignal.timeout(8000)
+        signal: AbortSignal.timeout(18000)
       });
 
-      if (overpassRes.ok) {
-        const osmData: any = await overpassRes.json();
+      if (res.ok) {
+        const osmData: any = await res.json();
+        const results: any[] = [];
         if (osmData.elements) {
           for (const el of osmData.elements) {
             const tags = el.tags || {};
@@ -2503,22 +2661,173 @@ async function fetchLocalBusinesses(city: string, trade: string, env: Env): Prom
             });
           }
         }
+        let hostname = mirror;
+        try { hostname = new URL(mirror).hostname; } catch (e) {}
+        return { businesses: results, status: `success (${hostname})` };
+      } else {
+        let hostname = mirror;
+        try { hostname = new URL(mirror).hostname; } catch (e) {}
+        lastStatus = `HTTP ${res.status} from ${hostname}`;
       }
-    } catch (overpassErr: any) {
-      console.warn("Overpass fallback failed: ", overpassErr.message);
+    } catch (e: any) {
+      let hostname = mirror;
+      try { hostname = new URL(mirror).hostname; } catch (e2) {}
+      lastStatus = `timeout/error from ${hostname}: ${e.message}`;
     }
   }
+
+  return { businesses: [], status: `failed_all_mirrors: ${lastStatus}` };
+}
+
+/**
+ * 3. BizData API Scraper (ONLY called if category is in official BizData list)
+ */
+export async function fetchBizDataBusinesses(city: string, trade: string): Promise<{ businesses: any[]; status: string }> {
+  const category = mapTradeToBizDataCategory(trade);
+  if (!category) {
+    return { businesses: [], status: "skipped_unsupported_category" };
+  }
+
+  try {
+    const bizDataUrl = `https://bizdata-web.vercel.app/api/businesses?location=${encodeURIComponent(city)}&category=${encodeURIComponent(category)}&limit=20`;
+    const res = await fetch(bizDataUrl, {
+      headers: { "User-Agent": "BveltRadar-Discovery/1.0 (founder@bvelt.app)" },
+      signal: AbortSignal.timeout(8000)
+    });
+    if (res.ok) {
+      const data: any = await res.json();
+      const results: any[] = [];
+      if (Array.isArray(data)) {
+        for (const item of data) {
+          results.push({
+            name: item.name,
+            city,
+            trade,
+            website: item.website || item.site || null,
+            phone: item.phone || null,
+            email: item.email || null,
+            source: "bizdata"
+          });
+        }
+      }
+      return { businesses: results, status: "success" };
+    }
+    return { businesses: [], status: `HTTP ${res.status}` };
+  } catch (err: any) {
+    return { businesses: [], status: `error: ${err.message}` };
+  }
+}
+
+export interface DiscoveryDiagnostics {
+  city: string;
+  trade: string;
+  nominatim_status: string;
+  overpass_status: string;
+  bizdata_status: string;
+  discovered_raw: number;
+  filtered: number;
+  reason: string;
+}
+
+/**
+ * Multi-Source Discovery Cascade (Nominatim + Overpass Mirrors + BizData Safe Filter)
+ */
+export async function fetchLocalBusinessesWithDiagnostics(
+  city: string, 
+  trade: string, 
+  env: Env
+): Promise<{ businesses: any[]; diagnostics: DiscoveryDiagnostics }> {
+  const cacheKey = `radar_cache_${city.replace(/[^a-z0-9]/gi, "_")}_${trade}_v3`.toLowerCase();
+  
+  if (env.CACHE) {
+    try {
+      const cached = await env.CACHE.get(cacheKey);
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        return {
+          businesses: parsed,
+          diagnostics: {
+            city,
+            trade,
+            nominatim_status: "cached",
+            overpass_status: "cached",
+            bizdata_status: "cached",
+            discovered_raw: parsed.length,
+            filtered: 0,
+            reason: "Retrieved from KV Cache"
+          }
+        };
+      }
+    } catch (e) {
+      console.warn("KV Cache read error: ", e);
+    }
+  }
+
+  const rawBusinesses: any[] = [];
+  let nominatimStatus = "unattempted";
+  let overpassStatus = "unattempted";
+  let bizdataStatus = "unattempted";
+
+  // 1. Nominatim Resolution
+  const nominatimGeo = await fetchNominatimGeocoding(city);
+  nominatimStatus = nominatimGeo ? `resolved_bbox [${nominatimGeo.bbox.join(", ")}]` : "geocoding_fallback";
+
+  // 2. Overpass Mirror Cascade
+  const overpassRes = await fetchOverpassBusinesses(city, trade, nominatimGeo);
+  overpassStatus = overpassRes.status;
+  rawBusinesses.push(...overpassRes.businesses);
+
+  // 3. BizData (Only if Category in Official List)
+  const bizDataRes = await fetchBizDataBusinesses(city, trade);
+  bizdataStatus = bizDataRes.status;
+  rawBusinesses.push(...bizDataRes.businesses);
+
+  // Deduplicate
+  const seen = new Set<string>();
+  const deduped: any[] = [];
+  for (const item of rawBusinesses) {
+    const normName = (item.name || "").toLowerCase().trim().replace(/[^a-z0-9]/g, "");
+    const normCity = (item.city || "").toLowerCase().trim().replace(/[^a-z0-9]/g, "");
+    const key = `${normName}_${normCity}`;
+    if (normName && !seen.has(key)) {
+      seen.add(key);
+      deduped.push(item);
+    }
+  }
+
+  const discoveredRaw = rawBusinesses.length;
+  const filtered = discoveredRaw - deduped.length;
+  const reason = deduped.length > 0 
+    ? `Discovered ${deduped.length} businesses for ${city} - ${trade} across discovery cascade`
+    : `Zero businesses discovered for ${city} - ${trade}. Nominatim: ${nominatimStatus}, Overpass: ${overpassStatus}, BizData: ${bizdataStatus}`;
+
+  const diagnostics: DiscoveryDiagnostics = {
+    city,
+    trade,
+    nominatim_status: nominatimStatus,
+    overpass_status: overpassStatus,
+    bizdata_status: bizdataStatus,
+    discovered_raw: discoveredRaw,
+    filtered,
+    reason
+  };
 
   // Cache in KV for 24h
-  if (env.CACHE && results.length > 0) {
+  if (env.CACHE && deduped.length > 0) {
     try {
-      await env.CACHE.put(cacheKey, JSON.stringify(results), { expirationTtl: 86400 });
-    } catch (e) {
-      console.warn("KV Cache write error: ", e);
-    }
+      await env.CACHE.put(cacheKey, JSON.stringify(deduped), { expirationTtl: 86400 });
+    } catch (e) {}
   }
 
-  return results;
+  return { businesses: deduped, diagnostics };
+}
+
+/**
+ * Backward compatibility wrapper
+ */
+export async function fetchLocalBusinesses(city: string, trade: string, env: Env): Promise<any[]> {
+  const res = await fetchLocalBusinessesWithDiagnostics(city, trade, env);
+  return res.businesses;
 }
 
 /**
@@ -2732,7 +3041,7 @@ function getTradePsychologyFallback(
     if (bveltAngle === "after_hours") {
       return {
         subject: `¿Servicios de emergencia de ${cTrade} en ${name}?`,
-        body: `Hola equipo de ${name},\n\nHe visto su sitio web y me he dado cuenta de que ofrecen servicios de emergencia de ${cTrade} las 24 horas en ${city}, pero dirigen a los clientes exclusivamente a su línea telefónica de voz. ¿Qué pasa con esas llamadas de urgencia cuando sus técnicos ya están ocupados en un servicio?\n\nBvelt es una aplicación sencilla que reactiva automáticamente prospectos perdidos y recupera trabajos para contratistas mediante SMS automatizados rápidos.\n\n¿Le interesaría que le envíe un enlace para ver una demo rápida de 2 minutos?\n\nSaludos cordiales,\nEl equipo de Bvelt\n\nReply STOP to opt out`
+        body: `Hola equipo de ${name},\n\nHe visto su sitio web y me he dado cuenta de que ofrecen servicios de emergencia de ${cTrade} las 24 horas en ${city}, pero dirigen a los clientes exclusivamente a su línea telefónica de voz. ¿Qué pasa con esas llamadas de urgencia cuando sus técnicos ya están ocupados en un servicio?\n\nBvelt es una aplicación sencilla que reactiva automáticamente prospectos perdidos y recupera trabajos para contratistas mediante SMS automatizados rápidos.\n\nSi quiere ver cómo funciona en 2 minutos → https://bvelt.app\n\nSaludos cordiales,\nEl equipo de Bvelt\n\nReply STOP to opt out`
       };
     } else if (bveltAngle === "sms_gap") {
       return {
@@ -2742,7 +3051,7 @@ function getTradePsychologyFallback(
     } else if (bveltAngle === "quote_followup") {
       return {
         subject: `Seguimiento de presupuestos de ${cTrade} en ${name}`,
-        body: `Hola equipo de ${name},\n\nHe notado que tienen un formulario de solicitud de presupuesto en línea para sus servicios de ${cTrade} en ${city}. Una vez que envían estas estimaciones de precios, ¿cómo están haciendo el seguimiento actualmente para asegurarse de cerrar esos trabajos pendientes?\n\nBvelt es una aplicación sencilla que reactiva automáticamente prospectos perdidos y recupera trabajos para contratistas mediante SMS automatizados rápidos.\n\n¿Le interesaría que le envíe un enlace para ver una demo rápida de 2 minutos?\n\nSaludos cordiales,\nEl equipo de Bvelt\n\nReply STOP to opt out`
+        body: `Hola equipo de ${name},\n\nHe notado que tienen un formulario de solicitud de presupuesto en línea para sus servicios de ${cTrade} en ${city}. Una vez que envían estas estimaciones de precios, ¿cómo están haciendo el seguimiento actualmente para asegurarse de cerrar esos trabajos pendientes?\n\nBvelt es una aplicación sencilla que reactiva automáticamente prospectos perdidos y recupera trabajos para contratistas mediante SMS automatizados rápidos.\n\nSi quiere ver cómo funciona en 2 minutos → https://bvelt.app\n\nSaludos cordiales,\nEl equipo de Bvelt\n\nReply STOP to opt out`
       };
     } else if (bveltAngle === "lead_reactivation") {
       return {
@@ -2761,7 +3070,7 @@ function getTradePsychologyFallback(
   if (bveltAngle === "after_hours") {
     return {
       subject: `Emergency ${cTrade} service at ${name}?`,
-      body: `Hi ${name} team,\n\nI noticed you advertise 24/7 emergency ${cTrade} service in ${city} and direct customers to call your phone line. What happens to those emergency calls when your team is already out on an active job?\n\nBvelt is a simple app that automatically re-engages missed leads and recovers lost jobs for contractors via fast, automated SMS.\n\nShould I send over a quick 2-minute demo link?\n\nBest regards,\nBvelt Team\n\nReply STOP to opt out`
+      body: `Hi ${name} team,\n\nI noticed you advertise 24/7 emergency ${cTrade} service in ${city} and direct customers to call your phone line. What happens to those emergency calls when your team is already out on an active job?\n\nBvelt is a simple app that automatically re-engages missed leads and recovers lost jobs for contractors via fast, automated SMS.\n\nIf you'd like to see how it works in 2 minutes → https://bvelt.app\n\nBest regards,\nBvelt Team\n\nReply STOP to opt out`
     };
   } else if (bveltAngle === "sms_gap") {
     return {
@@ -2771,7 +3080,7 @@ function getTradePsychologyFallback(
   } else if (bveltAngle === "quote_followup") {
     return {
       subject: `Following up on ${cTrade} estimates at ${name}`,
-      body: `Hi ${name} team,\n\nI noticed you have an online quote request form for your ${cTrade} services in ${city}. Once you send out those pricing estimates, how are you currently following up with those prospects to lock them in?\n\nBvelt is a simple app that automatically re-engages missed leads and recovers lost jobs for contractors via fast, automated SMS.\n\nShould I send over a quick 2-minute demo link?\n\nBest regards,\nBvelt Team\n\nReply STOP to opt out`
+      body: `Hi ${name} team,\n\nI noticed you have an online quote request form for your ${cTrade} services in ${city}. Once you send out those pricing estimates, how are you currently following up with those prospects to lock them in?\n\nBvelt is a simple app that automatically re-engages missed leads and recovers lost jobs for contractors via fast, automated SMS.\n\nIf you'd like to see how it works in 2 minutes → https://bvelt.app\n\nBest regards,\nBvelt Team\n\nReply STOP to opt out`
     };
   } else if (bveltAngle === "lead_reactivation") {
     return {

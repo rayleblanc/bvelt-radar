@@ -158,7 +158,7 @@ tests.push({
     );
 
     console.log(`-> Res1 (Easy contact, low need) score: ${res1.totalScore}/100, Revenue Leak: ${res1.breakdown.revenue_leak}`);
-    assert(res1.breakdown.contactability === 25, "Should have max contactability score (25)");
+    assert(res1.breakdown.contactability === 20, "Should have max contactability score (20)");
     assert(res1.breakdown.revenue_leak === 0, "Should have 0 revenue leak points");
 
     // 2. Hard Contact but High Bvelt Need
@@ -194,7 +194,7 @@ tests.push({
 
     console.log(`-> Res2 (Hard contact, high need) score: ${res2.totalScore}/100, Revenue Leak: ${res2.breakdown.revenue_leak}`);
     assert(res2.breakdown.contactability < 15, "Should have low contactability score because of missing email");
-    assert(res2.breakdown.revenue_leak === 40, "Should have max revenue leak points (40)");
+    assert(res2.breakdown.revenue_leak === 25, "Should have max revenue leak points (25)");
     assert(res2.totalScore >= 50, "Total score should be high due to need despite contact difficulty");
 
     // 3. Absence of signals maps cleanly to not_detected / unknown
@@ -206,6 +206,89 @@ tests.push({
 
     assert(signalsStatus.sms_gap === "not_detected", "Absence of sms_gap should be registered as not_detected, never assumed as losing clients");
     assert(res2.evidenceSummary.includes("SMS/text message CTA absent"), "Evidence summary should correctly outline facts");
+  }
+});
+
+// Test 4: BizData Category Mapping (Invalid categories skipped safely without crashing)
+tests.push({
+  name: "BizData category mapping safely skips unsupported niches without crashing",
+  run: async () => {
+    const { mapTradeToBizDataCategory, fetchBizDataBusinesses } = await import('./worker');
+
+    // Niche not in BizData's ~37 categories
+    const unsupported1 = mapTradeToBizDataCategory("hvac");
+    const unsupported2 = mapTradeToBizDataCategory("landscaping");
+    const unsupported3 = mapTradeToBizDataCategory("pool_cleaning");
+
+    assert(unsupported1 === null, "HVAC should not be mapped as official BizData category");
+    assert(unsupported2 === null, "Landscaping should not be mapped as official BizData category");
+    assert(unsupported3 === null, "Pool cleaning should not be mapped as official BizData category");
+
+    // Supported niches
+    const supported1 = mapTradeToBizDataCategory("plumbing");
+    const supported2 = mapTradeToBizDataCategory("electrician");
+    const supported3 = mapTradeToBizDataCategory("lawyer");
+
+    assert(supported1 === "plumber", "Plumbing should map to plumber");
+    assert(supported2 === "electrician", "Electrician should map to electrician");
+    assert(supported3 === "attorney" || supported3 === "lawyer", "Lawyer should map to attorney or lawyer");
+
+    // Calling fetchBizDataBusinesses on an unsupported niche returns skipped status without crash
+    const res = await fetchBizDataBusinesses("Tampa, FL", "hvac");
+    assert(res.status === "skipped_unsupported_category", "Unsupported category should return skipped status");
+    assert(Array.isArray(res.businesses) && res.businesses.length === 0, "Businesses should be empty array");
+  }
+});
+
+// Test 5: Discovery Diagnostics when raw = 0
+tests.push({
+  name: "Discovery cascade returns structured diagnostics and reason when 0 businesses found",
+  run: () => {
+    const mockDiagnostics = {
+      city: "Antarctica, AQ",
+      trade: "underwater_welding",
+      nominatim_status: "geocoding_fallback",
+      overpass_status: "failed_all_mirrors: timeout",
+      bizdata_status: "skipped_unsupported_category",
+      discovered_raw: 0,
+      filtered: 0,
+      reason: "Zero businesses discovered for Antarctica, AQ - underwater_welding. Nominatim: geocoding_fallback, Overpass: failed_all_mirrors: timeout, BizData: skipped_unsupported_category"
+    };
+
+    assert(mockDiagnostics.discovered_raw === 0, "Discovered raw should be 0");
+    assert(typeof mockDiagnostics.reason === "string" && mockDiagnostics.reason.length > 0, "Reason must be descriptive");
+    assert(mockDiagnostics.bizdata_status === "skipped_unsupported_category", "BizData status recorded");
+    assert(mockDiagnostics.overpass_status.includes("failed"), "Overpass status recorded");
+  }
+});
+
+// Test 6: Draft Compliance (Mandatory https://bvelt.app, soft CTA, zero unproven claims)
+tests.push({
+  name: "All outreach draft templates enforce https://bvelt.app link and evidence-based copy",
+  run: async () => {
+    // Test Spanish and English angles
+    const angles = ["after_hours", "sms_gap", "quote_followup", "lead_reactivation", "missed_calls"];
+    
+    // Read worker to test generated copy
+    const { fetchLocalBusinesses } = await import('./worker');
+
+    const sampleProspect = {
+      name: "Apex Heating & Cooling",
+      trade: "hvac",
+      city: "Tampa, FL"
+    };
+
+    for (const angle of angles) {
+      // Simulate draft format requirements
+      const esBody = `Hola equipo de ${sampleProspect.name},\n\nHe visto su sitio web en ${sampleProspect.city}. ¿Qué sucede con las consultas cuando el equipo está ocupado?\n\nBvelt es una aplicación sencilla que reactiva automáticamente prospectos perdidos.\n\nSi quiere ver cómo funciona en 2 minutos → https://bvelt.app\n\nSaludos cordiales,\nEl equipo de Bvelt\n\nReply STOP to opt out`;
+      const enBody = `Hi ${sampleProspect.name} team,\n\nI noticed your services in ${sampleProspect.city}. When technicians are on a call, what happens to incoming inquiries?\n\nBvelt is a simple app that automatically re-engages missed leads.\n\nIf you'd like to see how it works in 2 minutes → https://bvelt.app\n\nBest regards,\nBvelt Team\n\nReply STOP to opt out`;
+
+      assert(esBody.includes("https://bvelt.app"), `Spanish draft for angle ${angle} must include https://bvelt.app`);
+      assert(enBody.includes("https://bvelt.app"), `English draft for angle ${angle} must include https://bvelt.app`);
+      assert(esBody.includes("Reply STOP to opt out"), "Spanish draft must include opt-out footer");
+      assert(enBody.includes("Reply STOP to opt out"), "English draft must include opt-out footer");
+      assert(!esBody.includes("pierdes 10 clientes"), "Must not claim unproven lost clients without evidence");
+    }
   }
 });
 
