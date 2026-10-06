@@ -284,7 +284,7 @@ app.get('/demo', (req, res) => {
 </head>
 <body>
   <div class="container">
-    <div class="badge">Simulador Interactivo Bvelt</div>
+    <div class="badge">Simulador Interactivo Bvelt — Demostración de Capacidades</div>
     <h1>¿Qué pasa si un cliente llama a ${companyName} fuera de horario?</h1>
     <p class="sub">Los clientes que necesitan servicios de <strong>${tradeName}</strong> llaman al primer número que encuentran. Si nadie contesta en 30 segundos, llaman a tu competidor.</p>
     <div class="card">

@@ -84,6 +84,7 @@ export interface Env {
   TRUST_STACK_KEY?: string;
   FOUNDING_CITIES?: string; // e.g. "Tampa, FL;Austin, TX"
   FOUNDING_TRADES?: string; // e.g. "landscaping;hvac;plumbing"
+  FOUNDER_AUTO_OUTREACH?: string;
 }
 
 export interface MissionConfig {
@@ -1959,14 +1960,91 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
     return; // DO NOT SEND / DO NOT DISPATCH!
   }
 
-  // Gate allowed -> move status to QUEUED ("ready for founder")
+  // Check if FOUNDER_AUTO_OUTREACH is enabled for founder mode ONLY
+  const isAutoOutreachEnabled = job.mode === 'founder' && String(env.FOUNDER_AUTO_OUTREACH).toLowerCase() === 'true';
+
+  const todayDate = new Date().toISOString().split('T')[0];
+  const idempotencyKey = `idempotency:${prospect.id}:${(prospect.email || '').toLowerCase().trim()}:${todayDate}`;
+
+  // Idempotency check: If already sent today or in D1
+  if (prospect.status === 'sent') {
+    console.log(`[Outreach Idempotency] Prospect ${prospect.id} (${prospect.email}) is already sent. Marking already_sent.`);
+    try {
+      await env.RADAR_DB.prepare(
+        "INSERT OR IGNORE INTO outreach_idempotency (idempotency_key, prospect_id, email, status, created_at, updated_at) VALUES (?, ?, ?, 'already_sent', ?, ?)"
+      ).bind(idempotencyKey, prospect.id, prospect.email || '', new Date().toISOString(), new Date().toISOString()).run();
+    } catch (e) {}
+    return;
+  }
+
+  if (isAutoOutreachEnabled) {
+    const timestamp = new Date().toISOString();
+    let slotReserved = false;
+    let sendsTodayCount = 1;
+
+    try {
+      // Ensure sender governor state is reset for today if needed
+      await checkSenderGovernor(env);
+
+      // Atomic D1 slot check & reservation (enforces MAX_AUTO_OUTREACH_PER_DAY = 5)
+      const updateRes = await env.RADAR_DB.prepare(`
+        UPDATE sender_governor_state
+        SET sends_today = sends_today + 1, updated_at = ?
+        WHERE id = 'global_governor' AND sends_today < 5 AND status = 'active' AND last_reset_day = ?
+      `).bind(timestamp, todayDate).run() as any;
+
+      if (updateRes && updateRes.meta && updateRes.meta.changes > 0) {
+        slotReserved = true;
+        const govState = await env.RADAR_DB.prepare("SELECT sends_today FROM sender_governor_state WHERE id = 'global_governor'").first() as any;
+        sendsTodayCount = govState?.sends_today || 1;
+
+        // Reserve idempotency key in D1
+        await env.RADAR_DB.prepare(`
+          INSERT OR REPLACE INTO outreach_idempotency (idempotency_key, prospect_id, email, status, created_at, updated_at)
+          VALUES (?, ?, ?, 'reserved', ?, ?)
+        `).bind(idempotencyKey, prospect.id, prospect.email || '', timestamp, timestamp).run();
+      }
+    } catch (e) {
+      console.warn("[Auto-Outreach Governor Slot] Error attempting atomic reservation:", e);
+    }
+
+    if (slotReserved) {
+      // Execute automatic send
+      const sendRes = await sendOrQueueOutreach({ ...prospect, draft_subject: draft.subject, draft_body: draft.body }, job.run_id, env);
+
+      if (sendRes.success) {
+        // Update idempotency state to sent
+        try {
+          await env.RADAR_DB.prepare(
+            "UPDATE outreach_idempotency SET status = 'sent', updated_at = ? WHERE idempotency_key = ?"
+          ).bind(new Date().toISOString(), idempotencyKey).run();
+        } catch (e) {}
+
+        const autoSentMsg = formatProspectTelegramMessage({ ...prospect, draft_subject: draft.subject, draft_body: draft.body, status: 'sent' }) +
+          `\n\n⚡ <b>AUTO-SENT (${sendsTodayCount}/5)</b>\n📅 <b>Time:</b> <code>${new Date().toISOString()}</code>\n<i>Outreach enviado automáticamente por Founder Auto-Outreach.</i>`;
+
+        // Notify Telegram AFTER send WITHOUT requiring approval buttons
+        await notifyFounder(env, autoSentMsg);
+        return;
+      } else {
+        console.warn(`[Auto-Outreach] Send blocked or failed: ${sendRes.reason}`);
+        await env.RADAR_DB.prepare(
+          "UPDATE prospects SET status = 'hold', outcome = ?, updated_at = ? WHERE id = ?"
+        ).bind(sendRes.reason, new Date().toISOString(), prospect.id).run();
+        return;
+      }
+    } else {
+      console.log(`[Auto-Outreach] Daily auto outreach limit (5) reached or slot unavailable. Falling back to interactive approval queue.`);
+    }
+  }
+
+  // Fallback / Interactive Approval Flow (when FOUNDER_AUTO_OUTREACH is false or cap reached)
   await env.RADAR_DB.prepare(`
     UPDATE prospects
     SET draft_subject = ?, draft_body = ?, status = 'queued', updated_at = ?
     WHERE id = ?
   `).bind(draft.subject, draft.body, new Date().toISOString(), prospect_id).run();
 
-  // Call notifyFounder when prospect becomes actionable
   const actionableMsg = formatProspectTelegramMessage({ ...prospect, status: 'queued' });
   const inlineButtons = [
     [
@@ -3250,7 +3328,7 @@ async function generateAICopy(
   env: Env,
   missionConfig?: MissionConfig
 ): Promise<{ subject: string; body: string }> {
-  const bveltAngle = prospect.bveltAngle || "missed_calls";
+  const bveltAngle = prospect.bvelt_angle || prospect.bveltAngle || "missed_calls";
   const language = (missionConfig?.languages && missionConfig.languages[0]) || "en";
   const isSpanish = language.toLowerCase().startsWith("es");
 
@@ -3258,10 +3336,14 @@ async function generateAICopy(
   if (isSpanish) {
     if (bveltAngle === "after_hours") {
       angleFocus = "ANGLE: AFTER-HOURS EMERGENCY (Urgencias fuera de horario). Veo que se anuncian servicios de urgencia las 24 horas pero solo tienen una línea telefónica de voz. Pregunta respetuosamente qué pasa con esas llamadas de emergencia de alto valor cuando sus técnicos están ocupados en otro servicio.";
-    } else if (bveltAngle === "sms_gap") {
+    } else if (bveltAngle === "sms_gap" || bveltAngle === "contact_gap") {
       angleFocus = "ANGLE: SMS/TEXT GAP (Falta de mensajería). Veo que muestran el teléfono muy visible, pero no ofrecen opciones de mensajería instantánea ni SMS automáticos para los clientes. Pregunta respetuosamente qué porcentaje de clientes potenciales pierden porque la gente prefiere enviar mensajes en lugar de llamar por teléfono.";
+    } else if (bveltAngle === "booking_gap") {
+      angleFocus = "ANGLE: BOOKING GAP (Reserva en línea). Veo que sus clientes no tienen una opción de reserva o agendamiento directo en su sitio web. Pregunta respetuosamente cómo gestionan la captura de citas para no perder clientes que buscan agendar de inmediato.";
     } else if (bveltAngle === "quote_followup") {
       angleFocus = "ANGLE: QUOTE/ESTIMATE FOLLOW-UP (Seguimiento de presupuestos). Veo que tienen un formulario de solicitud de presupuesto en línea o cotizaciones gratis. Pregunta respetuosamente cómo están haciendo el seguimiento de los presupuestos enviados para asegurarse de cerrar esos trabajos pendientes.";
+    } else if (bveltAngle === "lead_capture_gap") {
+      angleFocus = "ANGLE: LEAD CAPTURE GAP (Captura de prospectos). Veo que ofrecen servicios pero no tienen una forma clara de capturar datos de visitantes rápidamente. Pregunta respetuosamente qué pasa con los visitantes que abandonan la página sin llamar.";
     } else if (bveltAngle === "lead_reactivation") {
       angleFocus = "ANGLE: LEAD REACTIVATION (Reactivación de prospectos). Veo que atienden múltiples zonas geográficas y tienen formularios de contacto. Pregunta respetuosamente qué pasa con los prospectos fríos o consultas no cerradas una vez que salen de su embudo activo.";
     } else {
@@ -3270,10 +3352,14 @@ async function generateAICopy(
   } else {
     if (bveltAngle === "after_hours") {
       angleFocus = "ANGLE: AFTER-HOURS EMERGENCY. I noticed you advertise 24/7 emergency support but direct visitors exclusively to a phone line. Ask what happens to those high-margin emergency calls when your technicians are already out on another active job.";
-    } else if (bveltAngle === "sms_gap") {
+    } else if (bveltAngle === "sms_gap" || bveltAngle === "contact_gap") {
       angleFocus = "ANGLE: SMS/TEXT GAP. I noticed you display a phone line prominently, but don't offer any text-back or SMS communication options for customers. Ask what percentage of consumers they might be losing because people prefer to text instead of making a voice call.";
+    } else if (bveltAngle === "booking_gap") {
+      angleFocus = "ANGLE: BOOKING GAP. I noticed your website doesn't offer an instant online booking option. Ask how they manage scheduling inquiries so they don't miss clients who want to book immediately.";
     } else if (bveltAngle === "quote_followup") {
       angleFocus = "ANGLE: QUOTE/ESTIMATE FOLLOW-UP. I noticed you have an online quote request form or advertise free estimates. Ask how they are currently following up on sent estimates to ensure they lock in those pending jobs.";
+    } else if (bveltAngle === "lead_capture_gap") {
+      angleFocus = "ANGLE: LEAD CAPTURE GAP. I noticed you offer services but lack a fast lead capture form. Ask what happens to site visitors who leave without placing a direct call.";
     } else if (bveltAngle === "lead_reactivation") {
       angleFocus = "ANGLE: LEAD REACTIVATION. I noticed you serve multiple geographic service areas and have lead forms. Ask what happens to cold or unconverted inquiries once they drop out of their active pipeline.";
     } else {
@@ -3293,15 +3379,15 @@ async function generateAICopy(
     ${angleFocus}
 
     REGLAS:
-    1. Idioma: Debe estar escrito en Español técnico y profesional (natural de España, México o Latinoamérica según corresponda, sin sonar robótico o traducido). Usa la terminología correcta para el sector ("aire acondicionado", "fontanería" o "plomería", "jardinería", "cerrajería", "reparación de tejados" según aplique).
+    1. Idioma: Debe estar escrito en Español técnico y profesional. Usa la terminología correcta para el sector ("aire acondicionado", "fontanería" o "plomería", "jardinería", "cerrajería", "reparación de tejados" según aplique).
     2. Longitud: Exactamente entre 90 y 110 palabras totales. Corto, al grano y amigable.
-    3. Primera línea: Formula una observación o pregunta concreta y respetuosa basada en las instrucciones del ángulo (e.g. "¿Qué sucede con las llamadas de urgencias cuando el equipo ya está atendiendo un servicio?"). NO afirmes como un hecho probado que están perdiendo dinero o llamadas, pregunta respetuosamente en su lugar.
+    3. Primera línea: Formula una observación o pregunta concreta y respetuosa basada en las instrucciones del ángulo. NO afirmes como un hecho probado que están perdiendo dinero o llamadas, pregunta respetuosamente en su lugar.
     4. Exactamente UNA oración que describa qué hace Bvelt: "Bvelt es una aplicación sencilla que reactiva automáticamente prospectos perdidos y recupera trabajos para contratistas mediante SMS automatizados rápidos."
-    5. Llamada a la acción suave (Soft CTA): "¿Le interesaría que le envíe un enlace para ver una demo rápida de 2 minutos?" o "Si quiere ver cómo funciona en 2 minutos → https://bvelt.app".
+    5. Llamada a la acción suave (Soft CTA): "Si quiere ver cómo funciona en 2 minutos → https://bvelt.app".
     6. Sin exageraciones, sin promesas vacías de dinero, sin tono de estafa o spam.
     7. PIE DE PÁGINA OBLIGATORIO: Siempre termina el cuerpo del correo con esta línea exacta en inglés para cumplir normativas: "Reply STOP to opt out"
 
-    Responde estrictamente en formato JSON:
+    Responde strictly en formato JSON:
     {
       "subject": "Asunto claro y conciso del correo",
       "body": "Cuerpo completo del correo aquí"
@@ -3319,9 +3405,9 @@ async function generateAICopy(
 
     RULES:
     1. Length: Exactly 90 to 110 words total. Punchy, authentic, and contractor-friendly.
-    2. First Line: Formulate a concrete, respectful observation or question based on the ANGLE instructions above (e.g., "I noticed you advertise 24/7 emergency HVAC support in Tampa but only direct visitors to call. What happens when the team is already out on a call?"). DO NOT state or claim that they are definitely losing calls or money as a proven fact—ask a question instead!
+    2. First Line: Formulate a concrete, respectful observation or question based on the ANGLE instructions above. DO NOT state or claim that they are definitely losing calls or money as a proven fact—ask a question instead!
     3. Exactly ONE sentence describing what Bvelt does: "Bvelt is a simple app that automatically re-engages missed leads and recovers lost jobs for contractors via fast, automated SMS."
-    4. Soft Call-to-Action: "If you'd like to see how it works in 2 minutes → https://bvelt.app" or "Should I send over a quick 2-minute demo link?".
+    4. Soft Call-to-Action: "If you'd like to see how it works in 2 minutes → https://bvelt.app".
     5. Zero hype, zero guaranteed dollar promises, zero scammy claims. Keep it highly practical.
     6. MANDATORY FOOTER: Always end the email body with this exact line: "Reply STOP to opt out"
 
@@ -3332,12 +3418,12 @@ async function generateAICopy(
     }
   `;
 
-  // 1. CASCADA GEMINI INTELIGENTE (Primary pipeline to maximize free-tier quota)
+  // 1. CASCADA GEMINI INTELIGENTE (Prioritizing Gemini 3.5 Flash-Lite -> Gemini 3.5 Flash -> Gemini 3.1 Flash-Lite)
   if (env.GEMINI_FOUNDER_API_KEY) {
-    const resA1 = await tryGemini("gemini-3.8-flash", env.GEMINI_FOUNDER_API_KEY, prompt);
+    const resA1 = await tryGemini("gemini-3.5-flash-lite", env.GEMINI_FOUNDER_API_KEY, prompt);
     if (resA1) return resA1;
 
-    const resA2 = await tryGemini("gemini-3.5-flash-lite", env.GEMINI_FOUNDER_API_KEY, prompt);
+    const resA2 = await tryGemini("gemini-3.5-flash", env.GEMINI_FOUNDER_API_KEY, prompt);
     if (resA2) return resA2;
 
     const resA3 = await tryGemini("gemini-3.1-flash-lite", env.GEMINI_FOUNDER_API_KEY, prompt);
@@ -3345,10 +3431,10 @@ async function generateAICopy(
   }
 
   if (env.GEMINI_SECONDARY_API_KEY) {
-    const resB1 = await tryGemini("gemini-3.8-flash", env.GEMINI_SECONDARY_API_KEY, prompt);
+    const resB1 = await tryGemini("gemini-3.5-flash-lite", env.GEMINI_SECONDARY_API_KEY, prompt);
     if (resB1) return resB1;
 
-    const resB2 = await tryGemini("gemini-3.5-flash-lite", env.GEMINI_SECONDARY_API_KEY, prompt);
+    const resB2 = await tryGemini("gemini-3.5-flash", env.GEMINI_SECONDARY_API_KEY, prompt);
     if (resB2) return resB2;
 
     const resB3 = await tryGemini("gemini-3.1-flash-lite", env.GEMINI_SECONDARY_API_KEY, prompt);
@@ -3357,7 +3443,7 @@ async function generateAICopy(
 
   // 2. GROQ FALLBACK (llama-3.3-70b-versatile)
   if (env.GROQ_API_KEY) {
-    console.log(`[Gemini Cascade] Bypassed or failed Gemini cascade. Calling Groq backup...`);
+    console.log(`[Gemini Cascade] Calling Groq backup...`);
     try {
       const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
         method: "POST",
@@ -3388,8 +3474,8 @@ async function generateAICopy(
   }
 
   // 3. Static High-Converting Template Fallback
-  console.log(`[Gemini Cascade] All AI pipelines failed. Reverting to static backup template.`);
-  return getTradePsychologyFallback(prospect.name, prospect.trade, prospect.city, bveltAngle, language);
+  console.log(`[Gemini Cascade] All AI pipelines failed. Reverting to deterministic backup template.`);
+  return getTradePsychologyFallback(prospect.name, prospect.trade, prospect.city, bveltAngle, language, prospect.phone);
 }
 
 /**
@@ -3410,21 +3496,30 @@ function getTradePsychologyFallback(
     : "https://bvelt.app";
 
   if (isSpanish) {
-    // Technical Spanish fallback templates
     if (bveltAngle === "after_hours") {
       return {
         subject: `¿Servicios de emergencia de ${cTrade} en ${name}?`,
         body: `Hola equipo de ${name},\n\nHe visto su sitio web y me he dado cuenta de que ofrecen servicios de emergencia de ${cTrade} las 24 horas en ${city}, pero dirigen a los clientes exclusivamente a su línea telefónica de voz. ¿Qué pasa con esas llamadas de urgencia cuando sus técnicos ya están ocupados en un servicio?\n\nBvelt es una aplicación sencilla que reactiva automáticamente prospectos perdidos y recupera trabajos para contratistas mediante SMS automatizados rápidos.\n\nSi quiere ver cómo funciona en 2 minutos → ${ctaLink}\n\nSaludos cordiales,\nEl equipo de Bvelt\n\nReply STOP to opt out`
       };
-    } else if (bveltAngle === "sms_gap") {
+    } else if (bveltAngle === "sms_gap" || bveltAngle === "contact_gap") {
       return {
         subject: `¿Sin opción de mensajes de texto para clientes de ${name}?`,
         body: `Hola equipo de ${name},\n\nHe estado revisando su sitio de servicios de ${cTrade} en ${city}. Veo que muestran su teléfono de forma muy visible, pero no ofrecen ninguna opción de chat o SMS de respuesta automática. ¿Qué porcentaje de clientes potenciales se pierden porque prefieren enviar un mensaje de texto en lugar de realizar una llamada de voz?\n\nBvelt es una aplicación sencilla que reactiva automáticamente prospectos perdidos y recupera trabajos para contratistas mediante SMS automatizados rápidos.\n\nSi quiere ver cómo funciona en 2 minutos → ${ctaLink}\n\nSaludos cordiales,\nEl equipo de Bvelt\n\nReply STOP to opt out`
+      };
+    } else if (bveltAngle === "booking_gap") {
+      return {
+        subject: `Reservas e itinerarios de ${cTrade} en ${name}`,
+        body: `Hola equipo de ${name},\n\nHe notado que ofrecen servicios de ${cTrade} en ${city}, pero sus clientes no disponen de una opción de agendamiento o reserva directa en línea. ¿Cómo gestionan las solicitudes para asegurar que no se pierdan clientes que desean agendar de inmediato?\n\nBvelt es una aplicación sencilla que reactiva automáticamente prospectos perdidos y recupera trabajos para contratistas mediante SMS automatizados rápidos.\n\nSi quiere ver cómo funciona en 2 minutos → ${ctaLink}\n\nSaludos cordiales,\nEl equipo de Bvelt\n\nReply STOP to opt out`
       };
     } else if (bveltAngle === "quote_followup") {
       return {
         subject: `Seguimiento de presupuestos de ${cTrade} en ${name}`,
         body: `Hola equipo de ${name},\n\nHe notado que tienen un formulario de solicitud de presupuesto en línea para sus servicios de ${cTrade} en ${city}. Una vez que envían estas estimaciones de precios, ¿cómo están haciendo el seguimiento actualmente para asegurarse de cerrar esos trabajos pendientes?\n\nBvelt es una aplicación sencilla que reactiva automáticamente prospectos perdidos y recupera trabajos para contratistas mediante SMS automatizados rápidos.\n\nSi quiere ver cómo funciona en 2 minutos → ${ctaLink}\n\nSaludos cordiales,\nEl equipo de Bvelt\n\nReply STOP to opt out`
+      };
+    } else if (bveltAngle === "lead_capture_gap") {
+      return {
+        subject: `Captura de clientes de ${cTrade} en ${city} para ${name}`,
+        body: `Hola equipo de ${name},\n\nHe revisado su presencia digital para servicios de ${cTrade} en ${city}. Veo que ofrecen servicios de calidad pero no cuentan con una captura rápida para visitantes que no realizan una llamada. ¿Qué ocurre con los prospectos que visitan su web fuera de horario?\n\nBvelt es una aplicación sencilla que reactiva automáticamente prospectos perdidos y recupera trabajos para contratistas mediante SMS automatizados rápidos.\n\nSi quiere ver cómo funciona en 2 minutos → ${ctaLink}\n\nSaludos cordiales,\nEl equipo de Bvelt\n\nReply STOP to opt out`
       };
     } else if (bveltAngle === "lead_reactivation") {
       return {
@@ -3445,15 +3540,25 @@ function getTradePsychologyFallback(
       subject: `Emergency ${cTrade} service at ${name}?`,
       body: `Hi ${name} team,\n\nI noticed you advertise 24/7 emergency ${cTrade} service in ${city} and direct customers to call your phone line. What happens to those emergency calls when your team is already out on an active job?\n\nBvelt is a simple app that automatically re-engages missed leads and recovers lost jobs for contractors via fast, automated SMS.\n\nIf you'd like to see how it works in 2 minutes → ${ctaLink}\n\nBest regards,\nBvelt Team\n\nReply STOP to opt out`
     };
-  } else if (bveltAngle === "sms_gap") {
+  } else if (bveltAngle === "sms_gap" || bveltAngle === "contact_gap") {
     return {
       subject: `No text option for ${name} customers?`,
       body: `Hi ${name} team,\n\nI came across your site and noticed your phone line prominently displayed for ${cTrade} services in ${city}, but didn't notice any text-back or SMS option. What percentage of potential customers drop off because they'd prefer to text instead of call?\n\nBvelt is a simple app that automatically re-engages missed leads and recovers lost jobs for contractors via fast, automated SMS.\n\nIf you'd like to see how it works in 2 minutes → ${ctaLink}\n\nBest regards,\nBvelt Team\n\nReply STOP to opt out`
+    };
+  } else if (bveltAngle === "booking_gap") {
+    return {
+      subject: `Booking ${cTrade} jobs at ${name}`,
+      body: `Hi ${name} team,\n\nI noticed you offer ${cTrade} services in ${city}, but don't have an instant online booking option on your website. How do you handle scheduling inquiries so you don't miss clients who want to book right away?\n\nBvelt is a simple app that automatically re-engages missed leads and recovers lost jobs for contractors via fast, automated SMS.\n\nIf you'd like to see how it works in 2 minutes → ${ctaLink}\n\nBest regards,\nBvelt Team\n\nReply STOP to opt out`
     };
   } else if (bveltAngle === "quote_followup") {
     return {
       subject: `Following up on ${cTrade} estimates at ${name}`,
       body: `Hi ${name} team,\n\nI noticed you have an online quote request form for your ${cTrade} services in ${city}. Once you send out those pricing estimates, how are you currently following up with those prospects to lock them in?\n\nBvelt is a simple app that automatically re-engages missed leads and recovers lost jobs for contractors via fast, automated SMS.\n\nIf you'd like to see how it works in 2 minutes → ${ctaLink}\n\nBest regards,\nBvelt Team\n\nReply STOP to opt out`
+    };
+  } else if (bveltAngle === "lead_capture_gap") {
+    return {
+      subject: `Capturing ${cTrade} leads at ${name}`,
+      body: `Hi ${name} team,\n\nI noticed your ${cTrade} site in ${city} has great service details but no fast lead capture form for visitors who don't call immediately. What happens to prospects who browse after business hours?\n\nBvelt is a simple app that automatically re-engages missed leads and recovers lost jobs for contractors via fast, automated SMS.\n\nIf you'd like to see how it works in 2 minutes → ${ctaLink}\n\nBest regards,\nBvelt Team\n\nReply STOP to opt out`
     };
   } else if (bveltAngle === "lead_reactivation") {
     return {
@@ -4201,9 +4306,11 @@ async function recordLearningEvent(
     niche?: string;
     outcome?: string;
     response_type?: string;
+    is_win?: boolean;
   }
 ): Promise<void> {
   const timestamp = new Date().toISOString();
+  const isWin = details?.is_win === true || ['positive', 'question', 'booked', 'converted'].includes(details?.response_type || '');
   const keys = [`city:${city}`, `trade:${trade}`];
   if (variantId) keys.push(`variant:${variantId}`);
   if (details?.angle) keys.push(`angle:${details.angle}`);
@@ -4214,13 +4321,14 @@ async function recordLearningEvent(
     try {
       const existing = await db.prepare("SELECT * FROM learning_stats WHERE key = ?").bind(key).first() as any;
       if (existing) {
-        const newSent = existing.sent_count + (isSent ? 1 : 0);
-        const newTotal = existing.total_count + 1;
-        await db.prepare("UPDATE learning_stats SET sent_count = ?, total_count = ?, updated_at = ? WHERE key = ?")
-          .bind(newSent, newTotal, timestamp, key).run();
+        const newSent = (existing.sent_count || 0) + (isSent ? 1 : 0);
+        const newWin = (existing.win_count || 0) + (isWin ? 1 : 0);
+        const newTotal = (existing.total_count || 0) + 1;
+        await db.prepare("UPDATE learning_stats SET sent_count = ?, win_count = ?, total_count = ?, updated_at = ? WHERE key = ?")
+          .bind(newSent, newWin, newTotal, timestamp, key).run();
       } else {
-        await db.prepare("INSERT INTO learning_stats (key, sent_count, total_count, updated_at) VALUES (?, ?, 1, ?)")
-          .bind(key, isSent ? 1 : 0, timestamp).run();
+        await db.prepare("INSERT INTO learning_stats (key, sent_count, win_count, total_count, updated_at) VALUES (?, ?, ?, 1, ?)")
+          .bind(key, isSent ? 1 : 0, isWin ? 1 : 0, timestamp).run();
       }
     } catch (e) {
       console.warn(`Learning event save warning for ${key}: `, e);
@@ -4235,12 +4343,13 @@ async function getLearningStats(db: D1Database): Promise<Record<string, number>>
   const winRates: Record<string, number> = {};
   try {
     if (!db || typeof db.prepare !== "function") return winRates;
-    const prep = db.prepare("SELECT key, sent_count, total_count FROM learning_stats WHERE total_count >= 5");
+    const prep = db.prepare("SELECT key, sent_count, win_count, total_count FROM learning_stats WHERE total_count >= 5");
     if (prep && typeof prep.all === "function") {
       const rows = await prep.all() as any;
       if (rows && rows.results) {
         for (const r of rows.results) {
-          winRates[r.key] = r.total_count > 0 ? (r.sent_count / r.total_count) : 0;
+          const wins = typeof r.win_count === 'number' ? r.win_count : 0;
+          winRates[r.key] = r.total_count > 0 ? (wins / r.total_count) : 0;
         }
       }
     }
@@ -4367,7 +4476,7 @@ function handleEdgeDemoPage(companyName: string, tradeName: string, phone: strin
 </head>
 <body>
   <div class="container">
-    <div class="badge">Simulador Interactivo Bvelt</div>
+    <div class="badge">Simulador Interactivo Bvelt — Demostración de Capacidades</div>
     <h1>¿Qué pasa si un cliente llama a ${safeName} fuera de horario?</h1>
     <p class="sub">Los clientes que necesitan servicios de <strong>${safeTrade}</strong> llaman al primer número que encuentran. Si nadie contesta en 30 segundos, llaman a tu competidor.</p>
 
