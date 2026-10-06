@@ -111,6 +111,8 @@ export default function App() {
   const [isScrubbing, setIsScrubbing] = useState(false);
   const [runState, setRunState] = useState<'idle' | 'queued' | 'running' | 'completed' | 'failed'>('idle');
   const [lastRunError, setLastRunError] = useState<string | null>(null);
+  const [isTestingTelegram, setIsTestingTelegram] = useState(false);
+  const [telegramToast, setTelegramToast] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
 
   // App UI states
   const [showConfig, setShowConfig] = useState(false);
@@ -379,6 +381,31 @@ export default function App() {
     }
   };
 
+  // Test Telegram Outbound Connectivity directly to Founder Chat
+  const testTelegramBot = async () => {
+    setIsTestingTelegram(true);
+    setTelegramToast(null);
+    try {
+      const res = await fetch(`${apiUrl}/api/telegram-test`, {
+        method: 'GET',
+        credentials: 'include'
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.success) {
+        const desc = data.telegram_response?.description || "Notificación de prueba enviada con éxito";
+        setTelegramToast({ type: 'success', message: `✅ Telegram LIVE: ${desc}` });
+      } else {
+        const err = data.error || data.telegram_response?.description || `HTTP ${res.status}: Falló el test`;
+        setTelegramToast({ type: 'error', message: `❌ Error Telegram: ${err}` });
+      }
+    } catch (e: any) {
+      setTelegramToast({ type: 'error', message: `❌ Error de conexión: ${e.message}` });
+    } finally {
+      setIsTestingTelegram(false);
+      setTimeout(() => setTelegramToast(null), 8000);
+    }
+  };
+
   // PWA Install prompt trigger
   const handlePwaInstall = async () => {
     if (deferredPrompt) {
@@ -394,6 +421,7 @@ export default function App() {
   // Status Category Categorizer & Badge Styles (8 Required States)
   const getCategory = (p: Prospect): StatusCategory => {
     const s = (p.status || '').toLowerCase();
+    const score = typeof p.score === 'number' ? p.score : 0;
     
     if (p.cooldown_until && new Date(p.cooldown_until).getTime() > Date.now()) {
       return 'BLOCKED';
@@ -401,7 +429,7 @@ export default function App() {
     if (p.suppression_reason || s === 'suppressed' || s === 'unsubscribed') {
       return 'SUPPRESSED';
     }
-    if (s === 'blocked' || s === 'hold' || s === 'discarded') {
+    if (s === 'blocked' || s === 'hold' || s === 'discarded' || s === 'disqualified') {
       return 'BLOCKED';
     }
     if (s === 'replied' || s === 'human_review' || s === 'positive' || s === 'question') {
@@ -416,8 +444,11 @@ export default function App() {
     if (s === 'approved' || s === 'drafted') {
       return 'APPROVED';
     }
-    if (s === 'qualified' || s === 'scored') {
+    if ((s === 'qualified' || s === 'scored') && score >= 45 && p.email) {
       return 'QUALIFIED';
+    }
+    if (s === 'scored' || s === 'disqualified' || score < 45 || !p.email) {
+      return 'BLOCKED';
     }
     return 'SCOUTED';
   };
@@ -744,6 +775,35 @@ export default function App() {
                   Activo
                 </span>
               </div>
+
+              {/* Telegram Test Trigger */}
+              <div className="pt-1">
+                <button
+                  onClick={testTelegramBot}
+                  disabled={isTestingTelegram}
+                  className="w-full py-2.5 px-3 rounded-xl bg-slate-900/80 hover:bg-slate-800/80 active:scale-[0.98] border border-slate-800 text-slate-300 text-xs font-mono font-bold flex items-center justify-center gap-2 transition-all"
+                >
+                  <Send className={`w-3.5 h-3.5 text-sky-400 ${isTestingTelegram ? 'animate-bounce' : ''}`} />
+                  {isTestingTelegram ? 'ENVIANDO TEST A TELEGRAM...' : 'Probar Telegram (LIVE)'}
+                </button>
+              </div>
+
+              {/* Telegram Test Toast */}
+              {telegramToast && (
+                <div className={`p-3 rounded-xl border text-xs font-mono flex items-center justify-between ${
+                  telegramToast.type === 'success' 
+                    ? 'bg-emerald-950/40 border-emerald-800/50 text-emerald-300' 
+                    : 'bg-rose-950/40 border-rose-800/50 text-rose-300'
+                }`}>
+                  <span>{telegramToast.message}</span>
+                  <button 
+                    onClick={() => setTelegramToast(null)} 
+                    className="text-slate-400 hover:text-white text-xs px-1"
+                  >
+                    ✕
+                  </button>
+                </div>
+              )}
             </div>
 
             {/* Metric Scoreboard */}
@@ -920,12 +980,22 @@ export default function App() {
                                 </button>
                               )}
 
-                              <button
-                                onClick={() => submitDecision(p.id, 'sent')}
-                                className="h-10 text-xs font-semibold rounded-lg bg-emerald-600/20 border border-emerald-500/20 text-emerald-400 hover:bg-emerald-600 hover:text-white"
-                              >
-                                ✓ Enviar (Lock)
-                              </button>
+                              {p.score >= 45 && p.email && !p.suppression_reason && !['blocked', 'discarded', 'suppressed', 'unsubscribed', 'disqualified'].includes((p.status || '').toLowerCase()) ? (
+                                <button
+                                  onClick={() => submitDecision(p.id, 'sent')}
+                                  className="h-10 text-xs font-semibold rounded-lg bg-emerald-600/20 border border-emerald-500/20 text-emerald-400 hover:bg-emerald-600 hover:text-white transition-colors"
+                                >
+                                  ✓ Enviar (Lock)
+                                </button>
+                              ) : (
+                                <button
+                                  disabled
+                                  className="h-10 text-xs font-semibold rounded-lg bg-slate-900 border border-slate-800 text-slate-600 cursor-not-allowed"
+                                  title="Requiere Score ≥ 45, email verificado y no estar bloqueado"
+                                >
+                                  Bloqueado (Sin Email / Score &lt; 45)
+                                </button>
+                              )}
 
                               <button
                                 onClick={() => submitDecision(p.id, 'discard')}

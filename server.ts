@@ -589,7 +589,7 @@ app.get(['/api/telegram-test', '/telegram-test'], secureMiddleware, async (req, 
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         chat_id: String(chatId).trim(),
-        text: "<b>📡 Bvelt Radar test OK</b> — Bot conectado y operativo a Telegram.\n\nNotificaciones outbound configuradas correctamente.",
+        text: "<b>📡 Bvelt Radar LIVE test OK</b> — Bot conectado y operativo a Telegram.\n\nNotificaciones outbound configuradas correctamente.",
         parse_mode: "HTML",
         disable_web_page_preview: true
       })
