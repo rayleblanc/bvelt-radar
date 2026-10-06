@@ -23,7 +23,7 @@ FOUNDING_TRADES = "landscaping;lawn_care;hvac;plumbing;house_cleaning;pool_clean
 [[d1_databases]]
 binding = "RADAR_DB"
 database_name = "bvelt-radar-db"
-database_id = "YOUR_D1_DATABASE_ID_HERE"
+database_id = "f1b1f311-c1e4-4318-be0f-aa84c38e0cc1"
 migrations_dir = "migrations"
 
 # Automated daily prospecting scheduled cron (runs once a day at 12:00 PM UTC)

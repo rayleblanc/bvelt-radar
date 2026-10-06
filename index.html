@@ -2,17 +2,37 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>Bvelt Radar — Consola de Prospección</title>
     <meta name="description" content="Descubrimiento y prospección autónoma de negocios locales para Bvelt, con integración de Hunter, Groq/Gemini, D1, KV y avisos por Telegram." />
     <meta property="og:title" content="Bvelt Radar — Consola de Prospección" />
     <meta property="og:description" content="Descubrimiento y prospección autónoma de negocios locales para Bvelt, con integración de Hunter, Groq/Gemini, D1, KV y avisos por Telegram." />
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary_large_image" />
+
+    <!-- PWA Integration -->
+    <link rel="manifest" href="/manifest.json" />
+    <meta name="theme-color" content="#020617" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Bvelt Radar" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
   </head>
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
+
+    <!-- Register Service Worker -->
+    <script>
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+          navigator.serviceWorker.register('/sw.js')
+            .then((reg) => console.log('Service Worker registrado con éxito:', reg.scope))
+            .catch((err) => console.warn('Fallo al registrar Service Worker:', err));
+        });
+      }
+    </script>
   </body>
 </html>
 
