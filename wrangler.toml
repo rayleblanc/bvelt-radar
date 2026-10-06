@@ -26,10 +26,6 @@ database_name = "bvelt-radar-db"
 database_id = "YOUR_D1_DATABASE_ID_HERE"
 migrations_dir = "migrations"
 
-[[kv_namespaces]]
-binding = "CACHE"
-id = "YOUR_KV_NAMESPACE_ID_HERE"
-
 # Automated daily prospecting scheduled cron (runs once a day at 12:00 PM UTC)
 [triggers]
 crons = ["0 12 * * *"]
