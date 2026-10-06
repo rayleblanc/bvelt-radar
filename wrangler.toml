@@ -6,9 +6,12 @@ compatibility_date = "2024-03-01"
 keep_vars = true
 
 [vars]
-# Target regions (Sun Belt default pool active in code if unset)
+# Target regions & market parameters (Sun Belt default pool active in code if unset)
 FOUNDING_CITIES = "Tampa, FL;Orlando, FL;Austin, TX;Houston, TX;Atlanta, GA;Nashville, TN"
 FOUNDING_TRADES = "landscaping;lawn_care;hvac;plumbing;house_cleaning;pool_cleaning;handyman;roofing;pest_control"
+FOUNDING_COUNTRIES = "US;MX;ES;CO"
+FOUNDING_LANGUAGES = "en;es"
+FOUNDING_MIN_SCORE = "50"
 
 # SECRETS (Configure via `npx wrangler secret put <NAME>`):
 # - FOUNDER_SERVICE_KEY: Bearer token for authenticating admin & /run endpoints
