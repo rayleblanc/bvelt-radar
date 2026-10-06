@@ -30,7 +30,10 @@ import {
   Mail,
   FileText,
   Clock,
-  Ban
+  Ban,
+  Lock,
+  KeyRound,
+  LogOut
 } from 'lucide-react';
 
 interface Prospect {
@@ -81,8 +84,12 @@ interface StatsSummary {
 export type StatusCategory = 'ALL' | 'SCOUTED' | 'QUALIFIED' | 'APPROVED' | 'QUEUED' | 'SENT' | 'REPLIED' | 'SUPPRESSED' | 'BLOCKED';
 
 export default function App() {
-  // Service configuration stored in localStorage
-  const [apiKey, setApiKey] = useState(() => localStorage.getItem('FOUNDER_SERVICE_KEY') || 'FOUNDER_SERVICE_KEY_LOCAL');
+  // Authentication status tracked via Worker HttpOnly session cookie
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
+  const [loginInputKey, setLoginInputKey] = useState('');
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const [isVerifying, setIsVerifying] = useState(false);
+
   const [apiUrl, setApiUrl] = useState(() => localStorage.getItem('RADAR_API_URL') || window.location.origin);
   
   // Pipeline/Telemetries data states
@@ -109,46 +116,75 @@ export default function App() {
   const [isIOS, setIsIOS] = useState(false);
   const [showIOSGuide, setShowIOSGuide] = useState(false);
 
-  // Load all telemetry endpoints
+  // Load all telemetry endpoints with HttpOnly session cookie credentials
   const fetchTelemetry = async () => {
     try {
       // 1. GET /health (public)
-      const healthRes = await fetch(`${apiUrl}/health`).catch(() => null);
-      if (!healthRes || !healthRes.ok) {
-        throw new Error('No se pudo conectar con el motor de Bvelt Radar.');
-      }
-      const healthData: Health = await healthRes.json();
-      setHealth(healthData);
-
-      if (healthData.queue?.last_error) {
-        setLastRunError(healthData.queue.last_error);
+      const healthRes = await fetch(`${apiUrl}/health`, { credentials: 'include' }).catch(() => null);
+      if (healthRes && healthRes.ok) {
+        const healthData: Health = await healthRes.json();
+        setHealth(healthData);
+        if (healthData.queue?.last_error) {
+          setLastRunError(healthData.queue.last_error);
+        }
       }
 
-      // 2. GET /stats
+      // 2. GET /stats (protected by Worker HttpOnly cookie)
       const statsRes = await fetch(`${apiUrl}/stats`, {
-        headers: { 'Authorization': `Bearer ${apiKey}` }
+        credentials: 'include'
       }).catch(() => null);
       
       if (statsRes && statsRes.ok) {
         const statsData = await statsRes.json();
         setStats(statsData);
-      } else {
-        if (statsRes?.status === 401) {
-          setErrorState("Credenciales inválidas. Verifica tu FOUNDER_SERVICE_KEY.");
-        } else {
-          setErrorState("Error al cargar estadísticas generales. Comprueba la API.");
-        }
+        setIsAuthenticated(true);
+      } else if (statsRes?.status === 401) {
+        setIsAuthenticated(false);
+        setLoading(false);
+        return;
       }
 
       // 3. GET /prospects (SINGLE REAL PRODUCTION ROUTE)
-      const prospectsRes = await fetch(`${apiUrl}/prospects`, {
-        headers: { 'Authorization': `Bearer ${apiKey}` }
+      let prospectsRes = await fetch(`${apiUrl}/prospects`, {
+        credentials: 'include'
       }).catch(() => null);
+
+      if (!prospectsRes || !prospectsRes.ok) {
+        prospectsRes = await fetch(`${apiUrl}/api/prospects`, {
+          credentials: 'include'
+        }).catch(() => null);
+      }
       
       if (prospectsRes && prospectsRes.ok) {
-        const pList: Prospect[] = await prospectsRes.json();
-        const sorted = pList.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+        const rawList = await prospectsRes.json();
+        const pList: any[] = Array.isArray(rawList) ? rawList : (rawList.prospects || []);
+        
+        const normalized: Prospect[] = pList.map((p: any) => ({
+          ...p,
+          id: p.id || `p-${Math.random().toString(36).substring(7)}`,
+          name: p.name || p.company_name || 'Sin Nombre',
+          city: p.city || 'Desconocida',
+          trade: p.trade || 'General',
+          website: p.website || p.website_url || null,
+          phone: p.phone || null,
+          email: p.email || null,
+          score: typeof p.score === 'number' ? p.score : (typeof p.overall_score === 'number' ? p.overall_score : (typeof p.total_score === 'number' ? p.total_score : 0)),
+          signals_json: typeof p.signals_json === 'string' ? p.signals_json : JSON.stringify(p.signals || p.signals_json || {}),
+          score_breakdown: p.score_breakdown || p.breakdown || (typeof p.score_details === 'string' ? p.score_details : ''),
+          draft_subject: p.draft_subject || p.subject || '',
+          draft_body: p.draft_body || p.body || p.draft || '',
+          bvelt_angle: p.bvelt_angle || p.angle || '',
+          status: p.status || 'scouted',
+          created_at: p.created_at || new Date().toISOString()
+        }));
+
+        const sorted = normalized.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
         setProspects(sorted);
+        setIsAuthenticated(true);
+      } else if (prospectsRes?.status === 401) {
+        setIsAuthenticated(false);
+        setLoading(false);
+        return;
       }
 
       setErrorState(null);
@@ -157,6 +193,49 @@ export default function App() {
       setErrorState(err.message || 'Error de conexión.');
       setLoading(false);
     }
+  };
+
+  const handleLogin = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    const candidate = loginInputKey.trim();
+    if (!candidate) {
+      setLoginError('Ingresa la Founder Service Key');
+      return;
+    }
+
+    setIsVerifying(true);
+    setLoginError(null);
+
+    try {
+      const res = await fetch(`${apiUrl}/verify-key`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ key: candidate })
+      }).catch(() => null);
+
+      if (res && res.ok) {
+        setIsAuthenticated(true);
+        setLoginError(null);
+        setIsVerifying(false);
+        setLoginInputKey('');
+        fetchTelemetry();
+      } else {
+        setLoginError('Clave incorrecta');
+        setIsVerifying(false);
+      }
+    } catch (err) {
+      setLoginError('Clave incorrecta');
+      setIsVerifying(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    await fetch(`${apiUrl}/logout`, { method: 'POST', credentials: 'include' }).catch(() => null);
+    setIsAuthenticated(false);
+    setProspects([]);
+    setStats(null);
+    setLoginError(null);
   };
 
   // On load triggers
@@ -178,13 +257,11 @@ export default function App() {
 
     window.addEventListener('beforeinstallprompt', handleInstallPrompt);
     return () => window.removeEventListener('beforeinstallprompt', handleInstallPrompt);
-  }, [apiUrl, apiKey]);
+  }, [apiUrl]);
 
   // Handle manual API config updates
-  const saveApiSettings = (key: string, urlVal: string) => {
-    localStorage.setItem('FOUNDER_SERVICE_KEY', key);
+  const saveApiSettings = (urlVal: string) => {
     localStorage.setItem('RADAR_API_URL', urlVal);
-    setApiKey(key);
     setApiUrl(urlVal);
     setShowConfig(false);
     setLoading(true);
@@ -204,9 +281,9 @@ export default function App() {
       const res = await fetch(`${apiUrl}/decision`, {
         method: 'POST',
         headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKey}`
+          'Content-Type': 'application/json'
         },
+        credentials: 'include',
         body: JSON.stringify({ id: prospectId, action })
       });
       if (res.ok) {
@@ -230,7 +307,7 @@ export default function App() {
       // 1. Send POST /run - returns IMMEDIATELY without waiting
       const startRes = await fetch(`${apiUrl}/run?mode=founder`, {
         method: 'POST',
-        headers: { 'Authorization': `Bearer ${apiKey}` }
+        credentials: 'include'
       });
       
       if (!startRes.ok) {
@@ -247,7 +324,7 @@ export default function App() {
       const interval = setInterval(async () => {
         pollCount++;
         try {
-          const checkRes = await fetch(`${apiUrl}/health`);
+          const checkRes = await fetch(`${apiUrl}/health`, { credentials: 'include' });
           if (checkRes.ok) {
             const checkData: Health = await checkRes.json();
             setHealth(checkData);
@@ -335,16 +412,43 @@ export default function App() {
   };
 
   const getStatusBadge = (p: Prospect) => {
+    const s = (p.status || '').toLowerCase();
+    
+    if (s === 'bounced' || s === 'bounce') {
+      return { label: 'BOUNCED', color: 'bg-rose-950/80 text-rose-300 border-rose-800' };
+    }
+    if (s === 'out_of_office' || s === 'ooo') {
+      return { label: 'OUT OF OFFICE', color: 'bg-amber-950/80 text-amber-300 border-amber-800' };
+    }
+    if (s === 'not_now') {
+      return { label: 'NOT NOW', color: 'bg-amber-950/50 text-amber-400 border-amber-800/40' };
+    }
+    if (s === 'human_review') {
+      return { label: 'HUMAN REVIEW', color: 'bg-orange-950/80 text-orange-300 border-orange-800' };
+    }
+    if (s === 'positive') {
+      return { label: 'POSITIVE REPLY', color: 'bg-emerald-950/80 text-emerald-300 border-emerald-800' };
+    }
+    if (s === 'question') {
+      return { label: 'QUESTION', color: 'bg-sky-950/80 text-sky-300 border-sky-800' };
+    }
+    if (s === 'converted') {
+      return { label: 'CONVERTED', color: 'bg-emerald-900 text-emerald-200 border-emerald-600' };
+    }
+    if (s === 'disqualified' || s === 'rejected') {
+      return { label: 'DISQUALIFIED', color: 'bg-zinc-900 text-zinc-500 border-zinc-800' };
+    }
+    
     const category = getCategory(p);
     switch (category) {
       case 'SUPPRESSED':
-        return { label: 'SUPPRESSED', color: 'bg-rose-950/50 text-rose-400 border-rose-800/40' };
+        return { label: s === 'unsubscribed' ? 'UNSUBSCRIBED' : 'SUPPRESSED', color: 'bg-rose-950/50 text-rose-400 border-rose-800/40' };
       case 'BLOCKED':
         return { label: p.cooldown_until ? 'COOLDOWN' : 'BLOCKED', color: 'bg-zinc-800/80 text-zinc-400 border-zinc-700/40' };
       case 'REPLIED':
         return { label: 'REPLIED', color: 'bg-orange-950/50 text-orange-400 border-orange-800/40' };
       case 'SENT':
-        return { label: 'SENT', color: 'bg-emerald-950/50 text-emerald-400 border-emerald-800/40' };
+        return { label: s === 'contacted' ? 'CONTACTED' : 'SENT', color: 'bg-emerald-950/50 text-emerald-400 border-emerald-800/40' };
       case 'QUEUED':
         return { label: 'QUEUED', color: 'bg-blue-950/50 text-blue-400 border-blue-800/40' };
       case 'APPROVED':
@@ -353,7 +457,7 @@ export default function App() {
         return { label: 'QUALIFIED', color: 'bg-cyan-950/50 text-cyan-400 border-cyan-800/40' };
       case 'SCOUTED':
       default:
-        return { label: 'SCOUTED', color: 'bg-slate-900 text-slate-400 border-slate-800' };
+        return { label: (p.status || 'SCOUTED').toUpperCase(), color: 'bg-slate-900 text-slate-400 border-slate-800' };
     }
   };
 
@@ -444,6 +548,17 @@ export default function App() {
             ) : null
           )}
 
+          {isAuthenticated && (
+            <button 
+              onClick={handleLogout}
+              title="Cerrar sesión"
+              className="flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-bold rounded-lg bg-rose-950/40 border border-rose-900/40 text-rose-300 hover:bg-rose-900/50 transition-colors"
+            >
+              <LogOut className="w-3.5 h-3.5 text-rose-400" />
+              Salir
+            </button>
+          )}
+
           <button 
             onClick={() => setShowConfig(!showConfig)}
             className="p-2 rounded-lg bg-slate-900/50 border border-slate-900 text-slate-400 hover:text-white"
@@ -452,6 +567,64 @@ export default function App() {
           </button>
         </div>
       </header>
+
+      {/* Founder Access Login Modal Overlay when unauthenticated */}
+      {!isAuthenticated && (
+        <div className="fixed inset-0 z-50 bg-slate-950/95 backdrop-blur-md flex items-center justify-center p-5">
+          <div className="w-full max-w-sm bg-slate-900 border border-slate-800 rounded-3xl p-6 space-y-5 shadow-2xl">
+            <div className="flex items-center gap-3">
+              <div className="bg-blue-600/10 p-2.5 rounded-2xl border border-blue-500/20">
+                <Lock className="w-6 h-6 text-blue-500" />
+              </div>
+              <div>
+                <h2 className="text-base font-bold text-white tracking-tight">Founder access</h2>
+                <p className="text-xs text-slate-400">Consola Privada Bvelt Radar</p>
+              </div>
+            </div>
+
+            <form onSubmit={handleLogin} className="space-y-4">
+              <div>
+                <label className="text-[10px] font-bold text-slate-400 block mb-1.5 font-mono uppercase tracking-wider">
+                  Founder Service Key
+                </label>
+                <div className="relative">
+                  <input
+                    type="password"
+                    value={loginInputKey}
+                    onChange={(e) => setLoginInputKey(e.target.value)}
+                    placeholder="••••••••••••••••"
+                    autoFocus
+                    className="w-full bg-slate-950 border border-slate-800 rounded-2xl px-4 py-3 text-slate-100 font-mono text-sm focus:outline-none focus:border-blue-500 transition-colors"
+                  />
+                  <KeyRound className="w-4 h-4 text-slate-600 absolute right-4 top-3.5" />
+                </div>
+              </div>
+
+              {loginError && (
+                <div className="bg-rose-950/40 border border-rose-900/50 p-3 rounded-2xl text-xs text-rose-300 font-mono flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+                  <span>{loginError}</span>
+                </div>
+              )}
+
+              <button
+                type="submit"
+                disabled={isVerifying}
+                className="w-full h-12 rounded-2xl bg-blue-600 hover:bg-blue-500 active:scale-95 disabled:bg-slate-800 disabled:text-slate-500 text-white font-bold text-sm transition-all shadow-lg shadow-blue-600/20 flex items-center justify-center gap-2"
+              >
+                {isVerifying ? (
+                  <>
+                    <RefreshCw className="w-4 h-4 text-white animate-spin" />
+                    Verificando...
+                  </>
+                ) : (
+                  'Entrar'
+                )}
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
 
       {/* Config Drawer */}
       {showConfig && (
@@ -467,21 +640,11 @@ export default function App() {
                 className="w-full bg-slate-950 border border-slate-800 rounded px-2.5 py-2 text-slate-200 focus:outline-none"
               />
             </div>
-            <div>
-              <label className="text-[10px] text-slate-500 block mb-1">FOUNDER_SERVICE_KEY (Bearer)</label>
-              <input 
-                type="password" 
-                defaultValue={apiKey}
-                id="cfg-key"
-                className="w-full bg-slate-950 border border-slate-800 rounded px-2.5 py-2 text-slate-200 focus:outline-none"
-              />
-            </div>
             <div className="flex gap-2.5 pt-2">
               <button 
                 onClick={() => {
                   const urlVal = (document.getElementById('cfg-url') as HTMLInputElement).value;
-                  const keyVal = (document.getElementById('cfg-key') as HTMLInputElement).value;
-                  saveApiSettings(keyVal, urlVal);
+                  saveApiSettings(urlVal);
                 }}
                 className="flex-1 py-2 text-center bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-lg"
               >

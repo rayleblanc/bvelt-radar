@@ -117,13 +117,13 @@ export const DEFAULT_FOUNDER_MISSION: MissionConfig = {
   subniches: ["residential_contractors", "commercial_contractors", "emergency_service_providers"],
   services: ["repair", "maintenance", "installation", "cleaning"],
   geographies: ["Tampa, FL", "Austin, TX", "Orlando, FL", "Houston, TX", "Atlanta, GA", "Nashville, TN"],
-  countries: ["US"],
-  languages: ["en"],
+  countries: ["US", "MX", "ES", "CO", "CA", "GB", "AU"],
+  languages: ["en", "es"],
   icp: {
-    description: "Local service businesses with visible phone lines, websites, high-margin jobs, and lead-capture or emergency response friction.",
+    description: "Local service businesses with visible phone lines, websites, high-margin jobs, and lead-capture or emergency response friction across any market.",
     keywords: ["plumber", "hvac", "electrician", "contractor", "cleaning", "landscaping"]
   },
-  min_score: 50,
+  min_score: 0,
   max_daily_outreach: 10
 };
 
@@ -198,18 +198,81 @@ export default {
         return await handleHealth(env, corsHeaders);
       }
 
+      // 1b. Public Personalized Edge Demo Page for Cold Outreach Leads
+      if (path === "/demo" && method === "GET") {
+        const companyName = url.searchParams.get("name") || "Tu Negocio";
+        const tradeName = url.searchParams.get("trade") || "Servicios";
+        const phone = url.searchParams.get("phone") || "";
+        return handleEdgeDemoPage(companyName, tradeName, phone);
+      }
+
       // 2. Telegram Webhook Callback Endpoint (handles interactive inline buttons)
       if ((path === "/telegram/webhook" || path === "/telegram-webhook") && method === "POST") {
         return await handleTelegramWebhook(request, env, corsHeaders);
       }
 
-      // 3. Security Verification for Admin/Worker Endpoints
-      const authHeader = request.headers.get("Authorization");
-      const queryKey = url.searchParams.get("key");
+      // Helper to parse cookies from request header
+      const cookieHeader = request.headers.get("Cookie") || "";
+      const parsedCookies: Record<string, string> = {};
+      cookieHeader.split(";").forEach(c => {
+        const [k, ...v] = c.trim().split("=");
+        if (k) parsedCookies[k.trim()] = decodeURIComponent(v.join("=").trim());
+      });
+
       const serviceKey = env.FOUNDER_SERVICE_KEY;
 
+      // Compute deterministic session hash for current founder secret
+      let validSessionHash = "";
+      if (serviceKey) {
+        const hashBuffer = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`bvelt_radar_session:${serviceKey}`));
+        validSessionHash = Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, "0")).join("");
+      }
+
+      // 2b. Public Key Verification Endpoint with HttpOnly Session Cookie
+      if ((path === "/verify-key" || path === "/api/verify-key") && method === "POST") {
+        const body: any = await request.json().catch(() => ({}));
+        const candidateKey = body.key || body.founder_key;
+        if (candidateKey && serviceKey && candidateKey === serviceKey) {
+          const cookieVal = `bvelt_session=${validSessionHash}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=2592000`;
+          const resHeaders = new Headers(corsHeaders);
+          resHeaders.set("Set-Cookie", cookieVal);
+          resHeaders.set("Content-Type", "application/json");
+          return new Response(JSON.stringify({ success: true, valid: true }), {
+            status: 200,
+            headers: resHeaders
+          });
+        }
+        return Response.json({ success: false, valid: false, error: "Clave incorrecta" }, { status: 401, headers: corsHeaders });
+      }
+
+      // 2c. Session Logout Endpoint (Clears HttpOnly Cookie)
+      if ((path === "/logout" || path === "/api/logout") && method === "POST") {
+        const resHeaders = new Headers(corsHeaders);
+        resHeaders.set("Set-Cookie", "bvelt_session=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0");
+        resHeaders.set("Content-Type", "application/json");
+        return new Response(JSON.stringify({ success: true, logged_out: true }), {
+          status: 200,
+          headers: resHeaders
+        });
+      }
+
+      // 2d. Serve PWA Console Static Assets for Root / Non-API Paths
+      if ((env as any).ASSETS && !path.startsWith("/api/") && !["/run", "/health", "/stats", "/decision", "/suppression", "/prospects", "/seeds", "/verify-key", "/logout", "/telegram/webhook", "/telegram-webhook"].includes(path)) {
+        const assetRes = await (env as any).ASSETS.fetch(request);
+        if (assetRes.status !== 404) {
+          return assetRes;
+        }
+      }
+
+      // 3. Security Verification for Admin/Worker Endpoints (Supports HttpOnly Cookie OR Bearer token)
+      const authHeader = request.headers.get("Authorization");
+      const queryKey = url.searchParams.get("key");
+      const sessionCookie = parsedCookies["bvelt_session"];
+
       let isAuthorized = false;
-      if (authHeader && authHeader.startsWith("Bearer ") && authHeader.split(" ")[1] === serviceKey) {
+      if (validSessionHash && sessionCookie === validSessionHash) {
+        isAuthorized = true;
+      } else if (authHeader && authHeader.startsWith("Bearer ") && authHeader.split(" ")[1] === serviceKey) {
         isAuthorized = true;
       } else if (queryKey && queryKey === serviceKey) {
         isAuthorized = true;
@@ -285,7 +348,7 @@ export default {
       }
 
       // 8. Single Production Prospects Fetching Endpoint
-      if (path === "/prospects" && method === "GET") {
+      if ((path === "/prospects" || path === "/api/prospects") && method === "GET") {
         const limit = url.searchParams.get("limit") || "100";
         const status = url.searchParams.get("status");
         
@@ -1371,14 +1434,19 @@ async function handleEnrichJob(job: RadarJobMessage, env: Env): Promise<void> {
   }
 
   let emailCandidate = prospect.email || websiteEmail;
-  if (!emailCandidate && prospect.website && isRealWebsite(prospect.website) && env.HUNTER_API_KEY) {
-    const domain = getDomain(prospect.website);
-    if (domain) {
-      try {
-        const hunterEmail = await fetchHunterEmail(domain, env.HUNTER_API_KEY);
-        if (hunterEmail) emailCandidate = hunterEmail;
-      } catch (e: any) {}
-    }
+  const domain = prospect.website && isRealWebsite(prospect.website) ? getDomain(prospect.website) : null;
+  let hasValidMx = false;
+
+  if (domain) {
+    hasValidMx = await checkDomainMxRecords(domain);
+  }
+
+  // If website HTML didn't expose an email, only consult Hunter if MX records actually exist
+  if (!emailCandidate && domain && hasValidMx && env.HUNTER_API_KEY) {
+    try {
+      const hunterEmail = await fetchHunterEmail(domain, env.HUNTER_API_KEY);
+      if (hunterEmail) emailCandidate = hunterEmail;
+    } catch (e: any) {}
   }
 
   let isEmailValidated = false;
@@ -2772,10 +2840,14 @@ async function dispatchInteractiveTelegramAlert(
     cardText += `📝 *Asunto:* _${escapeMarkdown(p.draft_subject)}_\n`;
     cardText += `💬 *Copy Propuesto:*\n\`\`\`\n${escapeMarkdown(p.draft_body)}\n\`\`\``;
 
+    const demoUrl = `https://bvelt-radar.rainerblanco405.workers.dev/demo?name=${encodeURIComponent(p.name)}&trade=${encodeURIComponent(p.trade || "contractor")}&phone=${encodeURIComponent(p.websitePhone || "")}`;
     const inlineKeyboard = {
       inline_keyboard: [
         [
           { text: "✅ Mark Sent", callback_data: `sent:${p.id}` },
+          { text: "👁️ Ver Demo", url: demoUrl }
+        ],
+        [
           { text: "❌ Discard", callback_data: `discard:${p.id}` },
           { text: "🚫 Suppress", callback_data: `suppress:${p.id}` }
         ]
@@ -2864,8 +2936,9 @@ async function scrapeWebsiteContact(url: string): Promise<{
     signals.estimate_language = /estimate|quote|calculator|bidding|bid|presupuesto|cotizar|cotizacion|cotización|estimacion|estimación|tarifa|precio/i.test(normalizedHtml);
     signals.lead_capture = /newsletter|subscribe|opt-in|sign up for|promotions|coupon|boletin|boletín|suscribir|suscríbete|descuento|promocion|promoción/i.test(normalizedHtml);
     
+    const hasLiveChat = /crisp\.chat|tawk\.to|intercom|tidio|zendesk|drift|hubspot|livechat/i.test(normalizedHtml);
     const hasSmsLanguage = /text us|sms|send a text|text option|escribenos|escríbenos|enviar texto|mensaje de texto|whatsapp|whastapp/i.test(normalizedHtml);
-    signals.sms_gap = (signals.call_cta || !!phone) && !hasSmsLanguage;
+    signals.sms_gap = (signals.call_cta || !!phone) && !hasSmsLanguage && !hasLiveChat;
 
     return { email, phone, signals };
   } catch (err) {
@@ -3466,4 +3539,136 @@ function escapeMarkdown(text: string): string {
     .replace(/`/g, "\\`")
     .replace(/\(/g, "\\(")
     .replace(/\)/g, "\\)");
+}
+
+/**
+ * Zero-cost Cloudflare 1.1.1.1 DNS over HTTPS MX verification
+ */
+async function checkDomainMxRecords(domain: string): Promise<boolean> {
+  try {
+    const res = await fetch(`https://1.1.1.1/dns-query?name=${encodeURIComponent(domain)}&type=MX`, {
+      headers: { "accept": "application/dns-json" },
+      signal: AbortSignal.timeout(3000)
+    });
+    if (res.ok) {
+      const data: any = await res.json();
+      return Array.isArray(data.Answer) && data.Answer.length > 0;
+    }
+  } catch (e) {}
+  return false;
+}
+
+function escapeHtml(str: string): string {
+  if (!str) return "";
+  return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
+}
+
+/**
+ * Edge-Rendered Interactive Demo for Prospects
+ */
+function handleEdgeDemoPage(companyName: string, tradeName: string, phone: string): Response {
+  const safeName = escapeHtml(companyName);
+  const safeTrade = escapeHtml(tradeName);
+  const safePhone = escapeHtml(phone || "(Línea de Voz)");
+
+  const html = `<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Bvelt Demo · ${safeName}</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+    body { background: #020617; color: #f8fafc; min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 24px 16px; }
+    .container { max-width: 480px; width: 100%; }
+    .badge { display: inline-flex; align-items: center; gap: 6px; background: rgba(37,99,235,0.15); border: 1px solid rgba(59,130,246,0.3); color: #60a5fa; font-size: 11px; font-weight: 700; padding: 4px 12px; border-radius: 9999px; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 12px; }
+    h1 { font-size: 22px; font-weight: 800; line-height: 1.25; margin-bottom: 8px; color: #ffffff; }
+    p.sub { font-size: 13px; color: #94a3b8; line-height: 1.5; margin-bottom: 24px; }
+    .card { background: #0f172a; border: 1px solid #1e293b; border-radius: 20px; padding: 20px; margin-bottom: 20px; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.5); }
+    .sim-header { display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #1e293b; padding-bottom: 12px; margin-bottom: 16px; }
+    .sim-title { font-size: 12px; font-weight: 700; color: #cbd5e1; display: flex; align-items: center; gap: 8px; }
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #10b981; animation: pulse 2s infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+    .timeline { display: flex; flex-direction: column; gap: 14px; font-size: 12px; }
+    .event { display: flex; gap: 12px; }
+    .event-time { color: #64748b; font-family: monospace; font-size: 11px; width: 55px; flex-shrink: 0; padding-top: 2px; }
+    .event-body { flex: 1; }
+    .call-box { background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.2); border-radius: 12px; padding: 10px 12px; color: #fca5a5; }
+    .sms-box { background: rgba(37,99,235,0.15); border: 1px solid rgba(59,130,246,0.3); border-radius: 12px; padding: 12px; color: #bfdbfe; margin-top: 4px; }
+    .client-box { background: #1e293b; border-radius: 12px; padding: 10px 12px; color: #e2e8f0; margin-top: 4px; }
+    .booked-box { background: rgba(16,185,129,0.15); border: 1px solid rgba(16,185,129,0.3); border-radius: 12px; padding: 10px 12px; color: #6ee7b7; font-weight: 600; margin-top: 4px; }
+    .stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 24px; }
+    .stat-card { background: #0f172a; border: 1px solid #1e293b; border-radius: 16px; padding: 14px; text-align: center; }
+    .stat-val { font-size: 20px; font-weight: 800; color: #38bdf8; }
+    .stat-label { font-size: 10px; font-weight: 600; color: #64748b; text-transform: uppercase; margin-top: 4px; }
+    .cta-btn { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; height: 50px; background: #2563eb; color: #ffffff; text-decoration: none; font-size: 14px; font-weight: 700; border-radius: 14px; transition: background 0.2s; box-shadow: 0 4px 14px rgba(37,99,235,0.4); }
+    .cta-btn:hover { background: #1d4ed8; }
+    .footer { text-align: center; font-size: 11px; color: #64748b; margin-top: 24px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="badge">Simulador Interactivo Bvelt</div>
+    <h1>¿Qué pasa si un cliente llama a ${safeName} fuera de horario?</h1>
+    <p class="sub">Los clientes que necesitan servicios de <strong>${safeTrade}</strong> llaman al primer número que encuentran. Si nadie contesta en 30 segundos, llaman a tu competidor.</p>
+
+    <div class="card">
+      <div class="sim-header">
+        <div class="sim-title"><span class="status-dot"></span> Bvelt Call Recovery en Acción</div>
+        <span style="font-size: 11px; color: #64748b;">${safePhone}</span>
+      </div>
+
+      <div class="timeline">
+        <div class="event">
+          <div class="event-time">8:42 PM</div>
+          <div class="event-body">
+            <div class="call-box">📞 Llamada perdida de cliente nuevo (técnicos ocupados en un servicio)</div>
+          </div>
+        </div>
+        <div class="event">
+          <div class="event-time">8:42 PM</div>
+          <div class="event-body">
+            <div style="font-size: 10px; color: #60a5fa; margin-bottom: 2px;">⚡ SMS instantáneo en 6 segundos</div>
+            <div class="sms-box">"Hola, gracias por llamar a <strong>${safeName}</strong>. Estamos terminando un servicio urgente. ¿En qué podemos ayudarte de inmediato?"</div>
+          </div>
+        </div>
+        <div class="event">
+          <div class="event-time">8:43 PM</div>
+          <div class="event-body">
+            <div class="client-box">"Hola, tengo un problema urgente y necesito cotización para mañana por la mañana."</div>
+          </div>
+        </div>
+        <div class="event">
+          <div class="event-time">8:44 PM</div>
+          <div class="event-body">
+            <div class="booked-box">✅ Trabajo agendado y notificado al propietario de ${safeName}. Cliente retenido.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-val">&lt; 8 seg</div>
+        <div class="stat-label">Tiempo de respuesta</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-val">+$3,400</div>
+        <div class="stat-label">Ingreso mensual recuperado</div>
+      </div>
+    </div>
+
+    <a href="https://bvelt.app" class="cta-btn" target="_blank" rel="noopener">Activar Bvelt para ${safeName} →</a>
+    <div class="footer">Bvelt · Autonomous Call Recovery & SMS Engine para Contratistas Locales</div>
+  </div>
+</body>
+</html>`;
+
+  return new Response(html, {
+    status: 200,
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "public, max-age=3600"
+    }
+  });
 }
