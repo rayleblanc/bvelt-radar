@@ -63,10 +63,17 @@ interface Prospect {
 
 interface Health {
   status: string;
+  telegram_configured?: boolean;
+  last_telegram_ok?: boolean | string | null;
   prospects_today: number;
+  prospects_by_status?: Record<string, number>;
+  queue_pending?: number;
   hunter_remaining_estimate: number;
   last_run: string | null;
+  last_run_diagnostics?: any;
+  diagnostics?: any;
   queue?: {
+    pending?: number;
     pending_or_processing: number;
     completed_jobs: number;
     failed_jobs: number;
@@ -126,6 +133,10 @@ export default function App() {
         setHealth(healthData);
         if (healthData.queue?.last_error) {
           setLastRunError(healthData.queue.last_error);
+        } else if (healthData.diagnostics?.reason && healthData.diagnostics?.discovered_raw === 0) {
+          setLastRunError(`Diagnostics (${healthData.diagnostics.city || 'Discovery'}/${healthData.diagnostics.trade || 'All'}): ${healthData.diagnostics.reason}`);
+        } else if (healthData.last_run_diagnostics?.reason && healthData.last_run_diagnostics?.discovered_raw === 0) {
+          setLastRunError(`Diagnostics: ${healthData.last_run_diagnostics.reason}`);
         }
       }
 
@@ -712,15 +723,28 @@ export default function App() {
               </div>
             </div>
 
-            {/* Action Trigger Button */}
-            <button
-              onClick={executeRadarScout}
-              disabled={isScrubbing}
-              className={`w-full h-14 min-h-[48px] rounded-2xl bg-blue-600 hover:bg-blue-500 active:scale-95 disabled:bg-slate-900 disabled:text-slate-500 font-bold text-sm tracking-wide transition-all shadow-xl shadow-blue-600/10 flex items-center justify-center gap-3`}
-            >
-              <RefreshCw className={`w-4 h-4 ${isScrubbing ? 'animate-spin' : ''}`} />
-              {isScrubbing ? 'CORRIENDO EN CLOUDFLARE...' : '▶ CORRER RADAR AHORA'}
-            </button>
+            {/* Action Trigger Button & Autonomous Daily Cron Label */}
+            <div className="space-y-2">
+              <button
+                onClick={executeRadarScout}
+                disabled={isScrubbing}
+                className={`w-full h-14 min-h-[48px] rounded-2xl bg-blue-600 hover:bg-blue-500 active:scale-95 disabled:bg-slate-900 disabled:text-slate-500 font-bold text-sm tracking-wide transition-all shadow-xl shadow-blue-600/10 flex items-center justify-center gap-3`}
+              >
+                <RefreshCw className={`w-4 h-4 ${isScrubbing ? 'animate-spin' : ''}`} />
+                {isScrubbing ? 'CORRIENDO EN CLOUDFLARE...' : '▶ CORRER RADAR AHORA'}
+              </button>
+              
+              <div className="flex items-center justify-between px-2 text-[11px] font-mono text-slate-400">
+                <span className="flex items-center gap-1.5">
+                  <Clock className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+                  <span>Cron: <strong className="text-slate-200">Autónomo diario (12:00 UTC)</strong></span>
+                </span>
+                <span className="inline-flex items-center gap-1 text-[10px] text-emerald-400 font-semibold bg-emerald-950/40 px-2 py-0.5 rounded-full border border-emerald-800/40">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                  Activo
+                </span>
+              </div>
+            </div>
 
             {/* Metric Scoreboard */}
             <div className="grid grid-cols-2 gap-3.5 font-mono text-slate-200">

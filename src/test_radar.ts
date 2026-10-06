@@ -330,6 +330,76 @@ tests.push({
   }
 });
 
+// Test 7: Hard Quality Gates (Banned retail chains & minimum actionable thresholds)
+tests.push({
+  name: "Hard Quality Gates block retail chains and reject junk rows (score < 35 & no email)",
+  run: async () => {
+    const { isHardRejectedChain, calculateMultiFactorScore } = await import('./worker');
+
+    // Banned retail chains
+    assert(isHardRejectedChain("Walmart Supercenter") === true, "Walmart must be hard-rejected");
+    assert(isHardRejectedChain("Lowe's Home Improvement") === true, "Lowe's must be hard-rejected");
+    assert(isHardRejectedChain("lowes plumbing supply") === true, "lowes must be hard-rejected");
+    assert(isHardRejectedChain("The Home Depot") === true, "Home Depot must be hard-rejected");
+    assert(isHardRejectedChain("Costco Wholesale") === true, "Costco must be hard-rejected");
+    assert(isHardRejectedChain("Target Store") === true, "Target must be hard-rejected");
+    assert(isHardRejectedChain("Sam's Club") === true, "Sam's Club must be hard-rejected");
+    assert(isHardRejectedChain("Menards Home Improvement") === true, "Menards must be hard-rejected");
+
+    // Real contractor operators NOT banned
+    assert(isHardRejectedChain("Apex Plumbing & Heating LLC") === false, "Contractor must not be banned");
+    assert(isHardRejectedChain("SunState HVAC Solutions") === false, "Contractor must not be banned");
+
+    // Scoring a retail chain returns 0
+    const walmartScore = calculateMultiFactorScore(
+      { name: "Walmart Supercenter", trade: "retail", city: "Tampa, FL" },
+      "info@walmart.com",
+      true,
+      "+18135550000",
+      true,
+      false,
+      {},
+      {}
+    );
+    assert(walmartScore.totalScore === 0, "Walmart score must be 0");
+    assert(walmartScore.breakdown.platform_fit === 0, "Platform fit for Walmart must be 0");
+  }
+});
+
+// Test 8: Telegram Outbound Notification Message Format & Compliance
+tests.push({
+  name: "Telegram outbound card formats clean HTML with bvelt.app link and required fields",
+  run: async () => {
+    const { formatProspectTelegramMessage } = await import('./worker');
+
+    const sampleProspect = {
+      id: "prospect-test-123",
+      name: "All Pro Plumbing Services",
+      city: "Tampa, FL",
+      trade: "plumbing",
+      score: 78,
+      email: "contact@allproplumbing.com",
+      phone: "+1 813 555 0199",
+      website: "https://allproplumbing.com",
+      bvelt_angle: "after_hours",
+      draft_subject: "¿Servicio de plomería de emergencia en Tampa?",
+      draft_body: "Hola equipo de All Pro Plumbing,\n\nNotamos que ofrecen servicio 24/7 en Tampa. ¿Qué pasa cuando entran llamadas mientras los técnicos están en un servicio urgente?\n\nBvelt recupera automáticamente prospectos perdidos vía SMS instantáneo → https://bvelt.app"
+    };
+
+    const cardHtml = formatProspectTelegramMessage(sampleProspect);
+
+    assert(cardHtml.includes("All Pro Plumbing Services"), "Card must include business name");
+    assert(cardHtml.includes("Tampa, FL"), "Card must include city");
+    assert(cardHtml.includes("plumbing"), "Card must include trade");
+    assert(cardHtml.includes("78/100"), "Card must include score");
+    assert(cardHtml.includes("contact@allproplumbing.com"), "Card must include email in code tag");
+    assert(cardHtml.includes("+1 813 555 0199"), "Card must include phone");
+    assert(cardHtml.includes("https://bvelt.app"), "Card must include https://bvelt.app link");
+    assert(cardHtml.includes("<b>"), "Card must use HTML formatting");
+    assert(!cardHtml.includes("```"), "Card must NOT use Markdown triple backticks");
+  }
+});
+
 // Run all test cases
 async function runTests() {
   let passedAll = true;

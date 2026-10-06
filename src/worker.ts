@@ -320,9 +320,23 @@ export default {
         return Response.json({ error: "Method Not Allowed" }, { status: 405, headers: corsHeaders });
       }
 
-      // Enforce authorization for remaining admin endpoints (/stats, /decision, /suppression)
+      // Enforce authorization for remaining admin endpoints (/stats, /decision, /suppression, /api/telegram-test)
       if (!isAuthorized) {
         return Response.json({ error: "Unauthorized. Missing or invalid service key." }, { status: 401, headers: corsHeaders });
+      }
+
+      // 3b. Telegram Test Endpoint (Founder-Key Protected)
+      if ((path === "/api/telegram-test" || path === "/telegram-test") && (method === "GET" || method === "POST")) {
+        const testRes = await notifyFounder(
+          env,
+          "<b>📡 Bvelt Radar test OK</b> — Bot conectado y operativo a Telegram.\n\nNotificaciones outbound configuradas correctamente."
+        );
+        return Response.json({
+          success: testRes.ok,
+          bot_token_configured: !!env.TELEGRAM_BOT_TOKEN,
+          chat_id: env.TELEGRAM_CHAT_ID ? String(env.TELEGRAM_CHAT_ID).trim() : null,
+          telegram_response: testRes
+        }, { headers: corsHeaders, status: testRes.ok ? 200 : 502 });
       }
 
       // 4. Stats Endpoint (Includes learning performance)
@@ -896,6 +910,15 @@ async function handleHealth(env: Env, headers: Record<string, string>): Promise<
   let failedJobs = 0;
   let lastError: string | null = null;
   let lastDiagnostics: any = null;
+  const prospectsByStatus: Record<string, number> = {};
+
+  const telegramConfigured = Boolean(
+    env.TELEGRAM_BOT_TOKEN &&
+    String(env.TELEGRAM_BOT_TOKEN).trim() !== '' &&
+    env.TELEGRAM_CHAT_ID &&
+    String(env.TELEGRAM_CHAT_ID).trim() !== ''
+  );
+  let lastTelegramOk: boolean | string | null = null;
 
   try {
     const todayRun = await db.prepare("SELECT * FROM runs WHERE day = ? ORDER BY created_at DESC LIMIT 1").bind(today).first() as any;
@@ -908,8 +931,17 @@ async function handleHealth(env: Env, headers: Record<string, string>): Promise<
           const errList = JSON.parse(todayRun.errors_json);
           if (Array.isArray(errList) && errList.length > 0) {
             lastDiagnostics = errList[errList.length - 1];
+            // Check for telegram outbound errors or successes
+            const tgError = errList.find((e: any) => e.source === 'telegram_outbound' || e.source === 'telegram_outbound_exception');
+            if (tgError) {
+              lastTelegramOk = false;
+            } else if (telegramConfigured) {
+              lastTelegramOk = true;
+            }
           }
         } catch (e) {}
+      } else if (telegramConfigured) {
+        lastTelegramOk = true;
       }
     } else {
       const latestRun = await db.prepare("SELECT * FROM runs ORDER BY created_at DESC LIMIT 1").first() as any;
@@ -920,6 +952,12 @@ async function handleHealth(env: Env, headers: Record<string, string>): Promise<
             const errList = JSON.parse(latestRun.errors_json);
             if (Array.isArray(errList) && errList.length > 0) {
               lastDiagnostics = errList[errList.length - 1];
+              const tgError = errList.find((e: any) => e.source === 'telegram_outbound' || e.source === 'telegram_outbound_exception');
+              if (tgError) {
+                lastTelegramOk = false;
+              } else if (telegramConfigured) {
+                lastTelegramOk = true;
+              }
             }
           } catch (e) {}
         }
@@ -929,12 +967,38 @@ async function handleHealth(env: Env, headers: Record<string, string>): Promise<
     console.warn("Health check stats query fallback: ", e);
   }
 
+  // Check latest prospect notification timestamp if available
+  try {
+    const notifiedProspect = await db.prepare(
+      "SELECT updated_at FROM prospects WHERE status IN ('notified', 'sent', 'approved') ORDER BY updated_at DESC LIMIT 1"
+    ).first() as any;
+    if (notifiedProspect && notifiedProspect.updated_at) {
+      lastTelegramOk = notifiedProspect.updated_at;
+    } else if (lastTelegramOk === null && telegramConfigured) {
+      lastTelegramOk = true;
+    }
+  } catch (e) {}
+
+  // Aggregate prospects counts by status
+  try {
+    const statusRows = await db.prepare("SELECT status, COUNT(*) as count FROM prospects GROUP BY status").all();
+    if (statusRows.results) {
+      for (const row of statusRows.results as any[]) {
+        if (row.status) {
+          prospectsByStatus[row.status] = row.count;
+        }
+      }
+    }
+  } catch (e) {
+    console.warn("Health check prospects_by_status query fallback:", e);
+  }
+
   try {
     const jobStats = await db.prepare("SELECT status, COUNT(*) as count FROM queue_jobs GROUP BY status").all();
     if (jobStats.results) {
       for (const r of jobStats.results as any[]) {
         if (r.status === 'pending' || r.status === 'processing') pendingJobs += r.count;
-        if (r.status === 'completed') completedJobs += r.count;
+        if (r.status === 'completed' || r.status === 'completed_zero_prospects') completedJobs += r.count;
         if (r.status === 'failed') failedJobs += r.count;
       }
     }
@@ -948,9 +1012,14 @@ async function handleHealth(env: Env, headers: Record<string, string>): Promise<
 
   return Response.json({
     status: failedJobs > 0 && pendingJobs === 0 ? "degraded" : "healthy",
+    telegram_configured: telegramConfigured,
+    last_telegram_ok: lastTelegramOk,
     prospects_today: prospectsToday,
+    prospects_by_status: prospectsByStatus,
+    queue_pending: pendingJobs,
     hunter_remaining_estimate: hunterRemaining,
     last_run: lastRunDate,
+    last_run_diagnostics: lastDiagnostics,
     diagnostics: lastDiagnostics || {
       bizdata_status: "ready",
       overpass_status: "ready",
@@ -960,6 +1029,7 @@ async function handleHealth(env: Env, headers: Record<string, string>): Promise<
       reason: prospectsToday > 0 ? "Discovery cascade operational" : "System ready"
     },
     queue: {
+      pending: pendingJobs,
       pending_or_processing: pendingJobs,
       completed_jobs: completedJobs,
       failed_jobs: failedJobs,
@@ -986,12 +1056,18 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
       const [action, prospectId] = callbackData.split(":");
 
       if (action && prospectId) {
-        // Execute decision
-        await handleDecision(prospectId, action, "Triggered via Telegram Button", env, {});
+        // Execute decision (approve maps to sent/approved, discard to discard, suppress to suppress)
+        const decisionAction = (action === "approve" || action === "sent") ? "sent" : (action === "discard" ? "discard" : action);
+        await handleDecision(prospectId, decisionAction, `Triggered via Telegram Button (${action})`, env, {});
 
         // Answer callback query so Telegram spinner stops
         if (env.TELEGRAM_BOT_TOKEN) {
-          const actionText = action === "sent" ? "✅ Marcado como Enviado" : action === "discard" ? "❌ Descartado" : "🚫 Dominio Suprimido";
+          const actionText = (action === "approve" || action === "sent")
+            ? "✅ Aprobado y puesto en cola de envío"
+            : action === "discard"
+            ? "❌ Descartado"
+            : "🚫 Dominio Suprimido";
+
           await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/answerCallbackQuery`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -1001,7 +1077,7 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
               show_alert: false,
             }),
             signal: AbortSignal.timeout(4000)
-          });
+          }).catch(e => console.warn("answerCallbackQuery warning: ", e));
 
           // Send confirmation text in chat
           await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
@@ -1009,11 +1085,11 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               chat_id: chatId,
-              text: `${actionText}: ID \`${prospectId}\` actualizado y registrado en D1.`,
-              parse_mode: "Markdown"
+              text: `<b>${actionText}</b>: ID <code>${escapeHtml(prospectId)}</code> actualizado y registrado en D1.`,
+              parse_mode: "HTML"
             }),
             signal: AbortSignal.timeout(4000)
-          });
+          }).catch(e => console.warn("sendMessage confirmation warning: ", e));
         }
       }
     }
@@ -1090,7 +1166,7 @@ async function handleDecision(
 
   const timestamp = new Date().toISOString();
 
-  if (action === "sent") {
+  if (action === "sent" || action === "approve") {
     // Mandatory Trust-Stack Governor Firewall Gate Check
     const gate = await verifyTrustStackGate(prospect, 'manual_send', env);
     if (!gate.allowed) {
@@ -1383,7 +1459,7 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
     const isMock = (candidate.email && candidate.email.toLowerCase().includes("example.com")) ||
                    (candidate.website && candidate.website.toLowerCase().includes("example.com")) ||
                    (candidate.name && (candidate.name.toLowerCase().includes("test business") || candidate.name.toLowerCase().includes("test contractor")));
-    if (isMock) {
+    if (isMock || isHardRejectedChain(candidate.name)) {
       filteredCount++;
       continue;
     }
@@ -1618,6 +1694,17 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
   const isPriorityCity = missionConfig.geographies.some(c => c.toLowerCase().includes(prospect.city.split(',')[0].toLowerCase()));
   const isPriorityTrade = missionConfig.niches.includes(prospect.trade.toLowerCase());
 
+  // 1. HARD QUALITY GATE: Immediate hard-reject retail chains
+  if (isHardRejectedChain(prospect.name)) {
+    console.warn(`[Quality Gate] Hard-rejected retail chain: ${prospect.name}`);
+    await env.RADAR_DB.prepare(`
+      UPDATE prospects
+      SET status = 'blocked', outcome = 'hard_rejected_chain', suppression_reason = 'Retail chain', updated_at = ?
+      WHERE id = ?
+    `).bind(new Date().toISOString(), prospect_id).run();
+    return;
+  }
+
   const { totalScore, breakdown, confidence, evidenceSummary } = calculateMultiFactorScore(
     prospect,
     prospect.email,
@@ -1626,7 +1713,8 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
     isPriorityCity,
     isPriorityTrade,
     learningStats,
-    signals
+    signals,
+    missionConfig
   );
 
   let bveltAngle = "missed_lead_response";
@@ -1657,6 +1745,24 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
     evidence_summary: evidenceSummary
   };
 
+  // Rule: Do not set QUALIFIED if score < 35 AND no email
+  if (totalScore < 35 && !prospect.email) {
+    await env.RADAR_DB.prepare(`
+      UPDATE prospects
+      SET score = ?, signals_json = ?, score_breakdown = ?, variant_id = ?, bvelt_angle = ?, status = 'disqualified', outcome = 'low_score_no_email', updated_at = ?
+      WHERE id = ?
+    `).bind(
+      totalScore,
+      JSON.stringify(updatedMeta),
+      JSON.stringify(breakdown),
+      variantId,
+      bveltAngle,
+      new Date().toISOString(),
+      prospect_id
+    ).run();
+    return;
+  }
+
   await env.RADAR_DB.prepare(`
     UPDATE prospects
     SET score = ?, signals_json = ?, score_breakdown = ?, variant_id = ?, bvelt_angle = ?, status = 'scored', updated_at = ?
@@ -1671,7 +1777,8 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
     prospect_id
   ).run();
 
-  if (totalScore >= (missionConfig.min_score || 50)) {
+  // Rule: "Pending approve" / QUEUED / HOLD only if: score >= 45 AND email present AND not hard-rejected
+  if (totalScore >= 45 && prospect.email && !isHardRejectedChain(prospect.name)) {
     await enqueueJob(env, {
       run_id: job.run_id,
       job_id: `approve_${prospect_id}`,
@@ -1691,7 +1798,18 @@ async function handleApproveJob(job: RadarJobMessage, env: Env): Promise<void> {
   const prospect = await env.RADAR_DB.prepare("SELECT * FROM prospects WHERE id = ?").bind(prospect_id).first() as any;
   if (!prospect) return;
 
-  if (['approved', 'drafted', 'notified', 'sent'].includes(prospect.status)) return;
+  if (isHardRejectedChain(prospect.name)) {
+    await env.RADAR_DB.prepare("UPDATE prospects SET status = 'blocked', outcome = 'hard_rejected_chain', updated_at = ? WHERE id = ?")
+      .bind(new Date().toISOString(), prospect_id).run();
+    return;
+  }
+
+  // Quality gate check: score >= 45 and email must be present
+  if ((prospect.score || 0) < 45 || !prospect.email) {
+    return;
+  }
+
+  if (['approved', 'drafted', 'queued', 'notified', 'sent'].includes(prospect.status)) return;
 
   await env.RADAR_DB.prepare(`
     UPDATE prospects SET status = 'approved', updated_at = ? WHERE id = ?
@@ -1715,7 +1833,18 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
   const prospect = await env.RADAR_DB.prepare("SELECT * FROM prospects WHERE id = ?").bind(prospect_id).first() as any;
   if (!prospect) return;
 
-  if (prospect.draft_body && ['drafted', 'notified', 'sent'].includes(prospect.status)) return;
+  if (isHardRejectedChain(prospect.name)) {
+    await env.RADAR_DB.prepare("UPDATE prospects SET status = 'blocked', outcome = 'hard_rejected_chain', updated_at = ? WHERE id = ?")
+      .bind(new Date().toISOString(), prospect_id).run();
+    return;
+  }
+
+  // Quality gate check
+  if ((prospect.score || 0) < 45 || !prospect.email) {
+    return;
+  }
+
+  if (prospect.draft_body && ['queued', 'notified', 'sent'].includes(prospect.status)) return;
 
   const dayOfYear = getDayOfYear(new Date());
   const { missionConfig } = await getPriorityTargets(dayOfYear, env, job.mode, job.tenant_id, overrides);
@@ -1727,12 +1856,6 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
   } catch (e: any) {
     draft = getTradePsychologyFallback(prospect.name, prospect.trade, prospect.city, prospect.variant_id || 'missed_calls', primaryLanguage);
   }
-
-  await env.RADAR_DB.prepare(`
-    UPDATE prospects
-    SET draft_subject = ?, draft_body = ?, status = 'drafted', updated_at = ?
-    WHERE id = ?
-  `).bind(draft.subject, draft.body, new Date().toISOString(), prospect_id).run();
 
   prospect.draft_subject = draft.subject;
   prospect.draft_body = draft.body;
@@ -1746,19 +1869,39 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
   if (!gate.allowed) {
     console.warn(`[Outreach Gate Blocked] Prospect ${prospect.name} (${prospect_id}) blocked by Trust-Stack Governor: ${gate.reason}`);
     await env.RADAR_DB.prepare(
-      "UPDATE prospects SET status = 'hold', outcome = ?, updated_at = ? WHERE id = ?"
-    ).bind(gate.reason, new Date().toISOString(), prospect_id).run();
+      "UPDATE prospects SET draft_subject = ?, draft_body = ?, status = 'hold', outcome = ?, updated_at = ? WHERE id = ?"
+    ).bind(draft.subject, draft.body, gate.reason, new Date().toISOString(), prospect_id).run();
+
+    // Notify founder that prospect is in HOLD state ("ready for founder")
+    const holdMsg = formatProspectTelegramMessage({ ...prospect, status: 'hold' }) +
+      `\n\n⚠️ <b>Estado:</b> EN ESPERA (HOLD) - ${escapeHtml(gate.reason)}`;
+    const inlineButtons = [
+      [
+        { text: "✅ Approve", callback_data: `approve:${prospect_id}` },
+        { text: "❌ Discard", callback_data: `discard:${prospect_id}` }
+      ]
+    ];
+    await notifyFounder(env, holdMsg, inlineButtons);
     return; // DO NOT SEND / DO NOT DISPATCH!
   }
 
-  if (env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID) {
-    try {
-      await dispatchInteractiveTelegramAlert([prospect], [prospect.city], [prospect.trade], env);
-      await env.RADAR_DB.prepare("UPDATE prospects SET status = 'notified' WHERE id = ?").bind(prospect_id).run();
-    } catch (tgErr: any) {
-      console.error("[Queue Outreach] Telegram dispatch error:", tgErr.message);
-    }
-  }
+  // Gate allowed -> move status to QUEUED ("ready for founder")
+  await env.RADAR_DB.prepare(`
+    UPDATE prospects
+    SET draft_subject = ?, draft_body = ?, status = 'queued', updated_at = ?
+    WHERE id = ?
+  `).bind(draft.subject, draft.body, new Date().toISOString(), prospect_id).run();
+
+  // Call notifyFounder when prospect becomes actionable
+  const actionableMsg = formatProspectTelegramMessage({ ...prospect, status: 'queued' });
+  const inlineButtons = [
+    [
+      { text: "✅ Approve", callback_data: `approve:${prospect_id}` },
+      { text: "❌ Discard", callback_data: `discard:${prospect_id}` }
+    ]
+  ];
+
+  await notifyFounder(env, actionableMsg, inlineButtons);
 }
 
 /**
@@ -2389,18 +2532,58 @@ export async function getPriorityTargets(
     }
   }
 
-  // Deterministically rotate 2 cities and 2 trades each day
-  const cityIdx1 = dayOfYear % config.geographies.length;
-  const cityIdx2 = (dayOfYear + 3) % config.geographies.length;
-  
-  const tradeIdx1 = (dayOfYear * 2) % config.niches.length;
-  const tradeIdx2 = (dayOfYear * 2 + 1) % config.niches.length;
+  let learningStats: Record<string, number> = {};
+  if (env.RADAR_DB) {
+    try {
+      learningStats = await getLearningStats(env.RADAR_DB);
+    } catch (e) {}
+  }
 
-  const activeCities = Array.from(new Set([config.geographies[cityIdx1], config.geographies[cityIdx2]]));
-  const activeTrades = Array.from(new Set([config.niches[tradeIdx1], config.niches[tradeIdx2]]));
+  // Weight and rank geographies based on learning stats
+  const sortedGeographies = [...config.geographies].sort((a, b) => {
+    const rateA = learningStats[`city:${a}`] ?? 0.5;
+    const rateB = learningStats[`city:${b}`] ?? 0.5;
+    return rateB - rateA;
+  });
+
+  // Weight and rank niches based on learning stats and preferred trade boost
+  const sortedNiches = [...config.niches].sort((a, b) => {
+    const rateA = (learningStats[`trade:${a}`] ?? 0.5) + (PREFERRED_TRADES.has(a.toLowerCase()) ? 0.2 : 0);
+    const rateB = (learningStats[`trade:${b}`] ?? 0.5) + (PREFERRED_TRADES.has(b.toLowerCase()) ? 0.2 : 0);
+    return rateB - rateA;
+  });
+
+  // Deterministically rotate across weighted geographies and niches (never single city)
+  const cityIdx1 = dayOfYear % sortedGeographies.length;
+  const cityIdx2 = (dayOfYear + 3) % sortedGeographies.length;
+  
+  const tradeIdx1 = (dayOfYear * 2) % sortedNiches.length;
+  const tradeIdx2 = (dayOfYear * 2 + 1) % sortedNiches.length;
+
+  const activeCities = Array.from(new Set([sortedGeographies[cityIdx1], sortedGeographies[cityIdx2]]));
+  const activeTrades = Array.from(new Set([sortedNiches[tradeIdx1], sortedNiches[tradeIdx2]]));
 
   return { activeCities, activeTrades, missionConfig: config };
 }
+
+/**
+ * Hard Quality Gate: Rejected Retail and Banned Chains (Bvelt ICP)
+ */
+export function isHardRejectedChain(name: string): boolean {
+  if (!name) return false;
+  const n = name.toLowerCase();
+  const banned = [
+    "walmart", "lowe's", "lowes", "home depot", "costco", "target", "sam's club", "sams club", "menards"
+  ];
+  return banned.some(b => n.includes(b));
+}
+
+/**
+ * Preferred Trades for Bvelt (Field Service & Contractor Operators)
+ */
+export const PREFERRED_TRADES = new Set([
+  "hvac", "plumbing", "electrical", "electrician", "roofing", "lawn_care", "landscaping", "pool", "pool_cleaning", "cleaning", "house_cleaning", "handyman"
+]);
 
 /**
  * Multi-Factor Scoring Algorithm (0-100)
@@ -2422,6 +2605,24 @@ export function calculateMultiFactorScore(
   signals: Record<string, boolean>,
   missionConfig?: MissionConfig
 ): { totalScore: number; breakdown: Record<string, number>; confidence: number; evidenceSummary: string } {
+  // Hard Quality Gate: immediate 0 score for retail chains
+  if (isHardRejectedChain(item.name)) {
+    return {
+      totalScore: 0,
+      breakdown: {
+        platform_fit: 0,
+        tenant_fit: 0,
+        evidence: 0,
+        contactability: 0,
+        commercial_opportunity: 0,
+        revenue_leak: 0,
+        bvelt_fit: 0
+      },
+      confidence: 0,
+      evidenceSummary: "Hard-rejected retail chain (banned from Bvelt ICP)."
+    };
+  }
+
   const isTenantMode = missionConfig?.mode === 'tenant';
 
   // 1. PLATFORM FIT (0 - 20 pts)
@@ -2429,7 +2630,14 @@ export function calculateMultiFactorScore(
   if (item.website && isRealWebsite(item.website)) platformFitScore += 5;
   if (signals.lead_capture || signals.contact_form || signals.quote_request) platformFitScore += 8;
   if (signals.emergency || signals.sms_gap) platformFitScore += 7;
-  platformFitScore = Math.min(20, platformFitScore);
+
+  // Penalize pure retail product shops without field service signals (e.g. nurseries, retail stores)
+  const isPureProductShop = /nursery|plant store|garden center|hardware store|supermarket|outlet|retail/i.test(item.name || "") &&
+    !signals.call_cta && !signals.emergency && !signals.booking && !signals.quote_request;
+  if (isPureProductShop) {
+    platformFitScore = Math.max(0, platformFitScore - 8);
+  }
+  platformFitScore = Math.min(20, Math.max(0, platformFitScore));
 
   // 2. TENANT FIT (0 - 20 pts)
   let tenantFitScore = 0;
@@ -2438,7 +2646,12 @@ export function calculateMultiFactorScore(
   const targetKeywords = missionConfig?.icp?.keywords || [];
   const itemText = `${item.name || ''} ${item.trade || ''} ${item.city || ''}`.toLowerCase();
 
+  const isPreferred = PREFERRED_TRADES.has((item.trade || "").toLowerCase()) ||
+    /hvac|plumb|electr|roof|lawn|landscap|pool|clean|handyman/i.test(item.trade || "");
+
   if (targetNiches.some(n => itemText.includes(n.toLowerCase()) || (item.trade && item.trade.toLowerCase().includes(n.toLowerCase())))) {
+    tenantFitScore += 10;
+  } else if (isPreferred) {
     tenantFitScore += 10;
   }
   if (targetSubniches.some(sn => itemText.includes(sn.toLowerCase()))) {
@@ -2447,7 +2660,7 @@ export function calculateMultiFactorScore(
   if (targetKeywords.some(kw => itemText.includes(kw.toLowerCase()))) {
     tenantFitScore += 5;
   }
-  tenantFitScore = Math.min(20, tenantFitScore);
+  tenantFitScore = Math.min(20, Math.max(0, tenantFitScore));
 
   // 3. EVIDENCE / PAIN SIGNALS (0 - 25 pts)
   let evidenceScore = 0;
@@ -2473,30 +2686,41 @@ export function calculateMultiFactorScore(
     evidenceScore += 3;
     evidenceList.push("Lead capture or booking widget detected");
   }
-  evidenceScore = Math.min(25, evidenceScore);
+  evidenceScore = Math.min(25, Math.max(0, evidenceScore));
 
   // 4. CONTACTABILITY (0 - 20 pts)
   let contactabilityScore = 0;
   if (email) {
     contactabilityScore += isEmailValidated ? 10 : 5;
-    if (!email.endsWith("@gmail.com") && !email.endsWith("@yahoo.com") && !email.endsWith("@hotmail.com")) {
+    // Boost corporate domain email
+    if (!email.endsWith("@gmail.com") && !email.endsWith("@yahoo.com") && !email.endsWith("@hotmail.com") && !email.endsWith("@outlook.com")) {
       contactabilityScore += 4;
     }
   }
   if (phone) contactabilityScore += 4;
   if (item.website && isRealWebsite(item.website)) contactabilityScore += 2;
-  contactabilityScore = Math.min(20, contactabilityScore);
+  
+  // Penalize: no contact at all
+  if (!email && !phone) {
+    contactabilityScore = 0;
+  }
+  contactabilityScore = Math.min(20, Math.max(0, contactabilityScore));
 
   // 5. COMMERCIAL OPPORTUNITY (0 - 15 pts)
   let commercialScore = 0;
-  if (isPriorityCity) commercialScore += 5;
-  if (isPriorityTrade) commercialScore += 5;
-  
+  const isSunBeltCity = /fl|florida|tx|texas|ga|georgia|az|arizona|nc|sc|tn|tennessee|nv|al|tampa|orlando|miami|houston|austin|dallas|phoenix|atlanta|nashville/i.test(item.city || "");
+  if (isPriorityCity || isSunBeltCity) commercialScore += 5;
+  if (isPriorityTrade || isPreferred) commercialScore += 5;
+
   const tradeKey = `trade:${item.trade}`;
   const winRate = learningStats[tradeKey] || 0;
   if (winRate > 0.6) commercialScore += 5;
   else if (winRate > 0.3) commercialScore += 3;
-  commercialScore = Math.min(15, commercialScore);
+
+  if (isPureProductShop) {
+    commercialScore = Math.max(0, commercialScore - 5);
+  }
+  commercialScore = Math.min(15, Math.max(0, commercialScore));
 
   const totalScore = Math.min(100, Math.max(0, platformFitScore + tenantFitScore + evidenceScore + contactabilityScore + commercialScore));
   const confidencePercent = email && isEmailValidated ? 90 : email ? 70 : 50;
@@ -2694,7 +2918,15 @@ export async function fetchOverpassBusinesses(
         }
         let hostname = mirror;
         try { hostname = new URL(mirror).hostname; } catch (e) {}
-        return { businesses: results, status: `success (${hostname})` };
+
+        if (results.length > 0) {
+          console.log(`[Overpass Mirror Success] Found ${results.length} businesses for ${city} - ${trade} via ${hostname}`);
+          return { businesses: results, status: `success (${hostname})` };
+        } else {
+          console.log(`[Overpass Mirror Empty] 0 raw elements from ${hostname}. Trying next mirror...`);
+          lastStatus = `0 elements from ${hostname}`;
+          continue;
+        }
       } else {
         let hostname = mirror;
         try { hostname = new URL(mirror).hostname; } catch (e) {}
@@ -2707,7 +2939,7 @@ export async function fetchOverpassBusinesses(
     }
   }
 
-  return { businesses: [], status: `failed_all_mirrors: ${lastStatus}` };
+  return { businesses: [], status: `0 elements across tried mirrors (last: ${lastStatus})` };
 }
 
 /**
@@ -3127,6 +3359,135 @@ function getTradePsychologyFallback(
 }
 
 /**
+ * Centralized Outbound Telegram Notification Engine
+ */
+export async function notifyFounder(
+  env: Env,
+  text: string,
+  inlineButtons?: Array<Array<{ text: string; callback_data?: string; url?: string }>>
+): Promise<{ ok: boolean; description?: string; result?: any }> {
+  const botToken = env.TELEGRAM_BOT_TOKEN;
+  const chatId = env.TELEGRAM_CHAT_ID;
+
+  if (!botToken || !chatId) {
+    const desc = "TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is not configured in environment";
+    console.warn(`[notifyFounder] ${desc}`);
+    return { ok: false, description: desc };
+  }
+
+  const payload: any = {
+    chat_id: String(chatId).trim(),
+    text,
+    parse_mode: "HTML",
+    disable_web_page_preview: true,
+    link_preview_options: { is_disabled: true }
+  };
+
+  if (inlineButtons && inlineButtons.length > 0) {
+    payload.reply_markup = {
+      inline_keyboard: inlineButtons
+    };
+  }
+
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(6000)
+    });
+
+    const data: any = await res.json().catch(() => ({ ok: false, description: `HTTP ${res.status}: Failed to parse JSON` }));
+
+    if (!res.ok || !data.ok) {
+      console.error(`[notifyFounder] Telegram API error (${res.status}):`, data);
+
+      if (env.RADAR_DB) {
+        try {
+          const today = new Date().toISOString().split("T")[0];
+          const latestRun = await env.RADAR_DB.prepare(
+            "SELECT id, errors_json FROM runs WHERE day = ? ORDER BY created_at DESC LIMIT 1"
+          ).bind(today).first() as any || await env.RADAR_DB.prepare(
+            "SELECT id, errors_json FROM runs ORDER BY created_at DESC LIMIT 1"
+          ).first() as any;
+
+          if (latestRun) {
+            let errList: any[] = [];
+            try { errList = JSON.parse(latestRun.errors_json || "[]"); } catch (e) {}
+            errList.push({
+              source: "telegram_outbound",
+              status: res.status,
+              description: data.description || "Telegram API rejected sendMessage",
+              chat_id: String(chatId).trim(),
+              timestamp: new Date().toISOString()
+            });
+            await env.RADAR_DB.prepare("UPDATE runs SET errors_json = ? WHERE id = ?")
+              .bind(JSON.stringify(errList), latestRun.id).run();
+          }
+        } catch (dbErr) {
+          console.error("[notifyFounder] Failed to log error to D1 runs:", dbErr);
+        }
+      }
+
+      return { ok: false, description: data.description || `HTTP ${res.status}` };
+    }
+
+    return { ok: true, description: "Sent successfully", result: data.result };
+  } catch (err: any) {
+    console.error("[notifyFounder] Network/Exception error:", err.message);
+    if (env.RADAR_DB) {
+      try {
+        const today = new Date().toISOString().split("T")[0];
+        const latestRun = await env.RADAR_DB.prepare(
+          "SELECT id, errors_json FROM runs WHERE day = ? ORDER BY created_at DESC LIMIT 1"
+        ).bind(today).first() as any;
+        if (latestRun) {
+          let errList: any[] = [];
+          try { errList = JSON.parse(latestRun.errors_json || "[]"); } catch (e) {}
+          errList.push({
+            source: "telegram_outbound_exception",
+            error: err.message,
+            timestamp: new Date().toISOString()
+          });
+          await env.RADAR_DB.prepare("UPDATE runs SET errors_json = ? WHERE id = ?")
+            .bind(JSON.stringify(errList), latestRun.id).run();
+        }
+      } catch (e) {}
+    }
+    return { ok: false, description: err.message };
+  }
+}
+
+/**
+ * Format qualified prospect into clean HTML card for Telegram
+ */
+export function formatProspectTelegramMessage(prospect: any): string {
+  const scoreEmoji = (prospect.score || 0) >= 80 ? "🔥" : (prospect.score || 0) >= 60 ? "⚡" : "🔍";
+  const draftBody = prospect.draft_body || "";
+  const draftPreview = draftBody.substring(0, 300);
+  const angle = prospect.bvelt_angle ? prospect.bvelt_angle.replace(/_/g, " ") : "Missed lead & call recovery";
+
+  let msg = `<b>📡 Bvelt Radar: Prospecto Calificado</b> ${scoreEmoji}\n\n`;
+  msg += `🏢 <b>${escapeHtml(prospect.name)}</b>\n`;
+  msg += `📍 <b>Ciudad:</b> ${escapeHtml(prospect.city)}\n`;
+  msg += `🛠 <b>Rubro:</b> ${escapeHtml(prospect.trade)}\n`;
+  msg += `📊 <b>Score:</b> <b>${prospect.score}/100</b>\n`;
+  msg += `📧 <b>Email:</b> <code>${escapeHtml(prospect.email || "No email")}</code>\n`;
+  if (prospect.phone) {
+    msg += `📞 <b>Tel:</b> <code>${escapeHtml(prospect.phone)}</code>\n`;
+  }
+  if (prospect.website) {
+    msg += `🌐 <b>Web:</b> <a href="${escapeHtml(prospect.website)}">${escapeHtml(prospect.website)}</a>\n`;
+  }
+  msg += `💡 <b>Ángulo:</b> ${escapeHtml(angle)}\n`;
+  msg += `🔗 <b>Plataforma:</b> <a href="https://bvelt.app">https://bvelt.app</a>\n\n`;
+  if (draftPreview) {
+    msg += `📝 <b>Borrador (${escapeHtml(prospect.draft_subject || "Propuesta")}):</b>\n<pre>${escapeHtml(draftPreview)}${draftBody.length > 300 ? "..." : ""}</pre>`;
+  }
+  return msg;
+}
+
+/**
  * Dispatch Interactive Telegram Alert with InlineKeyboardMarkup Action Buttons
  */
 async function dispatchInteractiveTelegramAlert(
@@ -3135,79 +3496,16 @@ async function dispatchInteractiveTelegramAlert(
   trades: string[], 
   env: Env
 ): Promise<void> {
-  const botToken = env.TELEGRAM_BOT_TOKEN;
-  const chatId = env.TELEGRAM_CHAT_ID;
-  const today = new Date().toISOString().split('T')[0];
-
-  if (topProspects.length === 0) {
-    const emptyMsg = `📡 *Bvelt Radar Report*\n📅 ${today}\n\nRadar hoy: 0 listos. Próximo intento mañana.`;
-    await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: chatId, text: emptyMsg, parse_mode: "Markdown" }),
-      signal: AbortSignal.timeout(5000)
-    });
-    return;
-  }
-
-  // 1. Send Daily Digest Header
-  const headerText = `📡 *Bvelt Radar Report* 📡\n📅 *${today}*\n📍 *Zonas:* ${cities.join(", ")}\n🛠️ *Trades:* ${trades.join(", ")}\n\nIdentificamos los *Top ${topProspects.length} Prospectos* de hoy:`;
-  await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, text: headerText, parse_mode: "Markdown" }),
-    signal: AbortSignal.timeout(5000)
-  });
-
-  // 2. Send Individual Interactive Cards for Top Prospects (Top 5-7)
-  const displayProspects = topProspects.slice(0, 7);
-
-  for (let idx = 0; idx < displayProspects.length; idx++) {
-    const p = displayProspects[idx];
-    const scoreEmoji = p.score >= 80 ? "🔥" : p.score >= 60 ? "⚡" : "🔍";
-    const shortReason = Object.entries(p.scoreBreakdown || {})
-      .filter(([_, val]) => (val as number) > 0)
-      .map(([k]) => k.replace(/_/g, " "))
-      .slice(0, 3)
-      .join(" · ");
-
-    const emailVal = p.email || p.emailCandidate || null;
-    const phoneVal = p.phone || p.websitePhone || null;
-
-    let cardText = `*${idx + 1}. ${escapeMarkdown(p.name)}* ${scoreEmoji}\n`;
-    cardText += `📍 ${escapeMarkdown(p.city)} · 🛠️ ${escapeMarkdown(p.trade)}\n`;
-    cardText += `📊 Score: *${p.score}/100* (${shortReason || "high relevance"})\n`;
-    cardText += `📧 Email: ${emailVal ? `\`${escapeMarkdown(emailVal)}\`` : "None"}\n`;
-    cardText += `📞 Tel: ${phoneVal ? `\`${escapeMarkdown(phoneVal)}\`` : "None"}\n`;
-    cardText += `🌐 Web: ${p.website ? `[Link](${p.website})` : "None"}\n\n`;
-    cardText += `📝 *Asunto:* _${escapeMarkdown(p.draft_subject)}_\n`;
-    cardText += `💬 *Copy Propuesto:*\n\`\`\`\n${escapeMarkdown(p.draft_body)}\n\`\`\``;
-
-    const demoUrl = `https://bvelt-radar.rainerblanco405.workers.dev/demo?name=${encodeURIComponent(p.name)}&trade=${encodeURIComponent(p.trade || "contractor")}&phone=${encodeURIComponent(phoneVal || "")}`;
-    const inlineKeyboard = {
-      inline_keyboard: [
-        [
-          { text: "✅ Mark Sent", callback_data: `sent:${p.id}` },
-          { text: "👁️ Ver Demo", url: demoUrl }
-        ],
-        [
-          { text: "❌ Discard", callback_data: `discard:${p.id}` },
-          { text: "🚫 Suppress", callback_data: `suppress:${p.id}` }
-        ]
+  for (const p of topProspects) {
+    if (p.score < 45 || !p.email || isHardRejectedChain(p.name)) continue;
+    const text = formatProspectTelegramMessage(p);
+    const inlineButtons = [
+      [
+        { text: "✅ Approve", callback_data: `approve:${p.id}` },
+        { text: "❌ Discard", callback_data: `discard:${p.id}` }
       ]
-    };
-
-    await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text: cardText,
-        parse_mode: "Markdown",
-        reply_markup: inlineKeyboard
-      }),
-      signal: AbortSignal.timeout(5000)
-    });
+    ];
+    await notifyFounder(env, text, inlineButtons);
   }
 }
 
@@ -3822,14 +4120,18 @@ async function recordLearningEvent(
 async function getLearningStats(db: D1Database): Promise<Record<string, number>> {
   const winRates: Record<string, number> = {};
   try {
-    const rows = await db.prepare("SELECT key, sent_count, total_count FROM learning_stats WHERE total_count >= 5").all() as any;
-    if (rows && rows.results) {
-      for (const r of rows.results) {
-        winRates[r.key] = r.total_count > 0 ? (r.sent_count / r.total_count) : 0;
+    if (!db || typeof db.prepare !== "function") return winRates;
+    const prep = db.prepare("SELECT key, sent_count, total_count FROM learning_stats WHERE total_count >= 5");
+    if (prep && typeof prep.all === "function") {
+      const rows = await prep.all() as any;
+      if (rows && rows.results) {
+        for (const r of rows.results) {
+          winRates[r.key] = r.total_count > 0 ? (r.sent_count / r.total_count) : 0;
+        }
       }
     }
   } catch (e) {
-    console.warn("Learning stats query fallback: ", e);
+    // Graceful fallback
   }
   return winRates;
 }
