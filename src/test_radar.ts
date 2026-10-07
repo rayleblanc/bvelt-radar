@@ -1,4 +1,4 @@
-import { getPriorityTargets, calculateMultiFactorScore } from './worker';
+import { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage } from './worker';
 import { DEFAULT_FOUNDER_MISSION, MissionConfig } from './worker';
 
 console.log("=========================================");
@@ -781,6 +781,95 @@ tests.push({
     assert(successes === 5, "Exactly 5 atomic reservations must succeed");
     assert(failures === 5, "Remaining 5 attempts must fail reservation");
     assert(atomicSendsToday === 5, "Governor count must equal exactly 5");
+  }
+});
+
+// Test W: buildLegalFooter generates correct compliance footer
+tests.push({
+  name: "TEST W: buildLegalFooter produces correctly formatted CAN-SPAM opt-out and address footer",
+  run: () => {
+    const envMock = {
+      RADAR_DB: {} as any,
+      FOUNDER_SERVICE_KEY: "test",
+      TELEGRAM_BOT_TOKEN: "bot",
+      TELEGRAM_CHAT_ID: "chat",
+      SENDER_NAME: "Alice Smith",
+      SENDER_POSTAL_ADDRESS: "123 Main St, Austin, TX"
+    };
+
+    const footer = buildLegalFooter(envMock);
+
+    assert(footer.includes("Alice Smith, founder of Bvelt"), "Footer must include configured sender name");
+    assert(footer.includes("123 Main St, Austin, TX"), "Footer must include postal address");
+    assert(footer.includes("reply \"unsubscribe\""), "Footer must include unsubscribe instruction");
+  }
+});
+
+// Test X: subject line rejection for prohibited prefixes
+tests.push({
+  name: "TEST X: subject line rejection for prohibited Re: and Fwd: prefixes",
+  run: () => {
+    const isSubjectRejected = (subj: string) => {
+      const lower = subj.trim().toLowerCase();
+      return lower.startsWith("re:") || lower.startsWith("fwd:");
+    };
+
+    assert(isSubjectRejected("Re: quick question") === true, "Re: prefix must be rejected");
+    assert(isSubjectRejected("FWD: Check this") === true, "FWD: prefix must be rejected");
+    assert(isSubjectRejected("re:urgent update") === true, "re: prefix must be rejected");
+    assert(isSubjectRejected("Regarding estimate for plumbing") === false, "Regular subjects must not be rejected");
+  }
+});
+
+// Test Y: missing SENDER_POSTAL_ADDRESS shows warning on Telegram message card
+tests.push({
+  name: "TEST Y: missing SENDER_POSTAL_ADDRESS includes warning message on Telegram alert card",
+  run: () => {
+    const prospect = {
+      name: "Super Plumbers",
+      city: "Austin, TX",
+      trade: "plumbing",
+      score: 85,
+      email: "info@superplumbers.com"
+    };
+
+    const envWithAddress = {
+      RADAR_DB: {} as any,
+      FOUNDER_SERVICE_KEY: "test",
+      TELEGRAM_BOT_TOKEN: "bot",
+      TELEGRAM_CHAT_ID: "chat",
+      SENDER_POSTAL_ADDRESS: "123 Main St"
+    };
+
+    const envWithoutAddress = {
+      RADAR_DB: {} as any,
+      FOUNDER_SERVICE_KEY: "test",
+      TELEGRAM_BOT_TOKEN: "bot",
+      TELEGRAM_CHAT_ID: "chat"
+    };
+
+    const withCard = formatProspectTelegramMessage(prospect, envWithAddress);
+    const withoutCard = formatProspectTelegramMessage(prospect, envWithoutAddress);
+
+    assert(!withCard.includes("Falta dirección postal"), "Should not show warning if address exists");
+    assert(withoutCard.includes("Falta dirección postal: no enviar"), "Should include visible warning if address is missing");
+  }
+});
+
+// Test 33: Weather signals tradeForEvent mapping
+tests.push({
+  name: "weatherSignals tradeForEvent maps severe weather events to correct trades",
+  run: async () => {
+    const { tradeForEvent, getAlerts } = await import('./weatherSignals');
+    
+    assert(JSON.stringify(tradeForEvent("Excessive Heat Warning")) === JSON.stringify(["hvac"]), "Heat should map to hvac");
+    assert(JSON.stringify(tradeForEvent("Hard Freeze Warning")) === JSON.stringify(["plumbing", "hvac"]), "Freeze should map to plumbing and hvac");
+    assert(JSON.stringify(tradeForEvent("Extreme Cold Watch")) === JSON.stringify(["plumbing", "hvac"]), "Extreme cold should map to plumbing and hvac");
+    assert(JSON.stringify(tradeForEvent("Tornado Warning")) === JSON.stringify(["roofing", "landscaping", "handyman"]), "Tornado should map to roofing, landscaping, handyman");
+    assert(JSON.stringify(tradeForEvent("Flood Warning")) === JSON.stringify(["plumbing"]), "Flood warning should map to plumbing");
+
+    const emptyAlerts = await getAlerts([]);
+    assert(Array.isArray(emptyAlerts) && emptyAlerts.length === 0, "getAlerts([]) should return []");
   }
 });
 

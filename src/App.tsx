@@ -28,6 +28,7 @@ import {
   ExternalLink,
   Phone,
   Mail,
+  MessageSquare,
   FileText,
   Clock,
   Ban,
@@ -50,6 +51,8 @@ interface Prospect {
   draft_subject: string;
   draft_body: string;
   bvelt_angle: string;
+  signal_event?: string | null;
+  signal_area?: string | null;
   status: string;
   outcome?: string;
   response_type?: string;
@@ -118,6 +121,7 @@ export default function App() {
   const [showConfig, setShowConfig] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [inspectedProspect, setInspectedProspect] = useState<Prospect | null>(null);
+  const [contactedProspects, setContactedProspects] = useState<Record<string, boolean>>({});
   
   // PWA Install prompt trigger states
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
@@ -289,7 +293,7 @@ export default function App() {
   };
 
   // Run decision state mutate via endpoint
-  const submitDecision = async (prospectId: string, action: 'sent' | 'discard' | 'suppress') => {
+  const submitDecision = async (prospectId: string, action: string) => {
     try {
       const res = await fetch(`${apiUrl}/decision`, {
         method: 'POST',
@@ -297,7 +301,7 @@ export default function App() {
           'Content-Type': 'application/json'
         },
         credentials: 'include',
-        body: JSON.stringify({ id: prospectId, action })
+        body: JSON.stringify({ id: prospectId, action, prospect_id: prospectId, event_type: action })
       });
       if (res.ok) {
         fetchTelemetry();
@@ -888,6 +892,12 @@ export default function App() {
 
                         {/* Angle & Pain Signals Evidence Badges */}
                         <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+                          {p.signal_event && p.signal_area && (
+                            <span className="px-2 py-0.5 rounded bg-amber-950/40 text-[9px] text-amber-300 font-mono border border-amber-800/40 font-bold">
+                              ⚡ Clima: {p.signal_event} ({p.signal_area})
+                            </span>
+                          )}
+
                           <span className="px-2 py-0.5 rounded bg-blue-900/30 text-[9px] text-blue-400 font-mono border border-blue-500/10">
                             Ángulo: {getAngleLabel(p.bvelt_angle)}
                           </span>
@@ -899,27 +909,97 @@ export default function App() {
                           ))}
                         </div>
 
-                        {/* Contact & Location details */}
-                        <div className="flex flex-wrap items-center gap-2.5 text-[11px] text-slate-400 font-mono">
-                          {p.phone && (
-                            <span className="flex items-center gap-1">
-                              <Phone className="w-3 h-3 text-slate-500" />
-                              {p.phone}
-                            </span>
-                          )}
+                        {/* Contact & Action Links */}
+                        <div className="flex flex-wrap items-center gap-2 pt-1 font-mono text-[11px]">
                           {p.email && (
-                            <span className="flex items-center gap-1">
-                              <Mail className="w-3 h-3 text-slate-500" />
-                              {p.email}
-                            </span>
+                            <a 
+                              href={`mailto:${p.email}?subject=${encodeURIComponent(p.draft_subject || '')}&body=${encodeURIComponent(p.draft_body || '')}`}
+                              target="_blank" 
+                              rel="noreferrer" 
+                              className="px-2.5 py-1 rounded-lg bg-blue-950/50 border border-blue-800/40 text-blue-300 hover:bg-blue-900/60 flex items-center gap-1 font-bold"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setContactedProspects(prev => ({ ...prev, [p.id]: true }));
+                              }}
+                            >
+                              <Mail className="w-3.5 h-3.5 text-blue-400" />
+                              Correo
+                            </a>
+                          )}
+                          {p.phone && (
+                            <a 
+                              href={`https://wa.me/1${p.phone.replace(/\D/g, '')}?text=${encodeURIComponent(p.draft_body || '')}`}
+                              target="_blank" 
+                              rel="noreferrer" 
+                              className="px-2.5 py-1 rounded-lg bg-emerald-950/50 border border-emerald-800/40 text-emerald-300 hover:bg-emerald-900/60 flex items-center gap-1 font-bold"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setContactedProspects(prev => ({ ...prev, [p.id]: true }));
+                              }}
+                            >
+                              <MessageSquare className="w-3.5 h-3.5 text-emerald-400" />
+                              WhatsApp
+                            </a>
+                          )}
+                          {p.phone && (
+                            <a 
+                              href={`tel:${p.phone}`}
+                              className="px-2.5 py-1 rounded-lg bg-indigo-950/50 border border-indigo-800/40 text-indigo-300 hover:bg-indigo-900/60 flex items-center gap-1 font-bold"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setContactedProspects(prev => ({ ...prev, [p.id]: true }));
+                              }}
+                            >
+                              <Phone className="w-3.5 h-3.5 text-indigo-400" />
+                              Llamar
+                            </a>
                           )}
                           {p.website && (
-                            <a href={`https://${p.website}`} target="_blank" rel="noreferrer" className="flex items-center gap-1 text-slate-400 hover:text-blue-400" onClick={(e) => e.stopPropagation()}>
+                            <a 
+                              href={`https://${p.website}`} 
+                              target="_blank" 
+                              rel="noreferrer" 
+                              className="px-2.5 py-1 rounded-lg bg-slate-900 border border-slate-800 text-slate-400 hover:text-blue-400 flex items-center gap-1" 
+                              onClick={(e) => e.stopPropagation()}
+                            >
                               <ExternalLink className="w-3 h-3 text-slate-500" />
                               {p.website}
                             </a>
                           )}
                         </div>
+
+                        {/* Outcome action buttons after contact link clicked or when expanded */}
+                        {(contactedProspects[p.id] || isExpanded) && (
+                          <div className="pt-2 border-t border-slate-900/80 space-y-2" onClick={(e) => e.stopPropagation()}>
+                            <span className="text-[10px] font-mono text-slate-400 font-bold uppercase block">Registrar Resultado:</span>
+                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                              <button
+                                onClick={() => submitDecision(p.id, 'sent')}
+                                className="py-2 px-2.5 text-xs font-bold font-mono rounded-lg bg-blue-900/30 border border-blue-700/40 text-blue-300 hover:bg-blue-800/50 transition-colors"
+                              >
+                                Enviado
+                              </button>
+                              <button
+                                onClick={() => submitDecision(p.id, 'replied')}
+                                className="py-2 px-2.5 text-xs font-bold font-mono rounded-lg bg-amber-900/30 border border-amber-700/40 text-amber-300 hover:bg-amber-800/50 transition-colors"
+                              >
+                                Respondió
+                              </button>
+                              <button
+                                onClick={() => submitDecision(p.id, 'demo')}
+                                className="py-2 px-2.5 text-xs font-bold font-mono rounded-lg bg-purple-900/30 border border-purple-700/40 text-purple-300 hover:bg-purple-800/50 transition-colors"
+                              >
+                                Demo
+                              </button>
+                              <button
+                                onClick={() => submitDecision(p.id, 'won')}
+                                className="py-2 px-2.5 text-xs font-bold font-mono rounded-lg bg-emerald-900/30 border border-emerald-700/40 text-emerald-300 hover:bg-emerald-800/50 transition-colors"
+                              >
+                                Ganado
+                              </button>
+                            </div>
+                          </div>
+                        )}
 
                         {/* Suppression or Cooldown Banner */}
                         {(p.suppression_reason || p.cooldown_until) && (

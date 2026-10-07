@@ -11,10 +11,13 @@
  * - D1 Feedback loop & Outcome learning engine
  */
 
+import { getAlerts, tradeForEvent, WeatherAlert } from './weatherSignals';
+
 // Global type declarations for Cloudflare Worker compilation
 declare global {
   interface D1Database {
     prepare: (sql: string) => any;
+    batch: (statements: any[]) => Promise<any>;
   }
   interface KVNamespace {
     get: (key: string) => Promise<any>;
@@ -85,6 +88,12 @@ export interface Env {
   FOUNDING_CITIES?: string; // e.g. "Tampa, FL;Austin, TX"
   FOUNDING_TRADES?: string; // e.g. "landscaping;hvac;plumbing"
   FOUNDER_AUTO_OUTREACH?: string;
+  TELEGRAM_WEBHOOK_SECRET?: string;
+  SENDER_NAME?: string;
+  SENDER_POSTAL_ADDRESS?: string;
+  ENABLE_TEST_ROUTES?: string;
+  GEMINI_MODELS?: string;
+  ENABLE_BIZDATA?: string;
 }
 
 export interface MissionConfig {
@@ -192,6 +201,11 @@ export default {
       "Access-Control-Allow-Headers": "Content-Type, Authorization",
     };
 
+    const isTestRoute = path === "/api/telegram-test" || path === "/telegram-test" || path.startsWith("/api/test/");
+    if (isTestRoute && env.ENABLE_TEST_ROUTES !== "1") {
+      return new Response("Not Found", { status: 404, headers: corsHeaders });
+    }
+
     if (method === "OPTIONS") {
       return new Response(null, { headers: corsHeaders });
     }
@@ -204,9 +218,46 @@ export default {
 
       // 1b. Public Personalized Edge Demo Page for Cold Outreach Leads
       if (path === "/demo" && method === "GET") {
-        const companyName = url.searchParams.get("name") || "Tu Negocio";
-        const tradeName = url.searchParams.get("trade") || "Servicios";
-        const phone = url.searchParams.get("phone") || "";
+        const token = url.searchParams.get("p");
+        let companyName = "Tu Negocio";
+        let tradeName = "Servicios";
+        let phone = "";
+        let prospectId = null;
+
+        if (token) {
+          try {
+            const prospect = await env.RADAR_DB.prepare("SELECT id, name, trade, phone FROM prospects WHERE demo_token = ?").bind(token).first() as any;
+            if (prospect) {
+              companyName = prospect.name || "Tu Negocio";
+              tradeName = prospect.trade || "Servicios";
+              phone = prospect.phone || "";
+              prospectId = prospect.id;
+
+              const timestamp = new Date().toISOString();
+              const ua = request.headers.get("User-Agent") || "";
+              
+              // Register visit in demo_views
+              await env.RADAR_DB.prepare("INSERT INTO demo_views (prospect_id, viewed_at, ua) VALUES (?, ?, ?)")
+                .bind(prospectId, timestamp, ua).run();
+
+              // Check if it's the first time in 24 h
+              const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+              const otherViews = await env.RADAR_DB.prepare(
+                "SELECT COUNT(*) as c FROM demo_views WHERE prospect_id = ? AND viewed_at >= ? AND viewed_at < ?"
+              ).bind(prospectId, twentyFourHoursAgo, timestamp).first() as any;
+
+              if (!otherViews || otherViews.c === 0) {
+                if (env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID) {
+                  const tgMsg = `🔥 <b>${escapeHtml(companyName)}</b> abrió su demo`;
+                  await notifyFounder(env, tgMsg).catch(() => {});
+                }
+              }
+            }
+          } catch (e) {
+            console.warn("Error resolving demo token or logging view:", e);
+          }
+        }
+
         return handleEdgeDemoPage(companyName, tradeName, phone);
       }
 
@@ -348,10 +399,12 @@ export default {
         return await handleStats(env, corsHeaders);
       }
 
-      // 6. Decision API Endpoint (sent / discard / suppress)
-      if (path === "/decision" && method === "POST") {
+      // 6. Decision API Endpoint (sent / discard / suppress / replied / demo / won)
+      if ((path === "/decision" || path === "/api/events") && method === "POST") {
         const body: any = await request.json();
-        const { id, action, notes } = body;
+        const id = body.id || body.prospect_id;
+        const action = body.action || body.event_type;
+        const notes = body.notes || body.content || body.text;
         
         if (!id || !action) {
           return Response.json({ error: "Missing required fields: id and action" }, { status: 400, headers: corsHeaders });
@@ -420,10 +473,109 @@ export default {
         return Response.json({ id, city: body.city, trade: body.trade, notes: body.notes || "" }, { headers: corsHeaders });
       }
 
-      if (path.startsWith("/api/seeds/") && method === "DELETE") {
+      if (path.startsWith("/api/seeds/") && path !== "/api/seeds/import" && method === "DELETE") {
         const id = path.split("/").pop();
         await env.RADAR_DB.prepare("DELETE FROM seeds_optional WHERE id = ?").bind(id).run();
         return Response.json({ success: true }, { headers: corsHeaders });
+      }
+
+      // 11b. Bulk CSV Import Endpoint for Seed Businesses
+      if ((path === "/api/seeds/import" || path === "/seeds/import") && method === "POST") {
+        let csvText = "";
+        const contentType = request.headers.get("content-type") || "";
+        if (contentType.includes("json")) {
+          const jsonBody: any = await request.json().catch(() => ({}));
+          csvText = jsonBody.csv || jsonBody.text || jsonBody.data || "";
+        } else {
+          csvText = await request.text().catch(() => "");
+        }
+
+        if (!csvText || !csvText.trim()) {
+          return Response.json({ error: "Missing or empty CSV payload" }, { status: 400, headers: corsHeaders });
+        }
+
+        const lines = parseCSV(csvText);
+        if (lines.length < 2) {
+          return Response.json({ error: "CSV must contain a header row and data rows" }, { status: 400, headers: corsHeaders });
+        }
+
+        const headersRow = lines[0];
+        const dataRows = lines.slice(1, 1501); // Max 1500 rows per request
+
+        // Detect column indices from headers
+        const colMap: Record<string, number> = {};
+        headersRow.forEach((h, idx) => {
+          const clean = h.toLowerCase().replace(/[^a-z0-9_]/g, "");
+          if (colMap.name === undefined && (clean.includes("business") || clean.includes("company") || clean.includes("name") || clean.includes("licensee") || clean.includes("dba"))) {
+            colMap.name = idx;
+          } else if (colMap.city === undefined && (clean.includes("city") || clean.includes("municipality"))) {
+            colMap.city = idx;
+          } else if (colMap.state === undefined && (clean === "state" || clean === "st" || clean.includes("state"))) {
+            colMap.state = idx;
+          } else if (colMap.zip === undefined && (clean.includes("zip") || clean.includes("postal"))) {
+            colMap.zip = idx;
+          } else if (colMap.phone === undefined && (clean.includes("phone") || clean.includes("tel") || clean.includes("mobile"))) {
+            colMap.phone = idx;
+          } else if (colMap.website === undefined && (clean.includes("website") || clean.includes("url") || clean.includes("web") || clean.includes("domain"))) {
+            colMap.website = idx;
+          } else if (colMap.email === undefined && (clean.includes("email") || clean.includes("mail"))) {
+            colMap.email = idx;
+          } else if (colMap.status === undefined && (clean.includes("status") || clean.includes("classification") || clean.includes("type"))) {
+            colMap.status = idx;
+          } else if (colMap.issued === undefined && (clean.includes("issued") || clean.includes("issue") || clean.includes("date"))) {
+            colMap.issued = idx;
+          }
+        });
+
+        if (colMap.name === undefined) colMap.name = 0;
+
+        let importedCount = 0;
+        let discardedCount = 0;
+        const prepareStatements: any[] = [];
+
+        for (const row of dataRows) {
+          const name = row[colMap.name] || "";
+          if (!name || !name.trim()) continue;
+
+          const status = colMap.status !== undefined ? (row[colMap.status] || "") : "";
+          if (isLicenseStatusInvalid(status)) {
+            discardedCount++;
+            continue;
+          }
+
+          const city = colMap.city !== undefined ? (row[colMap.city] || "") : "";
+          const state = colMap.state !== undefined ? (row[colMap.state] || "") : "";
+          const zip = colMap.zip !== undefined ? (row[colMap.zip] || "") : "";
+          const phone = colMap.phone !== undefined ? (row[colMap.phone] || "") : "";
+          const website = colMap.website !== undefined ? (row[colMap.website] || "") : "";
+          const email = colMap.email !== undefined ? (row[colMap.email] || "") : "";
+          const issued = colMap.issued !== undefined ? (row[colMap.issued] || "") : "";
+
+          const trade = inferTradeFromText(name, status);
+          const id = `seed_${crypto.randomUUID().replace(/-/g, "")}`;
+
+          prepareStatements.push(
+            env.RADAR_DB.prepare(`
+              INSERT OR IGNORE INTO seed_businesses (id, source, name, trade, city, state, zip, phone, website, email, license_status, license_issued, used_at)
+              VALUES (?, 'csv_import', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+            `).bind(id, name.trim(), trade, city.trim(), state.trim(), zip.trim(), phone.trim(), website.trim(), email.trim(), status.trim(), issued.trim())
+          );
+
+          importedCount++;
+        }
+
+        // Batch inserts in chunks of 40 using db.batch
+        for (let i = 0; i < prepareStatements.length; i += 40) {
+          const chunk = prepareStatements.slice(i, i + 40);
+          await env.RADAR_DB.batch(chunk);
+        }
+
+        return Response.json({
+          success: true,
+          imported: importedCount,
+          discarded: discardedCount,
+          total_rows_processed: dataRows.length
+        }, { headers: corsHeaders });
       }
 
       // 12. Test Endpoint for Trust-Stack Governor Gate Rules Verification
@@ -518,10 +670,11 @@ export default {
         const timestamp = new Date().toISOString();
 
         // Seed temporary test prospect in D1
+        const dummyToken = crypto.randomUUID().replace(/-/g, "");
         await env.RADAR_DB.prepare(`
-          INSERT INTO prospects (id, name, city, trade, email, phone, score, status, outcome, bvelt_angle, variant_id, created_at, updated_at)
-          VALUES (?, 'AutoStop Test Contractor', 'Tampa, FL', 'plumbing', 'autostop@example.com', '+18135550100', 80, 'notified', 'sent', 'missed_calls', 'missed_calls', ?, ?)
-        `).bind(dummyId, timestamp, timestamp).run();
+          INSERT INTO prospects (id, name, city, trade, email, phone, score, status, outcome, bvelt_angle, variant_id, created_at, updated_at, demo_token)
+          VALUES (?, 'AutoStop Test Contractor', 'Tampa, FL', 'plumbing', 'autostop@example.com', '+18135550100', 80, 'notified', 'sent', 'missed_calls', 'missed_calls', ?, ?, ?)
+        `).bind(dummyId, timestamp, timestamp, dummyToken).run();
 
         const sampleContentMap: Record<string, string> = {
           positive: "I am interested in Bvelt! How do we get started?",
@@ -1070,13 +1223,39 @@ async function handleHealth(env: Env, headers: Record<string, string>): Promise<
  * Handle Telegram Webhook for Interactive Inline Button Clicks
  */
 async function handleTelegramWebhook(request: Request, env: Env, headers: Record<string, string>): Promise<Response> {
+  if (!env.TELEGRAM_WEBHOOK_SECRET) {
+    return new Response("Unauthorized: webhook secret not configured", { status: 401, headers });
+  }
+
+  const secretToken = request.headers.get("X-Telegram-Bot-Api-Secret-Token") || "";
+  const configuredSecret = env.TELEGRAM_WEBHOOK_SECRET;
+
+  let isMatch = secretToken.length === configuredSecret.length;
+  if (secretToken.length === configuredSecret.length) {
+    let result = 0;
+    for (let i = 0; i < secretToken.length; i++) {
+      result |= secretToken.charCodeAt(i) ^ configuredSecret.charCodeAt(i);
+    }
+    isMatch = result === 0;
+  } else {
+    isMatch = false;
+  }
+
+  if (!isMatch) {
+    return new Response("Unauthorized webhook secret token", { status: 401, headers });
+  }
+
   try {
     const update: any = await request.json();
+
+    const chatId = update.message?.chat?.id || update.callback_query?.message?.chat?.id;
+    if (!chatId || String(chatId).trim() !== String(env.TELEGRAM_CHAT_ID).trim()) {
+      return new Response("Unauthorized Chat ID", { status: 401, headers });
+    }
 
     if (update.callback_query) {
       const query = update.callback_query;
       const callbackData: string = query.data || "";
-      const chatId = query.message?.chat?.id || env.TELEGRAM_CHAT_ID;
       const callbackId = query.id;
 
       const [action, prospectId] = callbackData.split(":");
@@ -1232,7 +1411,65 @@ async function handleDecision(
     // Increment learning table for city, trade, variant
     await recordLearningEvent(db, prospect.city, prospect.trade, prospect.variant_id, true);
 
+    // Mark seed_businesses as used if matched
+    if (prospect.name && prospect.city) {
+      try {
+        await db.prepare(
+          "UPDATE seed_businesses SET used_at = ? WHERE LOWER(name) = LOWER(?) AND LOWER(city) = LOWER(?) AND used_at IS NULL"
+        ).bind(timestamp, prospect.name, prospect.city).run();
+      } catch (e) {}
+    }
+
     return Response.json({ success: true, message: `Prospect ${id} marked as SENT with 120-day cooldown. Added to suppression.`, id }, { headers });
+
+  } else if (action === "replied" || action === "positive") {
+    await db.prepare(
+      "UPDATE prospects SET status = 'human_review', outcome = 'positive', response_type = 'positive', updated_at = ? WHERE id = ?"
+    ).bind(timestamp, id).run();
+
+    if (prospect.name && prospect.city) {
+      try {
+        await db.prepare(
+          "UPDATE seed_businesses SET used_at = ? WHERE LOWER(name) = LOWER(?) AND LOWER(city) = LOWER(?) AND used_at IS NULL"
+        ).bind(timestamp, prospect.name, prospect.city).run();
+      } catch (e) {}
+    }
+
+    await recordLearningEvent(db, prospect.city, prospect.trade, prospect.variant_id, true, { is_win: true, response_type: 'positive' });
+
+    return Response.json({ success: true, message: `Prospect ${id} marked as REPLIED.`, id }, { headers });
+
+  } else if (action === "demo") {
+    await db.prepare(
+      "UPDATE prospects SET status = 'human_review', outcome = 'demo_opened', response_type = 'demo', updated_at = ? WHERE id = ?"
+    ).bind(timestamp, id).run();
+
+    if (prospect.name && prospect.city) {
+      try {
+        await db.prepare(
+          "UPDATE seed_businesses SET used_at = ? WHERE LOWER(name) = LOWER(?) AND LOWER(city) = LOWER(?) AND used_at IS NULL"
+        ).bind(timestamp, prospect.name, prospect.city).run();
+      } catch (e) {}
+    }
+
+    return Response.json({ success: true, message: `Prospect ${id} marked as DEMO.`, id }, { headers });
+
+  } else if (action === "won" || action === "converted") {
+    await db.prepare(
+      "UPDATE prospects SET status = 'converted', outcome = 'won', response_type = 'converted', updated_at = ? WHERE id = ?"
+    ).bind(timestamp, id).run();
+
+    if (prospect.name && prospect.city) {
+      try {
+        await db.prepare(
+          "UPDATE seed_businesses SET used_at = ? WHERE LOWER(name) = LOWER(?) AND LOWER(city) = LOWER(?) AND used_at IS NULL"
+        ).bind(timestamp, prospect.name, prospect.city).run();
+      } catch (e) {}
+    }
+
+    await recordLearningEvent(db, prospect.city, prospect.trade, prospect.variant_id, true, { is_win: true, response_type: 'converted' });
+
+    return Response.json({ success: true, message: `Prospect ${id} marked as WON/CONVERTED.`, id }, { headers });
 
   } else if (action === "discard") {
     await db.prepare(
@@ -1558,10 +1795,42 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
       continue;
     }
 
+    let signalEvent: string | null = candidate.signal_event || null;
+    let signalArea: string | null = candidate.signal_area || null;
+
+    if (!signalEvent && env.FOUNDING_CITIES) {
+      try {
+        const foundingStr = env.FOUNDING_CITIES;
+        const extractedStates = Array.from(new Set(foundingStr.match(/\b[A-Z]{2}\b/g) || ["FL", "TX"]));
+        const alerts = await getAlerts(extractedStates);
+        const candCity = (candidate.city || "").split(',')[0].trim().toLowerCase();
+        const candTrade = (candidate.trade || "").toLowerCase();
+
+        for (const alert of alerts) {
+          const areaLower = (alert.areaDesc || "").toLowerCase();
+          const alertTrades = tradeForEvent(alert.event);
+
+          const cityMatch = candCity && areaLower.includes(candCity);
+          const tradeMatch = alertTrades.length === 0 || alertTrades.includes(candTrade);
+
+          if (cityMatch && tradeMatch) {
+            signalEvent = alert.event;
+            signalArea = alert.areaDesc;
+            break;
+          }
+        }
+      } catch (e) {}
+    }
+
     const prospectId = crypto.randomUUID();
+    const demoToken = crypto.randomUUID().replace(/-/g, "");
     await env.RADAR_DB.prepare(`
-      INSERT INTO prospects (id, mode, tenant_id, name, city, trade, website, phone, email, score, signals_json, score_breakdown, variant_id, status, source, created_at, updated_at, bvelt_angle, identity_key)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '{}', '{}', 'missed_calls', 'discovered', ?, ?, ?, 'missed_calls', ?)
+      INSERT INTO prospects (
+        id, mode, tenant_id, name, city, trade, website, phone, email, 
+        score, signals_json, score_breakdown, variant_id, status, source, 
+        created_at, updated_at, bvelt_angle, identity_key, demo_token, 
+        signal_event, signal_area
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '{}', '{}', 'missed_calls', 'discovered', ?, ?, ?, 'missed_calls', ?, ?, ?, ?)
     `).bind(
       prospectId,
       job.mode,
@@ -1575,8 +1844,18 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
       candidate.source || 'scraper',
       new Date().toISOString(),
       new Date().toISOString(),
-      identityKey
+      identityKey,
+      demoToken,
+      signalEvent,
+      signalArea
     ).run();
+
+    if (candidate.seed_id) {
+      try {
+        await env.RADAR_DB.prepare("UPDATE seed_businesses SET used_at = ? WHERE id = ?")
+          .bind(new Date().toISOString(), candidate.seed_id).run();
+      } catch (e) {}
+    }
 
     await enqueueJob(env, {
       run_id: job.run_id,
@@ -1928,9 +2207,23 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
   let draft: { subject: string; body: string };
   try {
     draft = await generateAICopy(prospect, prospect.variant_id || 'missed_calls', env, missionConfig);
+    const lowerSub = (draft.subject || "").trim().toLowerCase();
+    if (lowerSub.startsWith("re:") || lowerSub.startsWith("fwd:")) {
+      throw new Error(`Subject rejected: Prohibited prefix detected ("${draft.subject}")`);
+    }
   } catch (e: any) {
-    draft = getTradePsychologyFallback(prospect.name, prospect.trade, prospect.city, prospect.variant_id || 'missed_calls', primaryLanguage, prospect.phone);
+    console.warn(`[Copy/Subject Cascade Fallback] AI generation failed or rejected: ${e.message}`);
+    draft = getTradePsychologyFallback(prospect.name, prospect.trade, prospect.city, prospect.variant_id || 'missed_calls', primaryLanguage, prospect.phone, prospect.demo_token);
   }
+
+  // Unconditionally strip "Re:" or "Fwd:" prefixes from draft.subject
+  if (draft.subject.toLowerCase().trim().startsWith("re:") || draft.subject.toLowerCase().trim().startsWith("fwd:")) {
+    draft.subject = draft.subject.replace(/^(re:|fwd:)\s*/i, "").trim();
+  }
+
+  // Strip any old legacy generic footer and append buildLegalFooter
+  draft.body = draft.body.replace(/\n\nReply STOP to opt out/gi, "").replace(/Reply STOP to opt out/gi, "").trim();
+  draft.body = draft.body + "\n\n" + buildLegalFooter(env);
 
   prospect.draft_subject = draft.subject;
   prospect.draft_body = draft.body;
@@ -1948,7 +2241,7 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
     ).bind(draft.subject, draft.body, gate.reason, new Date().toISOString(), prospect_id).run();
 
     // Notify founder that prospect is in HOLD state ("ready for founder")
-    const holdMsg = formatProspectTelegramMessage({ ...prospect, status: 'hold' }) +
+    const holdMsg = formatProspectTelegramMessage({ ...prospect, status: 'hold' }, env) +
       `\n\n⚠️ <b>Estado:</b> EN ESPERA (HOLD) - ${escapeHtml(gate.reason)}`;
     const inlineButtons = [
       [
@@ -2020,7 +2313,7 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
           ).bind(new Date().toISOString(), idempotencyKey).run();
         } catch (e) {}
 
-        const autoSentMsg = formatProspectTelegramMessage({ ...prospect, draft_subject: draft.subject, draft_body: draft.body, status: 'sent' }) +
+         const autoSentMsg = formatProspectTelegramMessage({ ...prospect, draft_subject: draft.subject, draft_body: draft.body, status: 'sent' }, env) +
           `\n\n⚡ <b>AUTO-SENT (${sendsTodayCount}/5)</b>\n📅 <b>Time:</b> <code>${new Date().toISOString()}</code>\n<i>Outreach enviado automáticamente por Founder Auto-Outreach.</i>`;
 
         // Notify Telegram AFTER send WITHOUT requiring approval buttons
@@ -2045,7 +2338,7 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
     WHERE id = ?
   `).bind(draft.subject, draft.body, new Date().toISOString(), prospect_id).run();
 
-  const actionableMsg = formatProspectTelegramMessage({ ...prospect, status: 'queued' });
+  const actionableMsg = formatProspectTelegramMessage({ ...prospect, status: 'queued' }, env);
   const inlineButtons = [
     [
       { text: "✅ Approve", callback_data: `approve:${prospect_id}` },
@@ -2705,6 +2998,43 @@ export async function getPriorityTargets(
     return rateB - rateA;
   });
 
+  // Weather Signals: Call getAlerts ONCE with 2-letter state codes from FOUNDING_CITIES
+  const foundingStr = env.FOUNDING_CITIES || config.geographies.join(";");
+  const extractedStates = Array.from(new Set(foundingStr.match(/\b[A-Z]{2}\b/g) || ["FL", "TX"]));
+  let weatherAlerts: WeatherAlert[] = [];
+  try {
+    weatherAlerts = await getAlerts(extractedStates);
+  } catch (e) {
+    console.warn("[Weather Signals] getAlerts warning:", e);
+  }
+
+  // Prioritize city+trade combinations whose county/city appears in areaDesc
+  if (weatherAlerts.length > 0) {
+    for (const alert of weatherAlerts) {
+      const alertTrades = tradeForEvent(alert.event);
+      const areaDescLower = (alert.areaDesc || "").toLowerCase();
+
+      for (let i = 0; i < sortedGeographies.length; i++) {
+        const cityName = sortedGeographies[i].split(',')[0].trim().toLowerCase();
+        if (cityName && areaDescLower.includes(cityName)) {
+          const [matchedCity] = sortedGeographies.splice(i, 1);
+          sortedGeographies.unshift(matchedCity);
+          break;
+        }
+      }
+
+      for (const tr of alertTrades) {
+        const trIdx = sortedNiches.findIndex(n => n.toLowerCase() === tr.toLowerCase());
+        if (trIdx > 0) {
+          const [matchedTrade] = sortedNiches.splice(trIdx, 1);
+          sortedNiches.unshift(matchedTrade);
+        }
+      }
+    }
+  }
+
+  (config as any).weather_alerts = weatherAlerts;
+
   // Deterministically rotate across weighted geographies and niches (never single city)
   const cityIdx1 = dayOfYear % sortedGeographies.length;
   const cityIdx2 = (dayOfYear + 3) % sortedGeographies.length;
@@ -3214,6 +3544,50 @@ export async function fetchLocalBusinessesWithDiagnostics(
   let nominatimStatus = "unattempted";
   let overpassStatus = "unattempted";
   let bizdataStatus = "unattempted";
+  let seedStatus = "unattempted";
+
+  // 0. Primary Seed Businesses Database Lookup (by trade & state, unused, preferring city)
+  let cityOnly = city;
+  let stateOnly = "";
+  const cityParts = city.split(",").map(s => s.trim());
+  if (cityParts.length >= 2) {
+    cityOnly = cityParts[0];
+    stateOnly = cityParts[1];
+  }
+
+  try {
+    let seedQuery = "SELECT * FROM seed_businesses WHERE used_at IS NULL AND LOWER(trade) = LOWER(?)";
+    const seedParams: any[] = [trade];
+    if (stateOnly) {
+      seedQuery += " AND LOWER(state) = LOWER(?)";
+      seedParams.push(stateOnly);
+    }
+    seedQuery += " ORDER BY CASE WHEN LOWER(city) = LOWER(?) THEN 0 ELSE 1 END LIMIT 30";
+    seedParams.push(cityOnly);
+
+    const seedRows = await env.RADAR_DB.prepare(seedQuery).bind(...seedParams).all();
+    if (seedRows && seedRows.results && seedRows.results.length > 0) {
+      const seedList = seedRows.results as any[];
+      for (const item of seedList) {
+        rawBusinesses.push({
+          name: item.name,
+          city: item.city || city,
+          state: item.state || stateOnly,
+          trade: item.trade || trade,
+          website: item.website || null,
+          phone: item.phone || null,
+          email: item.email || null,
+          seed_id: item.id,
+          source: "seed_businesses"
+        });
+      }
+      seedStatus = `found ${seedList.length} seeds`;
+    } else {
+      seedStatus = "0 seeds found";
+    }
+  } catch (e: any) {
+    seedStatus = `error: ${e.message}`;
+  }
 
   // 1. Nominatim Resolution
   const nominatimGeo = await fetchNominatimGeocoding(city);
@@ -3224,10 +3598,14 @@ export async function fetchLocalBusinessesWithDiagnostics(
   overpassStatus = overpassRes.status;
   rawBusinesses.push(...overpassRes.businesses);
 
-  // 3. BizData (Only if Category in Official List)
-  const bizDataRes = await fetchBizDataBusinesses(city, trade);
-  bizdataStatus = bizDataRes.status;
-  rawBusinesses.push(...bizDataRes.businesses);
+  // 3. BizData Scraper (ONLY if fewer than 5 results AND env.ENABLE_BIZDATA === "1")
+  if (rawBusinesses.length < 5 && env.ENABLE_BIZDATA === "1") {
+    const bizDataRes = await fetchBizDataBusinesses(city, trade);
+    bizdataStatus = bizDataRes.status;
+    rawBusinesses.push(...bizDataRes.businesses);
+  } else {
+    bizdataStatus = rawBusinesses.length >= 5 ? `skipped (have ${rawBusinesses.length} results)` : "disabled (ENABLE_BIZDATA!=1)";
+  }
 
   // Deduplicate
   const seen = new Set<string>();
@@ -3281,14 +3659,16 @@ export async function fetchLocalBusinesses(city: string, trade: string, env: Env
  * Helper to call Gemini models with 5.5 second timeout and return parsed JSON
  */
 async function tryGemini(model: string, apiKey: string, prompt: string): Promise<{ subject: string; body: string } | null> {
-  const shortKey = apiKey ? `...${apiKey.substring(apiKey.length - 4)}` : "None";
-  console.log(`[Gemini Cascade] Calling model: [${model}] with API Key ending in: [${shortKey}]`);
+  console.log(`[Gemini Cascade] Calling model: [${model}]`);
   
   try {
-    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
     const res = await fetch(geminiUrl, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { 
+        "Content-Type": "application/json",
+        "x-goog-api-key": apiKey
+      },
       body: JSON.stringify({
         contents: [{ parts: [{ text: prompt + " \n\nEnsure you return ONLY valid, raw JSON containing 'subject' and 'body' attributes." }] }],
         generationConfig: {
@@ -3310,8 +3690,7 @@ async function tryGemini(model: string, apiKey: string, prompt: string): Promise
         }
       }
     } else {
-      const errText = await res.text();
-      console.warn(`[Gemini Cascade] Model [${model}] returned status: [${res.status}]: ${errText}`);
+      console.warn(`[Gemini Cascade] Model [${model}] returned status: [${res.status}]`);
     }
   } catch (e: any) {
     console.warn(`[Gemini Cascade] Model [${model}] request failed:`, e.message || e);
@@ -3328,9 +3707,39 @@ async function generateAICopy(
   env: Env,
   missionConfig?: MissionConfig
 ): Promise<{ subject: string; body: string }> {
-  const bveltAngle = prospect.bvelt_angle || prospect.bveltAngle || "missed_calls";
   const language = (missionConfig?.languages && missionConfig.languages[0]) || "en";
   const isSpanish = language.toLowerCase().startsWith("es");
+  const demoLink = prospect.demo_token 
+    ? `https://bvelt.app/demo?p=${prospect.demo_token}`
+    : "https://bvelt.app/demo";
+
+  // Weather signal custom template branch
+  if (prospect.signal_event && prospect.signal_area) {
+    const subject = isSpanish
+      ? `${prospect.signal_event} para ${prospect.signal_area} - consulta para ${prospect.name}`
+      : `${prospect.signal_event} for ${prospect.signal_area} - quick question for ${prospect.name}`;
+
+    const bodyBase = isSpanish
+      ? `Hola equipo de ${prospect.name}, vi la ${prospect.signal_event} para ${prospect.signal_area}. Días como hoy suelen traer un aluvión de llamadas, y cada llamada que va al buzón de voz es un trabajo que puede irse a otra parte. Soy Rainer y creé Bvelt, una aplicación sencilla que ayuda a pequeñas empresas de servicios a dar seguimiento a llamadas perdidas y presupuestos antiguos. Preparé una breve demo para ${prospect.name} aquí: ${demoLink}. ¿Vale la pena echarle un vistazo?`
+      : `Hi ${prospect.name} team, I saw the ${prospect.signal_event} for ${prospect.signal_area}. Days like this usually bring a rush of calls, and every call that goes to voicemail is a job that may go to someone else. I'm Rainer, and I built Bvelt, a simple app that helps small service businesses follow up on missed calls and old estimates. I made a short demo for ${prospect.name} here: ${demoLink}. Worth a look?`;
+
+    const footer = buildLegalFooter(env);
+    const fullBody = footer ? `${bodyBase}\n\n${footer}` : bodyBase;
+
+    return { subject, body: fullBody };
+  }
+  let rawAngle = (prospect.bvelt_angle || prospect.bveltAngle || "missed_calls").toLowerCase().trim();
+
+  // Map angles to known branches as requested
+  if (rawAngle === "contact_gap") {
+    rawAngle = "sms_gap";
+  } else if (rawAngle === "lead_capture_gap") {
+    rawAngle = "lead_reactivation";
+  } else if (rawAngle === "missed_lead_response") {
+    rawAngle = "missed_calls";
+  }
+
+  const bveltAngle = rawAngle;
 
   let angleFocus = "";
   if (isSpanish) {
@@ -3339,7 +3748,7 @@ async function generateAICopy(
     } else if (bveltAngle === "sms_gap" || bveltAngle === "contact_gap") {
       angleFocus = "ANGLE: SMS/TEXT GAP (Falta de mensajería). Veo que muestran el teléfono muy visible, pero no ofrecen opciones de mensajería instantánea ni SMS automáticos para los clientes. Pregunta respetuosamente qué porcentaje de clientes potenciales pierden porque la gente prefiere enviar mensajes en lugar de llamar por teléfono.";
     } else if (bveltAngle === "booking_gap") {
-      angleFocus = "ANGLE: BOOKING GAP (Reserva en línea). Veo que sus clientes no tienen una opción de reserva o agendamiento directo en su sitio web. Pregunta respetuosamente cómo gestionan la captura de citas para no perder clientes que buscan agendar de inmediato.";
+      angleFocus = "ANGLE: BOOKING GAP (Reserva en línea). Veo que ofrecen reserva o cita en línea; pregunta qué pasa con las solicitudes que llegan fuera de horario.";
     } else if (bveltAngle === "quote_followup") {
       angleFocus = "ANGLE: QUOTE/ESTIMATE FOLLOW-UP (Seguimiento de presupuestos). Veo que tienen un formulario de solicitud de presupuesto en línea o cotizaciones gratis. Pregunta respetuosamente cómo están haciendo el seguimiento de los presupuestos enviados para asegurarse de cerrar esos trabajos pendientes.";
     } else if (bveltAngle === "lead_capture_gap") {
@@ -3347,7 +3756,7 @@ async function generateAICopy(
     } else if (bveltAngle === "lead_reactivation") {
       angleFocus = "ANGLE: LEAD REACTIVATION (Reactivación de prospectos). Veo que atienden múltiples zonas geográficas y tienen formularios de contacto. Pregunta respetuosamente qué pasa con los prospectos fríos o consultas no cerradas una vez que salen de su embudo activo.";
     } else {
-      angleFocus = "ANGLE: MISSED CALLS (Llamadas perdidas). Veo su excelente perfil de contratista local. Pregunta respetuosamente qué pasa con las llamadas de clientes nuevos que van directo al correo de voz cuando los técnicos están ocupados en un servicio o bajo un fregadero.";
+      angleFocus = "ANGLE: MISSED CALLS (Llamadas perdidas). Pregunta respetuosamente qué ocurre en su negocio cuando entran llamadas de clientes nuevos y los técnicos están ocupados atendiendo un servicio o en una instalación de campo, de modo que la llamada va al correo de voz. NO utilices frases como 'Veo su perfil' ni 'He observado' ni 'I noticed' ya que no se ha detectado ninguna señal específica en su sitio web para este ángulo.";
     }
   } else {
     if (bveltAngle === "after_hours") {
@@ -3355,7 +3764,7 @@ async function generateAICopy(
     } else if (bveltAngle === "sms_gap" || bveltAngle === "contact_gap") {
       angleFocus = "ANGLE: SMS/TEXT GAP. I noticed you display a phone line prominently, but don't offer any text-back or SMS communication options for customers. Ask what percentage of consumers they might be losing because people prefer to text instead of making a voice call.";
     } else if (bveltAngle === "booking_gap") {
-      angleFocus = "ANGLE: BOOKING GAP. I noticed your website doesn't offer an instant online booking option. Ask how they manage scheduling inquiries so they don't miss clients who want to book immediately.";
+      angleFocus = "ANGLE: BOOKING GAP. I noticed you offer online booking or appointments; ask what happens to booking requests that come in after hours.";
     } else if (bveltAngle === "quote_followup") {
       angleFocus = "ANGLE: QUOTE/ESTIMATE FOLLOW-UP. I noticed you have an online quote request form or advertise free estimates. Ask how they are currently following up on sent estimates to ensure they lock in those pending jobs.";
     } else if (bveltAngle === "lead_capture_gap") {
@@ -3363,7 +3772,7 @@ async function generateAICopy(
     } else if (bveltAngle === "lead_reactivation") {
       angleFocus = "ANGLE: LEAD REACTIVATION. I noticed you serve multiple geographic service areas and have lead forms. Ask what happens to cold or unconverted inquiries once they drop out of their active pipeline.";
     } else {
-      angleFocus = "ANGLE: MISSED CALLS. I noticed your great local contractor profile. Ask what happens to incoming client calls that go straight to voicemail when technicians are busy on-site or under a sink.";
+      angleFocus = "ANGLE: MISSED CALLS. Ask what happens in their business when new client phone calls go straight to voicemail because the technicians are busy on-site on an active job. DO NOT use phrases like 'I noticed' or 'I saw your profile' because no specific signal was detected on their site for this generic angle.";
     }
   }
 
@@ -3374,7 +3783,7 @@ async function generateAICopy(
     - Empresa: ${prospect.name}
     - Ubicación: ${prospect.city}
     - Trade: ${prospect.trade}
-
+ 
     Instrucciones del ángulo de prospección:
     ${angleFocus}
 
@@ -3383,9 +3792,9 @@ async function generateAICopy(
     2. Longitud: Exactamente entre 90 y 110 palabras totales. Corto, al grano y amigable.
     3. Primera línea: Formula una observación o pregunta concreta y respetuosa basada en las instrucciones del ángulo. NO afirmes como un hecho probado que están perdiendo dinero o llamadas, pregunta respetuosamente en su lugar.
     4. Exactamente UNA oración que describa qué hace Bvelt: "Bvelt es una aplicación sencilla que reactiva automáticamente prospectos perdidos y recupera trabajos para contratistas mediante SMS automatizados rápidos."
-    5. Llamada a la acción suave (Soft CTA): "Si quiere ver cómo funciona en 2 minutos → https://bvelt.app".
+    5. Llamada a la acción suave (Soft CTA): "Si quiere ver cómo funciona en 2 minutos → ${demoLink}".
     6. Sin exageraciones, sin promesas vacías de dinero, sin tono de estafa o spam.
-    7. PIE DE PÁGINA OBLIGATORIO: Siempre termina el cuerpo del correo con esta línea exacta en inglés para cumplir normativas: "Reply STOP to opt out"
+    7. SIN FIRMA NI PIE DE PÁGINA: NO agregues ninguna firma de despedida, nombre de remitente, dirección postal ni pie de página de exclusión (opt-out) al final del correo. El sistema los añadirá automáticamente. Termina el correo directamente tras la llamada a la acción.
 
     Responde strictly en formato JSON:
     {
@@ -3407,9 +3816,9 @@ async function generateAICopy(
     1. Length: Exactly 90 to 110 words total. Punchy, authentic, and contractor-friendly.
     2. First Line: Formulate a concrete, respectful observation or question based on the ANGLE instructions above. DO NOT state or claim that they are definitely losing calls or money as a proven fact—ask a question instead!
     3. Exactly ONE sentence describing what Bvelt does: "Bvelt is a simple app that automatically re-engages missed leads and recovers lost jobs for contractors via fast, automated SMS."
-    4. Soft Call-to-Action: "If you'd like to see how it works in 2 minutes → https://bvelt.app".
+    4. Soft Call-to-Action: "If you'd like to see how it works in 2 minutes → ${demoLink}".
     5. Zero hype, zero guaranteed dollar promises, zero scammy claims. Keep it highly practical.
-    6. MANDATORY FOOTER: Always end the email body with this exact line: "Reply STOP to opt out"
+    6. NO SIGNATURE OR FOOTER: DO NOT add any signature, sender name, address, or opt-out footer. The system will append these automatically. End the email body immediately after the soft call to action.
 
     Respond strictly in JSON format:
     {
@@ -3418,27 +3827,18 @@ async function generateAICopy(
     }
   `;
 
-  // 1. CASCADA GEMINI INTELIGENTE (Prioritizing Gemini 3.5 Flash-Lite -> Gemini 3.5 Flash -> Gemini 3.1 Flash-Lite)
-  if (env.GEMINI_FOUNDER_API_KEY) {
-    const resA1 = await tryGemini("gemini-3.5-flash-lite", env.GEMINI_FOUNDER_API_KEY, prompt);
-    if (resA1) return resA1;
+  // 1. CASCADA GEMINI INTELIGENTE (Prioritizing models from GEMINI_MODELS, max 2 total)
+  const modelsStr = env.GEMINI_MODELS || "gemini-3.5-flash-lite";
+  const modelList = modelsStr.split(",").map(m => m.trim()).filter(Boolean);
+  const modelsToTry = modelList.slice(0, 2);
 
-    const resA2 = await tryGemini("gemini-3.5-flash", env.GEMINI_FOUNDER_API_KEY, prompt);
-    if (resA2) return resA2;
+  const apiKey = env.GEMINI_FOUNDER_API_KEY || env.GEMINI_SECONDARY_API_KEY;
 
-    const resA3 = await tryGemini("gemini-3.1-flash-lite", env.GEMINI_FOUNDER_API_KEY, prompt);
-    if (resA3) return resA3;
-  }
-
-  if (env.GEMINI_SECONDARY_API_KEY) {
-    const resB1 = await tryGemini("gemini-3.5-flash-lite", env.GEMINI_SECONDARY_API_KEY, prompt);
-    if (resB1) return resB1;
-
-    const resB2 = await tryGemini("gemini-3.5-flash", env.GEMINI_SECONDARY_API_KEY, prompt);
-    if (resB2) return resB2;
-
-    const resB3 = await tryGemini("gemini-3.1-flash-lite", env.GEMINI_SECONDARY_API_KEY, prompt);
-    if (resB3) return resB3;
+  if (apiKey) {
+    for (const model of modelsToTry) {
+      const res = await tryGemini(model, apiKey, prompt);
+      if (res) return res;
+    }
   }
 
   // 2. GROQ FALLBACK (llama-3.3-70b-versatile)
@@ -3475,7 +3875,7 @@ async function generateAICopy(
 
   // 3. Static High-Converting Template Fallback
   console.log(`[Gemini Cascade] All AI pipelines failed. Reverting to deterministic backup template.`);
-  return getTradePsychologyFallback(prospect.name, prospect.trade, prospect.city, bveltAngle, language, prospect.phone);
+  return getTradePsychologyFallback(prospect.name, prospect.trade, prospect.city, bveltAngle, language, prospect.phone, prospect.demo_token, prospect.signal_event, prospect.signal_area, env);
 }
 
 /**
@@ -3487,49 +3887,68 @@ function getTradePsychologyFallback(
   city: string, 
   bveltAngle: string,
   language: string = "en",
-  phone?: string | null
+  phone?: string | null,
+  demoToken?: string | null,
+  signalEvent?: string | null,
+  signalArea?: string | null,
+  env?: Env
 ): { subject: string; body: string } {
   const cTrade = trade.replace('_', ' ');
   const isSpanish = language.toLowerCase().startsWith("es");
-  const ctaLink = phone 
-    ? `https://bvelt.app/demo?name=${encodeURIComponent(name)}&trade=${encodeURIComponent(cTrade)}&phone=${encodeURIComponent(phone)}`
-    : "https://bvelt.app";
+  const ctaLink = demoToken
+    ? `https://bvelt.app/demo?p=${demoToken}`
+    : "https://bvelt.app/demo";
+
+  if (signalEvent && signalArea) {
+    const subject = isSpanish
+      ? `${signalEvent} para ${signalArea} - consulta para ${name}`
+      : `${signalEvent} for ${signalArea} - quick question for ${name}`;
+
+    const bodyBase = isSpanish
+      ? `Hola equipo de ${name}, vi la ${signalEvent} para ${signalArea}. Días como hoy suelen traer un aluvión de llamadas, y cada llamada que va al buzón de voz es un trabajo que puede irse a otra parte. Soy Rainer y creé Bvelt, una aplicación sencilla que ayuda a pequeñas empresas de servicios a dar seguimiento a llamadas perdidas y presupuestos antiguos. Preparé una breve demo para ${name} aquí: ${ctaLink}. ¿Vale la pena echarle un vistazo?`
+      : `Hi ${name} team, I saw the ${signalEvent} for ${signalArea}. Days like this usually bring a rush of calls, and every call that goes to voicemail is a job that may go to someone else. I'm Rainer, and I built Bvelt, a simple app that helps small service businesses follow up on missed calls and old estimates. I made a short demo for ${name} here: ${ctaLink}. Worth a look?`;
+
+    const footer = env ? buildLegalFooter(env) : "";
+    const fullBody = footer ? `${bodyBase}\n\n${footer}` : bodyBase;
+
+    return { subject, body: fullBody };
+  }
 
   if (isSpanish) {
     if (bveltAngle === "after_hours") {
       return {
         subject: `¿Servicios de emergencia de ${cTrade} en ${name}?`,
-        body: `Hola equipo de ${name},\n\nHe visto su sitio web y me he dado cuenta de que ofrecen servicios de emergencia de ${cTrade} las 24 horas en ${city}, pero dirigen a los clientes exclusivamente a su línea telefónica de voz. ¿Qué pasa con esas llamadas de urgencia cuando sus técnicos ya están ocupados en un servicio?\n\nBvelt es una aplicación sencilla que reactiva automáticamente prospectos perdidos y recupera trabajos para contratistas mediante SMS automatizados rápidos.\n\nSi quiere ver cómo funciona en 2 minutos → ${ctaLink}\n\nSaludos cordiales,\nEl equipo de Bvelt\n\nReply STOP to opt out`
+        body: `Hola equipo de ${name},\n\nHe visto su sitio web y me he dado cuenta de que ofrecen servicios de emergencia de ${cTrade} las 24 horas en ${city}, pero dirigen a los clientes exclusivamente a su línea telefónica de voz. ¿Qué pasa con esas llamadas de urgencia cuando sus técnicos ya están ocupados en un servicio?\n\nBvelt es una aplicación sencilla que reactiva automáticamente prospectos perdidos y recupera trabajos para contratistas mediante SMS automatizados rápidos.\n\nSi quiere ver cómo funciona en 2 minutos → ${ctaLink}`
       };
     } else if (bveltAngle === "sms_gap" || bveltAngle === "contact_gap") {
       return {
         subject: `¿Sin opción de mensajes de texto para clientes de ${name}?`,
-        body: `Hola equipo de ${name},\n\nHe estado revisando su sitio de servicios de ${cTrade} en ${city}. Veo que muestran su teléfono de forma muy visible, pero no ofrecen ninguna opción de chat o SMS de respuesta automática. ¿Qué porcentaje de clientes potenciales se pierden porque prefieren enviar un mensaje de texto en lugar de realizar una llamada de voz?\n\nBvelt es una aplicación sencilla que reactiva automáticamente prospectos perdidos y recupera trabajos para contratistas mediante SMS automatizados rápidos.\n\nSi quiere ver cómo funciona en 2 minutos → ${ctaLink}\n\nSaludos cordiales,\nEl equipo de Bvelt\n\nReply STOP to opt out`
+        body: `Hola equipo de ${name},\n\nHe estado revisando su sitio de servicios de ${cTrade} en ${city}. Veo que muestran su teléfono de forma muy visible, pero no ofrecen ninguna opción de chat o SMS de respuesta automática. ¿Qué porcentaje de clientes potenciales se pierden porque prefieren enviar un mensaje de texto en lugar de realizar una llamada de voz?\n\nBvelt es una aplicación sencilla que reactiva automáticamente prospectos perdidos y recupera trabajos para contratistas mediante SMS automatizados rápidos.\n\nSi quiere ver cómo funciona en 2 minutos → ${ctaLink}`
       };
     } else if (bveltAngle === "booking_gap") {
       return {
-        subject: `Reservas e itinerarios de ${cTrade} en ${name}`,
-        body: `Hola equipo de ${name},\n\nHe notado que ofrecen servicios de ${cTrade} en ${city}, pero sus clientes no disponen de una opción de agendamiento o reserva directa en línea. ¿Cómo gestionan las solicitudes para asegurar que no se pierdan clientes que desean agendar de inmediato?\n\nBvelt es una aplicación sencilla que reactiva automáticamente prospectos perdidos y recupera trabajos para contratistas mediante SMS automatizados rápidos.\n\nSi quiere ver cómo funciona en 2 minutos → ${ctaLink}\n\nSaludos cordiales,\nEl equipo de Bvelt\n\nReply STOP to opt out`
+        subject: `Reservas y citas de ${cTrade} en ${name}`,
+        body: `Hola equipo de ${name},\n\nHe visto que ofrecen una opción de reserva o cita en línea para sus servicios de ${cTrade} en ${city}. ¿Qué ocurre con las solicitudes de reserva que les llegan fuera de horario o los fines de semana? ¿Cómo aseguran que esos clientes no se enfríen o agenden con un competidor antes de que puedan confirmar la cita?\n\nBvelt es una aplicación sencilla que reactiva automáticamente prospectos perdidos y recupera trabajos para contratistas mediante SMS automatizados rápidos.\n\nSi quiere ver cómo funciona en 2 minutos → ${ctaLink}`
       };
     } else if (bveltAngle === "quote_followup") {
       return {
         subject: `Seguimiento de presupuestos de ${cTrade} en ${name}`,
-        body: `Hola equipo de ${name},\n\nHe notado que tienen un formulario de solicitud de presupuesto en línea para sus servicios de ${cTrade} en ${city}. Una vez que envían estas estimaciones de precios, ¿cómo están haciendo el seguimiento actualmente para asegurarse de cerrar esos trabajos pendientes?\n\nBvelt es una aplicación sencilla que reactiva automáticamente prospectos perdidos y recupera trabajos para contratistas mediante SMS automatizados rápidos.\n\nSi quiere ver cómo funciona en 2 minutos → ${ctaLink}\n\nSaludos cordiales,\nEl equipo de Bvelt\n\nReply STOP to opt out`
+        body: `Hola equipo de ${name},\n\nHe notado que tienen un formulario de solicitud de presupuesto en línea para sus servicios de ${cTrade} en ${city}. Una vez que envían estas estimaciones de precios, ¿cómo están haciendo el seguimiento actualmente para asegurarse de cerrar esos trabajos pendientes?\n\nBvelt es una aplicación sencilla que reactiva automáticamente prospectos perdidos y recupera trabajos para contratistas mediante SMS automatizados rápidos.\n\nSi quiere ver cómo funciona en 2 minutos → ${ctaLink}`
       };
     } else if (bveltAngle === "lead_capture_gap") {
       return {
         subject: `Captura de clientes de ${cTrade} en ${city} para ${name}`,
-        body: `Hola equipo de ${name},\n\nHe revisado su presencia digital para servicios de ${cTrade} en ${city}. Veo que ofrecen servicios de calidad pero no cuentan con una captura rápida para visitantes que no realizan una llamada. ¿Qué ocurre con los prospectos que visitan su web fuera de horario?\n\nBvelt es una aplicación sencilla que reactiva automáticamente prospectos perdidos y recupera trabajos para contratistas mediante SMS automatizados rápidos.\n\nSi quiere ver cómo funciona en 2 minutos → ${ctaLink}\n\nSaludos cordiales,\nEl equipo de Bvelt\n\nReply STOP to opt out`
+        body: `Hola equipo de ${name},\n\nHe revisado su presencia digital para servicios de ${cTrade} en ${city}. Veo que ofrecen servicios de calidad pero no cuentan con una captura rápida para visitantes que no realizan una llamada. ¿Qué ocurre con los prospectos que visitan su web fuera de horario?\n\nBvelt es una aplicación sencilla que reactiva automáticamente prospectos perdidos y recupera trabajos para contratistas mediante SMS automatizados rápidos.\n\nSi quiere ver cómo funciona en 2 minutos → ${ctaLink}`
       };
     } else if (bveltAngle === "lead_reactivation") {
       return {
         subject: `Reactivación de prospectos de ${cTrade} en ${city}`,
-        body: `Hola equipo de ${name},\n\nHe visto que atienden múltiples zonas en ${city} y que tienen un formulario de contacto en su web. ¿Qué sucede con las consultas que no se cierran inmediatamente cuando salen de su embudo activo?\n\nBvelt es una aplicación sencilla que reactiva automáticamente prospectos perdidos y recupera trabajos para contratistas mediante SMS automatizados rápidos.\n\nSi quiere ver cómo funciona en 2 minutos → ${ctaLink}\n\nSaludos cordiales,\nEl equipo de Bvelt\n\nReply STOP to opt out`
+        body: `Hola equipo de ${name},\n\nHe visto que atienden múltiples zonas en ${city} y que tienen un formulario de contacto en su web. ¿Qué sucede con las consultas que no se cierran inmediatamente cuando salen de su embudo activo?\n\nBvelt es una aplicación sencilla que reactiva automáticamente prospectos perdidos y recupera trabajos para contratistas mediante SMS automatizados rápidos.\n\nSi quiere ver cómo funciona en 2 minutos → ${ctaLink}`
       };
     } else {
       return {
-        subject: `Pregunta rápida sobre llamadas perdidas de ${cTrade} en ${name}`,
-        body: `Hola equipo de ${name},\n\nHe visto su excelente trabajo de ${cTrade} en ${city}. Cuando su equipo está ocupado atendiendo un servicio o en una instalación, ¿qué ocurre con las llamadas entrantes de clientes que van directo al correo de voz?\n\nBvelt es una aplicación sencilla que reactiva automáticamente prospectos perdidos y recupera trabajos para contratistas mediante SMS automatizados rápidos.\n\nSi quiere ver cómo funciona en 2 minutos → ${ctaLink}\n\nSaludos cordiales,\nEl equipo de Bvelt\n\nReply STOP to opt out`
+        subject: `Pregunta rápida sobre las llamadas entrantes de ${cTrade} en ${name}`,
+        body: `Hola equipo de ${name},\n\nCuando su equipo está ocupado atendiendo un servicio o en una instalación de campo, ¿qué ocurre con las llamadas entrantes de clientes nuevos que van directo al buzón de voz? ¿Qué porcentaje de esos clientes potenciales cuelgan y llaman al siguiente contratista en Google?\n\nBvelt es una aplicación sencilla que reactiva automáticamente prospectos perdidos y recupera trabajos para contratistas mediante SMS automatizados rápidos.\n\nSi quiere ver cómo funciona en 2 minutos → ${ctaLink}`
       };
     }
   }
@@ -3538,39 +3957,45 @@ function getTradePsychologyFallback(
   if (bveltAngle === "after_hours") {
     return {
       subject: `Emergency ${cTrade} service at ${name}?`,
-      body: `Hi ${name} team,\n\nI noticed you advertise 24/7 emergency ${cTrade} service in ${city} and direct customers to call your phone line. What happens to those emergency calls when your team is already out on an active job?\n\nBvelt is a simple app that automatically re-engages missed leads and recovers lost jobs for contractors via fast, automated SMS.\n\nIf you'd like to see how it works in 2 minutes → ${ctaLink}\n\nBest regards,\nBvelt Team\n\nReply STOP to opt out`
+      body: `Hi ${name} team,\n\nI noticed you advertise 24/7 emergency ${cTrade} service in ${city} and direct customers to call your phone line. What happens to those emergency calls when your team is already out on an active job?\n\nBvelt is a simple app that automatically re-engages missed leads and recovers lost jobs for contractors via fast, automated SMS.\n\nIf you'd like to see how it works in 2 minutes → ${ctaLink}`
     };
   } else if (bveltAngle === "sms_gap" || bveltAngle === "contact_gap") {
     return {
       subject: `No text option for ${name} customers?`,
-      body: `Hi ${name} team,\n\nI came across your site and noticed your phone line prominently displayed for ${cTrade} services in ${city}, but didn't notice any text-back or SMS option. What percentage of potential customers drop off because they'd prefer to text instead of call?\n\nBvelt is a simple app that automatically re-engages missed leads and recovers lost jobs for contractors via fast, automated SMS.\n\nIf you'd like to see how it works in 2 minutes → ${ctaLink}\n\nBest regards,\nBvelt Team\n\nReply STOP to opt out`
+      body: `Hi ${name} team,\n\nI came across your site and noticed your phone line prominently displayed for ${cTrade} services in ${city}, but didn't notice any text-back or SMS option. What percentage of potential customers drop off because they'd prefer to text instead of call?\n\nBvelt is a simple app that automatically re-engages missed leads and recovers lost jobs for contractors via fast, automated SMS.\n\nIf you'd like to see how it works in 2 minutes → ${ctaLink}`
     };
   } else if (bveltAngle === "booking_gap") {
     return {
-      subject: `Booking ${cTrade} jobs at ${name}`,
-      body: `Hi ${name} team,\n\nI noticed you offer ${cTrade} services in ${city}, but don't have an instant online booking option on your website. How do you handle scheduling inquiries so you don't miss clients who want to book right away?\n\nBvelt is a simple app that automatically re-engages missed leads and recovers lost jobs for contractors via fast, automated SMS.\n\nIf you'd like to see how it works in 2 minutes → ${ctaLink}\n\nBest regards,\nBvelt Team\n\nReply STOP to opt out`
+      subject: `Online bookings at ${name}`,
+      body: `Hi ${name} team,\n\nI noticed you offer online booking or appointments for your ${cTrade} services in ${city}. What happens to scheduling requests that come in after hours or over the weekend? How do you ensure those prospects don't get cold or book with a competitor before you can manually confirm?\n\nBvelt is a simple app that automatically re-engages missed leads and recovers lost jobs for contractors via fast, automated SMS.\n\nIf you'd like to see how it works in 2 minutes → ${ctaLink}`
     };
   } else if (bveltAngle === "quote_followup") {
     return {
       subject: `Following up on ${cTrade} estimates at ${name}`,
-      body: `Hi ${name} team,\n\nI noticed you have an online quote request form for your ${cTrade} services in ${city}. Once you send out those pricing estimates, how are you currently following up with those prospects to lock them in?\n\nBvelt is a simple app that automatically re-engages missed leads and recovers lost jobs for contractors via fast, automated SMS.\n\nIf you'd like to see how it works in 2 minutes → ${ctaLink}\n\nBest regards,\nBvelt Team\n\nReply STOP to opt out`
+      body: `Hi ${name} team,\n\nI noticed you have an online quote request form for your ${cTrade} services in ${city}. Once you send out those pricing estimates, how are you currently following up with those prospects to lock them in?\n\nBvelt is a simple app that automatically re-engages missed leads and recovers lost jobs for contractors via fast, automated SMS.\n\nIf you'd like to see how it works in 2 minutes → ${ctaLink}`
     };
   } else if (bveltAngle === "lead_capture_gap") {
     return {
       subject: `Capturing ${cTrade} leads at ${name}`,
-      body: `Hi ${name} team,\n\nI noticed your ${cTrade} site in ${city} has great service details but no fast lead capture form for visitors who don't call immediately. What happens to prospects who browse after business hours?\n\nBvelt is a simple app that automatically re-engages missed leads and recovers lost jobs for contractors via fast, automated SMS.\n\nIf you'd like to see how it works in 2 minutes → ${ctaLink}\n\nBest regards,\nBvelt Team\n\nReply STOP to opt out`
+      body: `Hi ${name} team,\n\nI noticed your ${cTrade} site in ${city} has great service details but no fast lead capture form for visitors who don't call immediately. What happens to prospects who browse after business hours?\n\nBvelt is a simple app that automatically re-engages missed leads and recovers lost jobs for contractors via fast, automated SMS.\n\nIf you'd like to see how it works in 2 minutes → ${ctaLink}`
     };
   } else if (bveltAngle === "lead_reactivation") {
     return {
       subject: `Reviving unconverted ${cTrade} leads in ${city}`,
-      body: `Hi ${name} team,\n\nI noticed you serve multiple areas around ${city} and have a lead capture form on your website. What happens to those cold or unconverted ${cTrade} leads once they leave your immediate pipeline?\n\nBvelt is a simple app that automatically re-engages missed leads and recovers lost jobs for contractors via fast, automated SMS.\n\nIf you'd like to see how it works in 2 minutes → ${ctaLink}\n\nBest regards,\nBvelt Team\n\nReply STOP to opt out`
+      body: `Hi ${name} team,\n\nI noticed you serve multiple areas around ${city} and have a lead capture form on your website. What happens to those cold or unconverted ${cTrade} leads once they leave your immediate pipeline?\n\nBvelt is a simple app that automatically re-engages missed leads and recovers lost jobs for contractors via fast, automated SMS.\n\nIf you'd like to see how it works in 2 minutes → ${ctaLink}`
     };
   } else {
     return {
-      subject: `Quick question regarding missed ${cTrade} calls at ${name}`,
-      body: `Hi ${name} team,\n\nI noticed your great ${cTrade} work in ${city}. When your team is busy on a call or under a sink, what happens to incoming client calls that go straight to voicemail?\n\nBvelt is a simple app that automatically re-engages missed leads and recovers lost jobs for contractors via fast, automated SMS.\n\nIf you'd like to see how it works in 2 minutes → ${ctaLink}\n\nBest regards,\nBvelt Team\n\nReply STOP to opt out`
+      subject: `Quick question regarding incoming ${cTrade} calls at ${name}`,
+      body: `Hi ${name} team,\n\nWhen your team is busy on-site or in the middle of a job, what happens to incoming calls from new clients that go straight to voicemail? What percentage of those potential clients hang up and call the next contractor on Google instead?\n\nBvelt is a simple app that automatically re-engages missed leads and recovers lost jobs for contractors via fast, automated SMS.\n\nIf you'd like to see how it works in 2 minutes → ${ctaLink}`
     };
   }
+}
+
+export function buildLegalFooter(env: Env): string {
+  const senderName = env.SENDER_NAME || "Founder";
+  const senderAddress = env.SENDER_POSTAL_ADDRESS || "";
+  return `--\n${senderName}, founder of Bvelt\n${senderAddress}\nThis is a commercial message. If you'd rather not hear from me, reply "unsubscribe" and I'll remove you right away.`;
 }
 
 /**
@@ -3676,13 +4101,21 @@ export async function notifyFounder(
 /**
  * Format qualified prospect into clean HTML card for Telegram
  */
-export function formatProspectTelegramMessage(prospect: any): string {
+export function formatProspectTelegramMessage(prospect: any, env?: Env): string {
   const scoreEmoji = (prospect.score || 0) >= 80 ? "🔥" : (prospect.score || 0) >= 60 ? "⚡" : "🔍";
   const draftBody = prospect.draft_body || "";
   const draftPreview = draftBody.substring(0, 300);
   const angle = prospect.bvelt_angle ? prospect.bvelt_angle.replace(/_/g, " ") : "Missed lead & call recovery";
 
+  let warning = "";
+  if (env && !env.SENDER_POSTAL_ADDRESS) {
+    warning = `⚠ <b>Falta dirección postal: no enviar</b>\n\n`;
+  }
+
   let msg = `<b>📡 Bvelt Radar: Prospecto Calificado</b> ${scoreEmoji}\n\n`;
+  if (warning) {
+    msg = warning + msg;
+  }
   msg += `🏢 <b>${escapeHtml(prospect.name)}</b>\n`;
   msg += `📍 <b>Ciudad:</b> ${escapeHtml(prospect.city)}\n`;
   msg += `🛠 <b>Rubro:</b> ${escapeHtml(prospect.trade)}\n`;
@@ -3713,7 +4146,7 @@ async function dispatchInteractiveTelegramAlert(
 ): Promise<void> {
   for (const p of topProspects) {
     if (p.score < 45 || !p.email || isHardRejectedChain(p.name)) continue;
-    const text = formatProspectTelegramMessage(p);
+    const text = formatProspectTelegramMessage(p, env);
     const inlineButtons = [
       [
         { text: "✅ Approve", callback_data: `approve:${p.id}` },
@@ -4357,6 +4790,73 @@ async function getLearningStats(db: D1Database): Promise<Record<string, number>>
     // Graceful fallback
   }
   return winRates;
+}
+
+/**
+ * CSV Import & Trade Deduction Helpers
+ */
+export function parseCSV(text: string): string[][] {
+  const lines: string[][] = [];
+  let row: string[] = [];
+  let entry = '';
+  let inQuotes = false;
+
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    const next = text[i + 1];
+
+    if (c === '"') {
+      if (inQuotes && next === '"') {
+        entry += '"';
+        i++;
+      } else {
+        inQuotes = !inQuotes;
+      }
+    } else if (c === ',' && !inQuotes) {
+      row.push(entry.trim());
+      entry = '';
+    } else if ((c === '\r' || c === '\n') && !inQuotes) {
+      if (c === '\r' && next === '\n') {
+        i++;
+      }
+      row.push(entry.trim());
+      if (row.some(field => field.length > 0)) {
+        lines.push(row);
+      }
+      row = [];
+      entry = '';
+    } else {
+      entry += c;
+    }
+  }
+  if (entry || row.length > 0) {
+    row.push(entry.trim());
+    if (row.some(field => field.length > 0)) {
+      lines.push(row);
+    }
+  }
+  return lines;
+}
+
+export function inferTradeFromText(...textParts: (string | undefined)[]): string {
+  const combined = textParts.filter(Boolean).join(' ').toLowerCase();
+
+  if (/plumb/i.test(combined)) return 'plumbing';
+  if (/hvac|heating|air/i.test(combined)) return 'hvac';
+  if (/roof/i.test(combined)) return 'roofing';
+  if (/landscap/i.test(combined)) return 'landscaping';
+  if (/electric/i.test(combined)) return 'electrical';
+  if (/paint/i.test(combined)) return 'painting';
+  if (/pool/i.test(combined)) return 'pool';
+  if (/pest/i.test(combined)) return 'pest_control';
+
+  return 'general';
+}
+
+export function isLicenseStatusInvalid(statusText?: string): boolean {
+  if (!statusText) return false;
+  const lower = statusText.toLowerCase();
+  return /expired|expirad|revoked|revocad|cancelled|canceled|cancelad|suspended|suspendid|inactive|inactiv/i.test(lower);
 }
 
 /**
