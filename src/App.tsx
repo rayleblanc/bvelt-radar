@@ -427,7 +427,9 @@ export default function App() {
     const s = (p.status || '').toLowerCase();
     const score = typeof p.score === 'number' ? p.score : 0;
     
-    if (p.cooldown_until && new Date(p.cooldown_until).getTime() > Date.now()) {
+    const cdTime = p.cooldown_until ? new Date(p.cooldown_until).getTime() : 0;
+    const isDataBugCooldown = cdTime > Date.now() + 60 * 24 * 60 * 60 * 1000;
+    if (p.cooldown_until && cdTime > Date.now() && !isDataBugCooldown) {
       return 'BLOCKED';
     }
     if (p.suppression_reason || s === 'suppressed' || s === 'unsubscribed') {
@@ -1003,10 +1005,14 @@ export default function App() {
 
                         {/* Suppression or Cooldown Banner */}
                         {(p.suppression_reason || p.cooldown_until) && (
-                          <div className="bg-rose-950/20 border border-rose-900/30 p-2 rounded-xl text-[10px] text-rose-300 font-mono flex items-center gap-2">
-                            <Ban className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+                          <div className={`p-2 rounded-xl text-[10px] font-mono flex items-center gap-2 ${p.cooldown_until && new Date(p.cooldown_until).getTime() > Date.now() + 60 * 24 * 60 * 60 * 1000 ? 'bg-amber-950/30 border border-amber-900/40 text-amber-300' : 'bg-rose-950/20 border border-rose-900/30 text-rose-300'}`}>
+                            <Ban className={`w-3.5 h-3.5 shrink-0 ${p.cooldown_until && new Date(p.cooldown_until).getTime() > Date.now() + 60 * 24 * 60 * 60 * 1000 ? 'text-amber-400' : 'text-rose-400'}`} />
                             <span>
-                              {p.suppression_reason ? `Supresión: ${p.suppression_reason}` : `Cooldown activo hasta ${new Date(p.cooldown_until!).toLocaleDateString()}`}
+                              {p.suppression_reason 
+                                ? `Supresión: ${p.suppression_reason}` 
+                                : p.cooldown_until && new Date(p.cooldown_until).getTime() > Date.now() + 60 * 24 * 60 * 60 * 1000
+                                  ? `Data Bug Cooldown (>60d): ${new Date(p.cooldown_until).toLocaleDateString()}`
+                                  : `Cooldown activo hasta ${new Date(p.cooldown_until!).toLocaleDateString()}`}
                             </span>
                           </div>
                         )}

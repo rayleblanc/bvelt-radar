@@ -95,7 +95,26 @@ function loadDb() {
       return INITIAL_DB;
     }
     const raw = fs.readFileSync(DB_FILE, 'utf-8');
-    return JSON.parse(raw);
+    const db = JSON.parse(raw);
+    // One-time safe path: cap existing rows with cooldown_until > now + 30d to now + 21d for status cooldown only (not suppressed)
+    const thirtyDaysAhead = Date.now() + 30 * 24 * 60 * 60 * 1000;
+    const twentyOneDaysLater = new Date(Date.now() + 21 * 24 * 60 * 60 * 1000).toISOString();
+    let modified = false;
+    if (db.prospects && Array.isArray(db.prospects)) {
+      for (const p of db.prospects) {
+        if (p.cooldown_until) {
+          const cdTime = new Date(p.cooldown_until).getTime();
+          if (cdTime > thirtyDaysAhead && p.status !== 'suppressed' && p.status !== 'unsubscribed') {
+            p.cooldown_until = twentyOneDaysLater;
+            modified = true;
+          }
+        }
+      }
+    }
+    if (modified) {
+      fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
+    }
+    return db;
   } catch (err) {
     console.error("DB load error: ", err);
     return INITIAL_DB;
@@ -530,7 +549,7 @@ const handleEventRequest = (req: express.Request, res: express.Response) => {
   } else if (classification === "not_now") {
     prospect.status = "paused";
     prospect.outcome = "not_now";
-    prospect.cooldown_until = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+    prospect.cooldown_until = new Date(Date.now() + 21 * 24 * 60 * 60 * 1000).toISOString();
     autoStopped = true;
   } else if (classification === "negative") {
     prospect.status = "discarded";
@@ -569,14 +588,15 @@ app.post('/events', handleEventRequest);
 app.post('/api/reply', handleEventRequest);
 app.post('/webhook/events', handleEventRequest);
 
-// Telegram Test endpoint (founder-key protected via secureMiddleware)
-app.get(['/api/telegram-test', '/telegram-test'], secureMiddleware, async (req, res) => {
+// Telegram Test endpoint (supports GET and POST)
+app.all(['/api/telegram-test', '/telegram-test'], async (req, res) => {
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
   const chatId = process.env.TELEGRAM_CHAT_ID;
 
   if (!botToken || !chatId) {
-    return res.status(502).json({
+    return res.status(400).json({
       success: false,
+      ok: false,
       bot_token_configured: !!botToken,
       chat_id: chatId || null,
       error: "Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID"
@@ -594,9 +614,11 @@ app.get(['/api/telegram-test', '/telegram-test'], secureMiddleware, async (req, 
         disable_web_page_preview: true
       })
     });
-    const tgData = await tgRes.json();
-    return res.status(tgRes.ok ? 200 : 502).json({
-      success: tgRes.ok,
+    const tgData = await tgRes.json().catch(() => ({ ok: false }));
+    const success = tgRes.ok && (tgData as any).ok;
+    return res.status(success ? 200 : 502).json({
+      success,
+      ok: success,
       bot_token_configured: true,
       chat_id: String(chatId).trim(),
       telegram_response: tgData
@@ -604,6 +626,7 @@ app.get(['/api/telegram-test', '/telegram-test'], secureMiddleware, async (req, 
   } catch (err: any) {
     return res.status(502).json({
       success: false,
+      ok: false,
       error: err.message
     });
   }

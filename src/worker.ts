@@ -300,7 +300,14 @@ const PRIORITY_TRADES = [
 
 // OSM Tag mappings by trade for high-precision Overpass queries (contractor field operators, not retail stores)
 const OVERPASS_TRADE_TAGS: Record<string, string[]> = {
-  plumbing: ['craft="plumber"', 'craft="plumbing"'],
+  plumbing: [
+    'craft="plumber"',
+    'craft="plumbing"',
+    'shop="plumbing"',
+    'office="plumbing"',
+    'amenity="plumbing"',
+    'name~"plumb"'
+  ],
   hvac: ['craft="hvac"', 'craft="heating_technician"', 'craft="heating_contractor"'],
   landscaping: ['craft="gardener"', 'craft="landscaper"', 'craft="groundskeeper"'],
   lawn_care: ['craft="gardener"', 'craft="landscaper"', 'craft="groundskeeper"', 'craft="lawn_mower"'],
@@ -334,7 +341,7 @@ export default {
       "Access-Control-Allow-Credentials": "true"
     };
 
-    const isTestRoute = path === "/api/telegram-test" || path === "/telegram-test" || path.startsWith("/api/test/");
+    const isTestRoute = path.startsWith("/api/test/");
     if (isTestRoute && env.ENABLE_TEST_ROUTES !== "1") {
       return new Response("Not Found", { status: 404, headers: corsHeaders });
     }
@@ -347,6 +354,50 @@ export default {
       // 1. Enhanced Health Check (public)
       if (path === "/health" && method === "GET") {
         return await handleHealth(env, corsHeaders);
+      }
+
+      // 1ab. Telegram Test Endpoint (Supports GET and POST)
+      if ((path === "/api/telegram-test" || path === "/telegram-test") && (method === "GET" || method === "POST")) {
+        const botToken = env.TELEGRAM_BOT_TOKEN;
+        const chatId = env.TELEGRAM_CHAT_ID;
+
+        if (!botToken || !chatId) {
+          return Response.json({
+            success: false,
+            ok: false,
+            bot_token_configured: !!botToken,
+            chat_id: chatId || null,
+            error: "Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID"
+          }, { status: 400, headers: corsHeaders });
+        }
+
+        try {
+          const tgRes = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              chat_id: String(chatId).trim(),
+              text: "Bvelt Radar test OK",
+              parse_mode: "HTML",
+              disable_web_page_preview: true
+            })
+          });
+          const tgData = await tgRes.json().catch(() => ({ ok: false }));
+          const success = tgRes.ok && (tgData as any).ok;
+          return Response.json({
+            success,
+            ok: success,
+            bot_token_configured: true,
+            chat_id: String(chatId).trim(),
+            telegram_response: tgData
+          }, { status: success ? 200 : 502, headers: corsHeaders });
+        } catch (err: any) {
+          return Response.json({
+            success: false,
+            ok: false,
+            error: err.message
+          }, { status: 502, headers: corsHeaders });
+        }
       }
 
       // 1b. Public Personalized Edge Demo Page for Cold Outreach Leads
@@ -397,7 +448,7 @@ export default {
           }
         }
 
-        return handleEdgeDemoPage(companyName, tradeName, phone, evidenceJson, token);
+        return handleEdgeDemoPage(companyName, tradeName, phone);
       }
 
       // 1c. Demo CTA Click Tracking Endpoint
@@ -433,6 +484,42 @@ export default {
       // 2. Telegram Webhook Callback Endpoint (handles interactive inline buttons)
       if ((path === "/telegram/webhook" || path === "/telegram-webhook") && method === "POST") {
         return await handleTelegramWebhook(request, env, corsHeaders);
+      }
+
+      // 2b. Telegram Test Endpoint (Supports GET and POST, checks token/chat_id, returns 400 if missing)
+      if ((path === "/api/telegram-test" || path === "/telegram-test") && (method === "GET" || method === "POST")) {
+        const botToken = env.TELEGRAM_BOT_TOKEN;
+        const chatId = env.TELEGRAM_CHAT_ID;
+
+        if (!botToken || !chatId) {
+          return Response.json({
+            success: false,
+            ok: false,
+            bot_token_configured: !!botToken,
+            chat_id: chatId ? String(chatId).trim() : null,
+            error: "Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID"
+          }, { status: 400, headers: corsHeaders });
+        }
+
+        try {
+          const testRes = await notifyFounder(
+            env,
+            "<b>📡 Bvelt Radar LIVE test OK</b> — Bot conectado y operativo a Telegram.\n\nNotificaciones outbound configuradas correctamente."
+          );
+          return Response.json({
+            success: testRes.ok,
+            ok: testRes.ok,
+            bot_token_configured: true,
+            chat_id: String(chatId).trim(),
+            telegram_response: testRes
+          }, { headers: corsHeaders, status: testRes.ok ? 200 : 502 });
+        } catch (err: any) {
+          return Response.json({
+            success: false,
+            ok: false,
+            error: err.message
+          }, { status: 502, headers: corsHeaders });
+        }
       }
 
       // Helper to parse cookies from request header
@@ -546,19 +633,6 @@ export default {
         return Response.json({ error: "Unauthorized. Missing or invalid service key." }, { status: 401, headers: corsHeaders });
       }
 
-      // 3b. Telegram Test Endpoint (Founder-Key Protected)
-      if ((path === "/api/telegram-test" || path === "/telegram-test") && (method === "GET" || method === "POST")) {
-        const testRes = await notifyFounder(
-          env,
-          "<b>📡 Bvelt Radar LIVE test OK</b> — Bot conectado y operativo a Telegram.\n\nNotificaciones outbound configuradas correctamente."
-        );
-        return Response.json({
-          success: testRes.ok,
-          bot_token_configured: !!env.TELEGRAM_BOT_TOKEN,
-          chat_id: env.TELEGRAM_CHAT_ID ? String(env.TELEGRAM_CHAT_ID).trim() : null,
-          telegram_response: testRes
-        }, { headers: corsHeaders, status: testRes.ok ? 200 : 502 });
-      }
 
       // 4. Stats Endpoint (Includes learning performance)
       if (path === "/stats" && method === "GET") {
@@ -1616,22 +1690,22 @@ async function handleDecision(
       }, { status: 403, headers });
     }
 
-    // Update prospect with outcome sent and 120-day cooldown
-    const cooldown120d = new Date(Date.now() + 120 * 24 * 60 * 60 * 1000).toISOString();
+    // Update prospect with outcome sent and 21-day cooldown (max 21 days for normal outreach)
+    const cooldown21d = new Date(Date.now() + 21 * 24 * 60 * 60 * 1000).toISOString();
     await db.prepare(
       "UPDATE prospects SET status = 'sent', outcome = 'sent', last_contact_at = ?, cooldown_until = ?, updated_at = ? WHERE id = ?"
-    ).bind(timestamp, cooldown120d, timestamp, id).run();
+    ).bind(timestamp, cooldown21d, timestamp, id).run();
 
-    // Auto-suppress email and domain for 120-day cooldown window
+    // Auto-suppress email and domain for 21-day cooldown window
     if (prospect.email) {
       await db.prepare("INSERT OR REPLACE INTO suppression (key, reason, created_at) VALUES (?, ?, ?)")
-        .bind(prospect.email.toLowerCase(), `Contacted on ${timestamp} (cooldown until ${cooldown120d})`, timestamp).run();
+        .bind(prospect.email.toLowerCase(), `Contacted on ${timestamp} (cooldown until ${cooldown21d})`, timestamp).run();
     }
     if (prospect.website) {
       const domain = getDomain(prospect.website);
       if (domain) {
         await db.prepare("INSERT OR REPLACE INTO suppression (key, reason, created_at) VALUES (?, ?, ?)")
-          .bind(domain.toLowerCase(), `Contacted on ${timestamp} (cooldown until ${cooldown120d})`, timestamp).run();
+          .bind(domain.toLowerCase(), `Contacted on ${timestamp} (cooldown until ${cooldown21d})`, timestamp).run();
       }
     }
 
@@ -1647,7 +1721,7 @@ async function handleDecision(
       } catch (e) {}
     }
 
-    return Response.json({ success: true, message: `Prospect ${id} marked as SENT with 120-day cooldown. Added to suppression.`, id }, { headers });
+    return Response.json({ success: true, message: `Prospect ${id} marked as SENT with 21-day cooldown. Added to suppression.`, id }, { headers });
 
   } else if (action === "replied" || action === "positive") {
     await db.prepare(
@@ -2917,7 +2991,7 @@ export async function handleProspectEvent(
       autoStopped = true;
       newStatus = 'paused';
       newOutcome = 'not_now';
-      cooldownUntil = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+      cooldownUntil = new Date(Date.now() + 21 * 24 * 60 * 60 * 1000).toISOString();
       break;
 
     case 'positive':
@@ -3836,7 +3910,7 @@ const OVERPASS_MIRRORS = [
 ];
 
 /**
- * 2. Overpass OSM with Mirrors & Retry (15-20s timeout, generic craft/shop/office/amenity tags)
+ * 2. Overpass OSM with Mirrors & Retry (8-12s timeout per mirror, generic craft/shop/office/amenity/name tags, multi-mirror fallback, widened radius fallback)
  */
 export async function fetchOverpassBusinesses(
   city: string, 
@@ -3846,7 +3920,6 @@ export async function fetchOverpassBusinesses(
   const cleanTrade = trade.toLowerCase().trim();
   const cityClean = city.split(",")[0].trim();
   
-  // Specific tags if defined, plus generic craft/shop/office/amenity tags for any niche
   const specificTags = OVERPASS_TRADE_TAGS[cleanTrade] || [];
   const genericTags = [
     `craft="${cleanTrade}"`,
@@ -3860,85 +3933,119 @@ export async function fetchOverpassBusinesses(
   ];
   
   const allTags = Array.from(new Set([...specificTags, ...genericTags]));
-  const tagQueries = allTags.map(tag => `nwr[${tag}]${nominatimGeo ? `(${nominatimGeo.bbox[0]},${nominatimGeo.bbox[2]},${nominatimGeo.bbox[1]},${nominatimGeo.bbox[3]})` : `(area.searchArea)`};`).join("\n");
 
-  const query = nominatimGeo ? `
-    [out:json][timeout:20];
-    (
-      ${tagQueries}
-    );
-    out body 35;
-  ` : `
-    [out:json][timeout:20];
-    area["name"="${cityClean}"]->.searchArea;
-    (
-      ${tagQueries}
-    );
-    out body 35;
-  `;
-
-  let lastStatus = "unattempted";
-
-  for (const mirror of OVERPASS_MIRRORS) {
-    try {
-      const res = await fetch(mirror, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-          "User-Agent": "BveltRadar-Discovery/1.0 (founder@bvelt.app)"
-        },
-        body: `data=${encodeURIComponent(query)}`,
-        signal: AbortSignal.timeout(18000)
-      });
-
-      if (res.ok) {
-        const osmData: any = await res.json();
-        const results: any[] = [];
-        if (osmData.elements) {
-          for (const el of osmData.elements) {
-            const tags = el.tags || {};
-            const name = tags.name;
-            if (!name) continue;
-
-            results.push({
-              name,
-              city,
-              trade,
-              website: tags.website || tags["contact:website"] || null,
-              phone: tags.phone || tags["contact:phone"] || null,
-              email: tags.email || tags["contact:email"] || null,
-              source: "overpass"
-            });
-          }
-        }
-        let hostname = mirror;
-        try { hostname = new URL(mirror).hostname; } catch (e) {}
-
-        if (results.length > 0) {
-          console.log(`[Overpass Mirror Success] Found ${results.length} businesses for ${city} - ${trade} via ${hostname}`);
-          return { businesses: results, status: `success (${hostname})` };
-        } else {
-          console.log(`[Overpass Mirror Empty] 0 raw elements from ${hostname}. Trying next mirror...`);
-          lastStatus = `0 elements from ${hostname}`;
-          continue;
-        }
-      } else {
-        let hostname = mirror;
-        try { hostname = new URL(mirror).hostname; } catch (e) {}
-        lastStatus = `HTTP ${res.status} from ${hostname}`;
+  async function queryOverpassWithGeo(geo: NominatimGeocoding | null, isWidened = false): Promise<{ businesses: any[]; status: string } | null> {
+    const tagQueries = allTags.map(tag => {
+      if (tag.includes('~')) {
+        const cleanTag = tag.replace(/,\s*i$/, '');
+        return `nwr[${cleanTag},i]${geo ? `(${geo.bbox[0]},${geo.bbox[2]},${geo.bbox[1]},${geo.bbox[3]})` : `(area.searchArea)`};`;
       }
-    } catch (e: any) {
-      let hostname = mirror;
-      try { hostname = new URL(mirror).hostname; } catch (e2) {}
-      lastStatus = `timeout/error from ${hostname}: ${e.message}`;
+      return `nwr[${tag}]${geo ? `(${geo.bbox[0]},${geo.bbox[2]},${geo.bbox[1]},${geo.bbox[3]})` : `(area.searchArea)`};`;
+    }).join("\n");
+
+    const query = geo ? `
+      [out:json][timeout:12];
+      (
+        ${tagQueries}
+      );
+      out body 35;
+    ` : `
+      [out:json][timeout:12];
+      area["name"="${cityClean}"]->.searchArea;
+      (
+        ${tagQueries}
+      );
+      out body 35;
+    `;
+
+    let lastStatus = "unattempted";
+
+    for (const mirror of OVERPASS_MIRRORS) {
+      try {
+        let hostname = mirror;
+        try { hostname = new URL(mirror).hostname; } catch (e) {}
+
+        const res = await fetch(mirror, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "User-Agent": "BveltRadar-Discovery/1.0 (founder@bvelt.app)"
+          },
+          body: `data=${encodeURIComponent(query)}`,
+          signal: AbortSignal.timeout(12000)
+        });
+
+        if (res.ok) {
+          const osmData: any = await res.json();
+          const results: any[] = [];
+          if (osmData.elements) {
+            for (const el of osmData.elements) {
+              const tags = el.tags || {};
+              const name = tags.name;
+              if (!name) continue;
+
+              results.push({
+                name,
+                city,
+                trade,
+                website: tags.website || tags["contact:website"] || null,
+                phone: tags.phone || tags["contact:phone"] || null,
+                email: tags.email || tags["contact:email"] || null,
+                source: "overpass"
+              });
+            }
+          }
+
+          if (results.length > 0) {
+            const suffix = isWidened ? " (widened radius)" : "";
+            console.log(`[Overpass Mirror Success] Found ${results.length} businesses for ${city} - ${trade} via ${hostname}${suffix}`);
+            return { businesses: results, status: `success (${hostname})${suffix}` };
+          } else {
+            console.log(`[Overpass Mirror Empty] 0 raw elements from ${hostname}. Trying next mirror...`);
+            lastStatus = `0 elements from ${hostname}`;
+            continue;
+          }
+        } else {
+          lastStatus = `HTTP ${res.status} from ${hostname}`;
+        }
+      } catch (e: any) {
+        let hostname = mirror;
+        try { hostname = new URL(mirror).hostname; } catch (e2) {}
+        lastStatus = `timeout/error from ${hostname}: ${e.message}`;
+      }
+    }
+    return null;
+  }
+
+  // 1. Try initial geo/bbox
+  const res1 = await queryOverpassWithGeo(nominatimGeo, false);
+  if (res1 && res1.businesses.length > 0) {
+    return res1;
+  }
+
+  // 2. Optional fallback: widen radius one step if 0 results and nominatimGeo available
+  if (nominatimGeo) {
+    console.log(`[Overpass Fallback] 0 results with initial bbox. Widening radius one step...`);
+    const widenedGeo: NominatimGeocoding = {
+      ...nominatimGeo,
+      bbox: [
+        nominatimGeo.bbox[0] - 0.1,
+        nominatimGeo.bbox[1] + 0.1,
+        nominatimGeo.bbox[2] - 0.1,
+        nominatimGeo.bbox[3] + 0.1
+      ]
+    };
+    const res2 = await queryOverpassWithGeo(widenedGeo, true);
+    if (res2 && res2.businesses.length > 0) {
+      return res2;
     }
   }
 
-  return { businesses: [], status: `0 elements across tried mirrors (last: ${lastStatus})` };
+  return { businesses: [], status: `0 elements across tried mirrors` };
 }
 
 /**
- * 3. BizData API Scraper (ONLY called if category is in official BizData list)
+ * 3. BizData API Scraper (ONLY called if category is in official BizData list; skips on HTTP 400 or error without aborting)
  */
 export async function fetchBizDataBusinesses(city: string, trade: string): Promise<{ businesses: any[]; status: string }> {
   const category = mapTradeToBizDataCategory(trade);
@@ -3969,10 +4076,13 @@ export async function fetchBizDataBusinesses(city: string, trade: string): Promi
         }
       }
       return { businesses: results, status: "success" };
+    } else {
+      console.warn(`[BizData] HTTP ${res.status} for ${city} - ${trade}, skipping source (do not abort)`);
+      return { businesses: [], status: `HTTP ${res.status} (skipped)` };
     }
-    return { businesses: [], status: `HTTP ${res.status}` };
   } catch (err: any) {
-    return { businesses: [], status: `error: ${err.message}` };
+    console.warn(`[BizData] Error for ${city} - ${trade}: ${err.message}, skipping source (do not abort)`);
+    return { businesses: [], status: `error: ${err.message} (skipped)` };
   }
 }
 
