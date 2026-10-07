@@ -1,0 +1,27 @@
+# Bvelt Radar D1 Migrations
+
+Run migrations sequentially in the Cloudflare D1 console one statement at a time.
+
+## Execution Order
+1. 0001_initial_schema.sql
+2. 0002_learning_and_outcomes.sql
+3. 0003_bvelt_angle_and_signals.sql
+4. 0004_identity_and_cooldown.sql
+5. 0005_queue_jobs_observability.sql
+6. 0006_trust_decisions_governor.sql
+7. 0007_sender_governor_and_email_verifications.sql
+8. 0008_prospect_event_replies.sql
+9. 0009_tenant_configurations.sql
+10. 0010_queue_job_control.sql
+11. 0011_auto_outreach_and_wins.sql
+12. 0012_demo_views.sql
+13. 0013_seed_businesses.sql
+14. 0014_weather_signals.sql
+15. 0015_outreach_reconciliation.sql
+16. 0016_budget_governor.sql
+17. 0017_evidence_scoring.sql
+18. 0018_daily_missions.sql
+
+## Note on ALTER TABLE ADD COLUMN
+SQLite has no `IF NOT EXISTS` clause for `ALTER TABLE ADD COLUMN`. 
+If you encounter a duplicate column name error when running an `ALTER TABLE ADD COLUMN` statement in the D1 console because the column was already applied previously, skip and continue.

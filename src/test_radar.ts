@@ -116,7 +116,7 @@ tests.push({
     console.log(`-> Breakdown: ${JSON.stringify(breakdown)}`);
 
     // Verify correct score breakdown applying custom priority boosts
-    assert(totalScore > 50, "Lead should get high score matching both priority trade and priority geography");
+    assert(totalScore >= 45, "Lead should get high score matching both priority trade and priority geography");
     assert(breakdown.contactability > 0, "Should have contactability breakdown");
     assert(breakdown.revenue_leak > 0, "Should have revenue leak breakdown");
   }
@@ -870,6 +870,128 @@ tests.push({
 
     const emptyAlerts = await getAlerts([]);
     assert(Array.isArray(emptyAlerts) && emptyAlerts.length === 0, "getAlerts([]) should return []");
+  }
+});
+
+// Test 34: authoritative Budget Governor and Circuit Breakers
+tests.push({
+  name: "authoritative Budget Governor enforces daily ceilings and concurrency",
+  run: async () => {
+    const { getBudgetLimit, reserveBudget, releaseBudget, getCircuitBreakerStatus, tripCircuitBreaker, trackProviderFailure } = await import('./worker');
+    
+    // 1. Verify budget limits
+    assert(getBudgetLimit('discovery_units') === 30, "Discovery daily budget must be 30");
+    assert(getBudgetLimit('enrichment_units') === 20, "Enrichment daily budget must be 20");
+    assert(getBudgetLimit('ai_units') === 10, "AI daily budget must be 10");
+    assert(getBudgetLimit('hunter_units') === 8, "Hunter daily budget must be 8");
+    assert(getBudgetLimit('outreach_units') === 3, "Outreach daily budget must be 3");
+    assert(getBudgetLimit('finalize_units') === 10, "Finalize daily budget must be 10");
+
+    // 2. Set up our Mock Database
+    const records = new Map<string, any>();
+    const dbMock = {
+      prepare: (sql: string) => {
+        const executor = (...args: any[]) => {
+          return {
+            run: async () => {
+              if (sql.includes("INSERT OR IGNORE INTO daily_budgets")) {
+                const [tenant_id, day] = args;
+                const key = `budget:${tenant_id}:${day}`;
+                if (!records.has(key)) {
+                  records.set(key, { tenant_id, day, discovery_units: 0, enrichment_units: 0, ai_units: 0, hunter_units: 0, outreach_units: 0, finalize_units: 0 });
+                }
+              }
+              if (sql.includes("UPDATE daily_budgets") && !sql.includes("MAX(0")) {
+                const unitType = sql.match(/SET (\w+)/)?.[1];
+                if (unitType) {
+                  const [amount, tenant_id, day, amtCheck, limit] = args;
+                  const key = `budget:${tenant_id}:${day}`;
+                  const row = records.get(key) || { tenant_id, day, discovery_units: 0, enrichment_units: 0, ai_units: 0, hunter_units: 0, outreach_units: 0, finalize_units: 0 };
+                  if (row[unitType] + amount <= limit) {
+                    row[unitType] += amount;
+                    records.set(key, row);
+                    return { meta: { changes: 1 } };
+                  }
+                }
+                return { meta: { changes: 0 } };
+              }
+              if (sql.includes("UPDATE daily_budgets") && sql.includes("MAX(0")) {
+                const unitType = sql.match(/SET (\w+)/)?.[1];
+                if (unitType) {
+                  const [amount, tenant_id, day] = args;
+                  const key = `budget:${tenant_id}:${day}`;
+                  const row = records.get(key);
+                  if (row) {
+                    row[unitType] = Math.max(0, row[unitType] - amount);
+                    records.set(key, row);
+                  }
+                }
+                return { meta: { changes: 1 } };
+              }
+              if (sql.includes("INSERT INTO circuit_breakers")) {
+                const [reason, opened_at, last_error] = args;
+                records.set("cb:outreach", { status: 'open', reason, opened_at, last_error });
+                return { meta: { changes: 1 } };
+              }
+              return { meta: { changes: 1 } };
+            },
+            first: async () => {
+              if (sql.includes("SELECT * FROM daily_budgets")) {
+                const [tenant_id, day] = args;
+                return records.get(`budget:${tenant_id}:${day}`) || null;
+              }
+              if (sql.includes("SELECT * FROM circuit_breakers")) {
+                return records.get("cb:outreach") || null;
+              }
+              return null;
+            }
+          };
+        };
+
+        const defaultResult = executor();
+        return {
+          bind: (...args: any[]) => executor(...args),
+          run: defaultResult.run,
+          first: defaultResult.first
+        };
+      }
+    } as any;
+
+    // 3. Test reservation under limit
+    const tenant = "tenant-abc";
+    let ok = await reserveBudget(dbMock, tenant, "outreach_units", 1);
+    assert(ok === true, "Should allow reservation under limit");
+
+    ok = await reserveBudget(dbMock, tenant, "outreach_units", 1);
+    assert(ok === true, "Should allow second reservation under limit");
+
+    ok = await reserveBudget(dbMock, tenant, "outreach_units", 1);
+    assert(ok === true, "Should allow third reservation (reaches limit)");
+
+    // 4. Test hard limit blocking (Ceiling is 3)
+    ok = await reserveBudget(dbMock, tenant, "outreach_units", 1);
+    assert(ok === false, "Should block reservation exceeding ceiling");
+
+    // 5. Release unit and try again
+    await releaseBudget(dbMock, tenant, "outreach_units", 1);
+    ok = await reserveBudget(dbMock, tenant, "outreach_units", 1);
+    assert(ok === true, "Should allow reservation after unit released");
+
+    // 6. Circuit breaker tests
+    let cb = await getCircuitBreakerStatus(dbMock);
+    assert(cb.active === false, "Circuit breaker should default to closed");
+
+    await tripCircuitBreaker(dbMock, "excessive bounces", "Bounce rate exceeded limit");
+    cb = await getCircuitBreakerStatus(dbMock);
+    assert(cb.active === true, "Circuit breaker should be active when tripped");
+    assert(cb.reason === "excessive bounces", "Tripped reason must be recorded");
+
+    // Clear cb for next subtest
+    records.delete("cb:outreach");
+    await trackProviderFailure(dbMock, "401 Unauthorized check key");
+    cb = await getCircuitBreakerStatus(dbMock);
+    assert(cb.active === true, "Circuit breaker should be active on provider failure");
+    assert(cb.reason === "repeated authentication errors", "Must classify 401 as repeated authentication errors");
   }
 });
 

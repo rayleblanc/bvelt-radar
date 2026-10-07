@@ -94,6 +94,131 @@ export interface Env {
   ENABLE_TEST_ROUTES?: string;
   GEMINI_MODELS?: string;
   ENABLE_BIZDATA?: string;
+  HUNTER_SEQUENCE_ID?: string;
+  RADAR_GLOBAL_PAUSE?: string;
+  RADAR_OUTREACH_PAUSE?: string;
+  ALLOWED_ORIGINS?: string;
+}
+
+export function getBudgetLimit(unitType: string): number {
+  switch (unitType) {
+    case 'discovery_units': return 30;
+    case 'enrichment_units': return 20;
+    case 'ai_units': return 10;
+    case 'hunter_units': return 8;
+    case 'outreach_units': return 3;
+    case 'finalize_units': return 10;
+    default: return 0;
+  }
+}
+
+export async function reserveBudget(
+  db: D1Database,
+  tenantId: string,
+  unitType: string,
+  amount: number = 1
+): Promise<boolean> {
+  const day = new Date().toISOString().split('T')[0];
+  const limit = getBudgetLimit(unitType);
+
+  try {
+    await db.prepare(`
+      INSERT OR IGNORE INTO daily_budgets (tenant_id, day, discovery_units, enrichment_units, ai_units, hunter_units, outreach_units, finalize_units)
+      VALUES (?, ?, 0, 0, 0, 0, 0, 0)
+    `).bind(tenantId, day).run();
+
+    const res = await db.prepare(`
+      UPDATE daily_budgets
+      SET ${unitType} = ${unitType} + ?
+      WHERE tenant_id = ? AND day = ? AND (${unitType} + ?) <= ?
+    `).bind(amount, tenantId, day, amount, limit).run() as any;
+
+    return !!(res && res.meta && res.meta.changes > 0);
+  } catch (e) {
+    console.error(`[Budget Governor] Failed to reserve ${unitType} for tenant ${tenantId}:`, e);
+    return false;
+  }
+}
+
+export async function releaseBudget(
+  db: D1Database,
+  tenantId: string,
+  unitType: string,
+  amount: number = 1
+): Promise<void> {
+  const day = new Date().toISOString().split('T')[0];
+  try {
+    await db.prepare(`
+      UPDATE daily_budgets
+      SET ${unitType} = MAX(0, ${unitType} - ?)
+      WHERE tenant_id = ? AND day = ?
+    `).bind(amount, tenantId, day).run();
+  } catch (e) {
+    console.error(`[Budget Governor] Failed to release ${unitType} for tenant ${tenantId}:`, e);
+  }
+}
+
+export async function commitBudget(
+  db: D1Database,
+  tenantId: string,
+  unitType: string,
+  amount: number = 1
+): Promise<void> {
+  console.log(`[Budget Governor] Committed ${amount} units of ${unitType} for tenant ${tenantId}`);
+}
+
+export async function getRemainingBudget(db: D1Database, tenantId: string, unitType: string): Promise<number> {
+  const day = new Date().toISOString().split('T')[0];
+  const limit = getBudgetLimit(unitType);
+  try {
+    const row = await db.prepare(`SELECT ${unitType} FROM daily_budgets WHERE tenant_id = ? AND day = ?`).bind(tenantId, day).first() as any;
+    if (!row) return limit;
+    return Math.max(0, limit - (row[unitType] || 0));
+  } catch (e) {
+    return 0; // fail closed
+  }
+}
+
+export async function getCircuitBreakerStatus(db: D1Database): Promise<{ active: boolean; reason: string | null }> {
+  try {
+    const row = await db.prepare("SELECT * FROM circuit_breakers WHERE id = 'outreach'").first() as any;
+    if (row && row.status === 'open') {
+      return { active: true, reason: row.reason };
+    }
+  } catch (e) {
+    return { active: true, reason: "Circuit breaker state query failed (fail closed)" };
+  }
+  return { active: false, reason: null };
+}
+
+export async function tripCircuitBreaker(db: D1Database, reason: string, errorMsg: string): Promise<void> {
+  const timestamp = new Date().toISOString();
+  try {
+    await db.prepare(`
+      INSERT INTO circuit_breakers (id, status, reason, opened_at, last_error, manual_reset_required)
+      VALUES ('outreach', 'open', ?, ?, ?, 1)
+      ON CONFLICT(id) DO UPDATE SET
+        status = 'open',
+        reason = excluded.reason,
+        opened_at = excluded.opened_at,
+        last_error = excluded.last_error,
+        manual_reset_required = 1
+    `).bind(reason, timestamp, errorMsg).run();
+    console.error(`[Circuit Breaker Tripped] Outreach paused. Reason: ${reason}. Error: ${errorMsg}`);
+  } catch (e) {
+    console.error("[Circuit Breaker] Failed to trip:", e);
+  }
+}
+
+export async function trackProviderFailure(db: D1Database, errorMsg: string): Promise<void> {
+  const isAuthError = errorMsg.includes("401") || errorMsg.includes("Authentication") || errorMsg.includes("Unauthorized");
+  const isUnexpectedFormat = errorMsg.includes("response format") || errorMsg.includes("JSON") || errorMsg.includes("Unexpected token");
+  
+  let reason = "repeated provider failures";
+  if (isAuthError) reason = "repeated authentication errors";
+  else if (isUnexpectedFormat) reason = "unexpected provider response format";
+
+  await tripCircuitBreaker(db, reason, errorMsg);
 }
 
 export interface MissionConfig {
@@ -195,10 +320,18 @@ export default {
     const path = url.pathname;
     const method = request.method;
 
-    const corsHeaders = {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    const requestOrigin = request.headers.get("Origin") || "*";
+    const allowedOrigins = env.ALLOWED_ORIGINS ? env.ALLOWED_ORIGINS.split(";").map(o => o.trim()) : [];
+    let allowOriginHeader = requestOrigin;
+    if (allowedOrigins.length > 0) {
+      allowOriginHeader = allowedOrigins.includes(requestOrigin) ? requestOrigin : allowedOrigins[0];
+    }
+
+    const corsHeaders: Record<string, string> = {
+      "Access-Control-Allow-Origin": allowOriginHeader,
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS, DELETE",
       "Access-Control-Allow-Headers": "Content-Type, Authorization",
+      "Access-Control-Allow-Credentials": "true"
     };
 
     const isTestRoute = path === "/api/telegram-test" || path === "/telegram-test" || path.startsWith("/api/test/");
@@ -223,15 +356,17 @@ export default {
         let tradeName = "Servicios";
         let phone = "";
         let prospectId = null;
+        let evidenceJson = "[]";
 
         if (token) {
           try {
-            const prospect = await env.RADAR_DB.prepare("SELECT id, name, trade, phone FROM prospects WHERE demo_token = ?").bind(token).first() as any;
+            const prospect = await env.RADAR_DB.prepare("SELECT id, name, trade, phone, evidence_json FROM prospects WHERE demo_token = ?").bind(token).first() as any;
             if (prospect) {
               companyName = prospect.name || "Tu Negocio";
               tradeName = prospect.trade || "Servicios";
               phone = prospect.phone || "";
               prospectId = prospect.id;
+              evidenceJson = prospect.evidence_json || "[]";
 
               const timestamp = new Date().toISOString();
               const ua = request.headers.get("User-Agent") || "";
@@ -239,6 +374,10 @@ export default {
               // Register visit in demo_views
               await env.RADAR_DB.prepare("INSERT INTO demo_views (prospect_id, viewed_at, ua) VALUES (?, ?, ?)")
                 .bind(prospectId, timestamp, ua).run();
+
+              // Track demo_viewed in outcome/event system
+              await env.RADAR_DB.prepare("INSERT INTO prospect_events (prospect_id, event_type, content, created_at) VALUES (?, 'demo_viewed', ?, ?)")
+                .bind(prospectId, "demo_viewed", `Personalized demo viewed. UA: ${ua}`, timestamp).run();
 
               // Check if it's the first time in 24 h
               const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
@@ -258,7 +397,37 @@ export default {
           }
         }
 
-        return handleEdgeDemoPage(companyName, tradeName, phone);
+        return handleEdgeDemoPage(companyName, tradeName, phone, evidenceJson, token);
+      }
+
+      // 1c. Demo CTA Click Tracking Endpoint
+      if (path === "/demo/cta" && method === "GET") {
+        const token = url.searchParams.get("p");
+        if (token) {
+          try {
+            const prospect = await env.RADAR_DB.prepare("SELECT id, name FROM prospects WHERE demo_token = ?").bind(token).first() as any;
+            if (prospect) {
+              const timestamp = new Date().toISOString();
+              
+              // Log event
+              await env.RADAR_DB.prepare("INSERT INTO prospect_events (prospect_id, event_type, content, created_at) VALUES (?, 'demo_cta_clicked', ?, ?)")
+                .bind(prospect.id, "demo_cta_clicked", "Clicked CTA button in personalized demo", timestamp).run();
+
+              // Update outcome
+              await env.RADAR_DB.prepare("UPDATE prospects SET outcome = 'demo_cta_clicked', updated_at = ? WHERE id = ?")
+                .bind(timestamp, prospect.id).run();
+
+              // Notify Telegram
+              if (env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID) {
+                const ctaMsg = `🎯 <b>${escapeHtml(prospect.name)}</b> hizo clic en el CTA de su demo interactiva!`;
+                await notifyFounder(env, ctaMsg).catch(() => {});
+              }
+            }
+          } catch (e) {
+            console.warn("Error tracking demo CTA click:", e);
+          }
+        }
+        return Response.redirect("https://bvelt.app", 302);
       }
 
       // 2. Telegram Webhook Callback Endpoint (handles interactive inline buttons)
@@ -321,15 +490,12 @@ export default {
 
       // 3. Security Verification for Admin/Worker Endpoints (Supports HttpOnly Cookie OR Bearer token)
       const authHeader = request.headers.get("Authorization");
-      const queryKey = url.searchParams.get("key");
       const sessionCookie = parsedCookies["bvelt_session"];
 
       let isAuthorized = false;
       if (validSessionHash && sessionCookie === validSessionHash) {
         isAuthorized = true;
       } else if (authHeader && authHeader.startsWith("Bearer ") && authHeader.split(" ")[1] === serviceKey) {
-        isAuthorized = true;
-      } else if (queryKey && queryKey === serviceKey) {
         isAuthorized = true;
       }
 
@@ -1186,8 +1352,38 @@ async function handleHealth(env: Env, headers: Record<string, string>): Promise<
     if (supRow) suppressedCount = supRow.count;
   } catch (e) {}
 
+  const globalPause = env.RADAR_GLOBAL_PAUSE === "true" || env.RADAR_GLOBAL_PAUSE === "1";
+  const outreachPause = env.RADAR_OUTREACH_PAUSE === "true" || env.RADAR_OUTREACH_PAUSE === "1";
+
+  let budgetRow = await db.prepare("SELECT * FROM daily_budgets WHERE tenant_id = 'founder' AND day = ?").bind(today).first() as any;
+  if (!budgetRow) {
+    budgetRow = {
+      discovery_units: 0,
+      enrichment_units: 0,
+      ai_units: 0,
+      hunter_units: 0,
+      outreach_units: 0,
+      finalize_units: 0,
+    };
+  }
+
+  const cb = await db.prepare("SELECT * FROM circuit_breakers WHERE id = 'outreach'").first() as any;
+  const circuitBreakerActive = cb ? cb.status === 'open' : false;
+  const circuitBreakerReason = cb ? cb.reason : null;
+
   return Response.json({
-    status: failedJobs > 0 && pendingJobs === 0 ? "degraded" : "healthy",
+    status: globalPause ? "paused" : circuitBreakerActive ? "paused" : failedJobs > 0 && pendingJobs === 0 ? "degraded" : "healthy",
+    global_pause: globalPause,
+    outreach_pause: outreachPause,
+    circuit_breaker: circuitBreakerActive,
+    circuit_breaker_reason: circuitBreakerReason,
+    today: {
+      discovery: { used: budgetRow.discovery_units || 0, max: 30 },
+      enrichment: { used: budgetRow.enrichment_units || 0, max: 20 },
+      AI: { used: budgetRow.ai_units || 0, max: 10 },
+      Hunter: { used: budgetRow.hunter_units || 0, max: 8 },
+      outreach: { used: budgetRow.outreach_units || 0, max: 3 }
+    },
     telegram_configured: telegramConfigured,
     last_telegram_ok: lastTelegramOk,
     prospects_today: prospectsToday,
@@ -1341,6 +1537,26 @@ async function handleStats(env: Env, headers: Record<string, string>): Promise<R
   // Learning conversion rates (Top winning combinations)
   const learningStats = await getLearningStats(db);
 
+  const today = new Date().toISOString().split('T')[0];
+  let budgetRow = await db.prepare("SELECT * FROM daily_budgets WHERE tenant_id = 'founder' AND day = ?").bind(today).first() as any;
+  if (!budgetRow) {
+    budgetRow = {
+      discovery_units: 0,
+      enrichment_units: 0,
+      ai_units: 0,
+      hunter_units: 0,
+      outreach_units: 0,
+      finalize_units: 0,
+    };
+  }
+
+  const cb = await db.prepare("SELECT * FROM circuit_breakers WHERE id = 'outreach'").first() as any;
+  const circuitBreakerActive = cb ? cb.status === 'open' : false;
+  const circuitBreakerReason = cb ? cb.reason : null;
+
+  const globalPause = env.RADAR_GLOBAL_PAUSE === "true" || env.RADAR_GLOBAL_PAUSE === "1";
+  const outreachPause = env.RADAR_OUTREACH_PAUSE === "true" || env.RADAR_OUTREACH_PAUSE === "1";
+
   return Response.json({
     prospects_by_status: prospectStats.results,
     outcomes: outcomeStats.results,
@@ -1348,7 +1564,18 @@ async function handleStats(env: Env, headers: Record<string, string>): Promise<R
     recent_runs: latestRuns.results,
     suppression_list_size: suppressionCount?.count || 0,
     learning_weights: learningStats,
-    limits: LIMITS
+    limits: LIMITS,
+    global_pause: globalPause,
+    outreach_pause: outreachPause,
+    circuit_breaker: circuitBreakerActive,
+    circuit_breaker_reason: circuitBreakerReason,
+    today: {
+      discovery: { used: budgetRow.discovery_units || 0, max: 30 },
+      enrichment: { used: budgetRow.enrichment_units || 0, max: 20 },
+      AI: { used: budgetRow.ai_units || 0, max: 10 },
+      Hunter: { used: budgetRow.hunter_units || 0, max: 8 },
+      outreach: { used: budgetRow.outreach_units || 0, max: 3 }
+    }
   }, { headers });
 }
 
@@ -1649,9 +1876,38 @@ export async function startProspectingRun(
     min_score: string | null;
   }
 ): Promise<{ run_id: string; jobs_enqueued: number; active_cities: string[]; active_trades: string[]; diagnostics: any }> {
+  if (env.RADAR_GLOBAL_PAUSE === "true" || env.RADAR_GLOBAL_PAUSE === "1") {
+    console.log("[startProspectingRun] RADAR_GLOBAL_PAUSE active. Prospecting run aborted.");
+    return {
+      run_id: "paused",
+      jobs_enqueued: 0,
+      active_cities: [],
+      active_trades: [],
+      diagnostics: { reason: "RADAR_GLOBAL_PAUSE active. Run aborted." }
+    };
+  }
+
   const db = env.RADAR_DB;
-  const runId = crypto.randomUUID();
   const today = new Date().toISOString().split('T')[0];
+
+  const tId = tenantId || "founder";
+  try {
+    const existingRun = await db.prepare("SELECT * FROM runs WHERE day = ? AND mode = ?").bind(today, mode).first() as any;
+    if (existingRun) {
+      console.log(`[startProspectingRun] Run already exists today for mode ${mode}. Returning existing run ID: ${existingRun.id}`);
+      return {
+        run_id: existingRun.id,
+        jobs_enqueued: 0,
+        active_cities: [],
+        active_trades: [],
+        diagnostics: { reason: "Run already exists today (idempotent skip)." }
+      };
+    }
+  } catch (e) {
+    console.error("[startProspectingRun] Error checking duplicate runs:", e);
+  }
+
+  const runId = crypto.randomUUID();
 
   const dayOfYear = getDayOfYear(new Date());
   const { activeCities, activeTrades } = await getPriorityTargets(dayOfYear, env, mode, tenantId, overrides);
@@ -1726,22 +1982,37 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
     return;
   }
 
-  const bounded = scraped.slice(0, LIMITS.max_discover_per_day);
+  const tenantId = job.tenant_id || "founder";
+  const remainingBudget = await getRemainingBudget(env.RADAR_DB, tenantId, 'discovery_units');
+  if (remainingBudget <= 0) {
+    console.log(`[Job: discovery] 0 discovery units available for tenant: ${tenantId}`);
+    return;
+  }
+  const bounded = scraped.slice(0, remainingBudget);
   let enqueuedEnrich = 0;
   let filteredCount = 0;
 
   for (const candidate of bounded) {
+    // Atomically reserve a discovery unit before processing the candidate
+    const reserved = await reserveBudget(env.RADAR_DB, tenantId, 'discovery_units', 1);
+    if (!reserved) {
+      console.log(`[Job: discovery] Failed to reserve discovery unit. Budget exhausted for tenant: ${tenantId}`);
+      break;
+    }
+
     // Prohibido example.com / datos simulados en producción
     const isMock = (candidate.email && candidate.email.toLowerCase().includes("example.com")) ||
                    (candidate.website && candidate.website.toLowerCase().includes("example.com")) ||
                    (candidate.name && (candidate.name.toLowerCase().includes("test business") || candidate.name.toLowerCase().includes("test contractor")));
     if (isMock || isHardRejectedChain(candidate.name)) {
+      await releaseBudget(env.RADAR_DB, tenantId, 'discovery_units', 1);
       filteredCount++;
       continue;
     }
 
     // 1. Hard-rejected chain check
     if (isHardRejectedChain(candidate.name)) {
+      await releaseBudget(env.RADAR_DB, tenantId, 'discovery_units', 1);
       filteredCount++;
       continue;
     }
@@ -1751,6 +2022,7 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
     // 2. Composite suppression check
     const suppression = await checkSuppressedComposite(env.RADAR_DB, candidate.email, candidate.website, candidate.phone, candidate.name, candidate.city);
     if (suppression) {
+      await releaseBudget(env.RADAR_DB, tenantId, 'discovery_units', 1);
       filteredCount++;
       continue;
     }
@@ -1764,12 +2036,14 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
 
       // Skip if discarded anytime, rejected, suppressed, blocked, or unsubscribed
       if (status === 'discarded' || outcome === 'rejected' || status === 'suppressed' || status === 'blocked' || status === 'unsubscribed') {
+        await releaseBudget(env.RADAR_DB, tenantId, 'discovery_units', 1);
         filteredCount++;
         continue;
       }
 
       // Skip if cooldown_until is active
       if (isCooldownActive(p.cooldown_until)) {
+        await releaseBudget(env.RADAR_DB, tenantId, 'discovery_units', 1);
         filteredCount++;
         continue;
       }
@@ -1779,6 +2053,7 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
         const contactTime = new Date(p.last_contact_at).getTime();
         const daysSinceContact = (Date.now() - contactTime) / (1000 * 60 * 60 * 24);
         if (daysSinceContact < 120) {
+          await releaseBudget(env.RADAR_DB, tenantId, 'discovery_units', 1);
           filteredCount++;
           continue;
         }
@@ -1786,11 +2061,13 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
 
       // Skip if already in active funnel (approved, queued, notified, sent, human_review, scored, enriched)
       if (['approved', 'drafted', 'queued', 'notified', 'sent', 'human_review', 'scored', 'enriched'].includes(status)) {
+        await releaseBudget(env.RADAR_DB, tenantId, 'discovery_units', 1);
         filteredCount++;
         continue;
       }
 
       // Skip existing identity to avoid duplicate rows
+      await releaseBudget(env.RADAR_DB, tenantId, 'discovery_units', 1);
       filteredCount++;
       continue;
     }
@@ -1932,14 +2209,21 @@ async function handleEnrichJob(job: RadarJobMessage, env: Env): Promise<void> {
   };
 
   // Step a: Scrape Website HTML
+  const tenantId = job.tenant_id || "founder";
+  let enrichmentReserved = false;
   if (prospect.website && isRealWebsite(prospect.website)) {
-    try {
-      const scrapeResult = await scrapeWebsiteContact(prospect.website);
-      if (scrapeResult.email) websiteEmail = scrapeResult.email;
-      if (scrapeResult.phone && !websitePhone) websitePhone = scrapeResult.phone;
-      if (scrapeResult.signals) signals = scrapeResult.signals as any;
-    } catch (e: any) {
-      console.warn(`Scraping warning on ${prospect.website}: ${e.message}`);
+    enrichmentReserved = await reserveBudget(env.RADAR_DB, tenantId, 'enrichment_units', 1);
+    if (enrichmentReserved) {
+      try {
+        const scrapeResult = await scrapeWebsiteContact(prospect.website);
+        if (scrapeResult.email) websiteEmail = scrapeResult.email;
+        if (scrapeResult.phone && !websitePhone) websitePhone = scrapeResult.phone;
+        if (scrapeResult.signals) signals = scrapeResult.signals as any;
+        await commitBudget(env.RADAR_DB, tenantId, 'enrichment_units', 1);
+      } catch (e: any) {
+        console.warn(`Scraping warning on ${prospect.website}: ${e.message}`);
+        await releaseBudget(env.RADAR_DB, tenantId, 'enrichment_units', 1);
+      }
     }
   }
 
@@ -1957,18 +2241,18 @@ async function handleEnrichJob(job: RadarJobMessage, env: Env): Promise<void> {
     emailCandidate = `contact@${domain}`;
   }
 
-  // Step d: Hunter Domain Search ONLY if quota available (< 8/day) and MX exists
+  // Step d: Hunter Domain Search ONLY if quota available and MX exists
   if (domain && hasValidMx && env.HUNTER_API_KEY) {
     try {
-      const today = new Date().toISOString().split('T')[0];
-      const todayRun = await env.RADAR_DB.prepare("SELECT hunter_calls FROM runs WHERE day = ? ORDER BY created_at DESC LIMIT 1").bind(today).first() as any;
-      const hunterUsedToday = todayRun?.hunter_calls || 0;
-
-      if (hunterUsedToday < LIMITS.max_hunter_credits_per_day) {
+      const reserved = await reserveBudget(env.RADAR_DB, tenantId, 'hunter_units', 1);
+      if (reserved) {
         const hunterEmail = await fetchHunterEmail(domain, env.HUNTER_API_KEY);
         if (hunterEmail) {
           emailCandidate = hunterEmail;
           await env.RADAR_DB.prepare("UPDATE runs SET hunter_calls = hunter_calls + 1 WHERE id = ?").bind(job.run_id).run();
+          await commitBudget(env.RADAR_DB, tenantId, 'hunter_units', 1);
+        } else {
+          await releaseBudget(env.RADAR_DB, tenantId, 'hunter_units', 1);
         }
       }
     } catch (e: any) {}
@@ -2057,7 +2341,14 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
     return;
   }
 
-  const { totalScore, breakdown, confidence, evidenceSummary } = calculateMultiFactorScore(
+  const { 
+    totalScore, 
+    breakdown, 
+    confidence, 
+    evidenceSummary, 
+    evidenceItems = [], 
+    painHypothesis = {} 
+  } = calculateMultiFactorScore(
     prospect,
     prospect.email,
     isEmailValidated,
@@ -2094,17 +2385,34 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
     score_breakdown: breakdown,
     bvelt_angle: bveltAngle,
     confidence,
-    evidence_summary: evidenceSummary
+    evidence_summary: evidenceSummary,
+    evidence_json: evidenceItems,
+    pain_hypothesis_json: painHypothesis
   };
+
+  // Track demo_created event
+  try {
+    await env.RADAR_DB.prepare(
+      "INSERT INTO prospect_events (prospect_id, event_type, content, created_at) VALUES (?, 'demo_created', ?, ?)"
+    ).bind(prospect_id, "Personalized demo token generated based on structured evidence", new Date().toISOString()).run();
+  } catch (e) {}
+
+  // Determine commercial value band based on total score
+  const valueBand = totalScore >= 80 ? "premium" : totalScore >= 60 ? "high" : totalScore >= 45 ? "medium" : "low";
 
   // Rule: Do not set QUALIFIED if score < 45 OR no email
   if (totalScore < 45 || !prospect.email) {
     await env.RADAR_DB.prepare(`
       UPDATE prospects
-      SET score = ?, signals_json = ?, score_breakdown = ?, variant_id = ?, bvelt_angle = ?, status = 'disqualified', outcome = 'low_score_or_no_email', updated_at = ?
+      SET score = ?, opportunity_score = ?, confidence_score = ?, evidence_json = ?, commercial_value_band = ?, pain_hypothesis_json = ?, signals_json = ?, score_breakdown = ?, variant_id = ?, bvelt_angle = ?, status = 'disqualified', outcome = 'low_score_or_no_email', updated_at = ?
       WHERE id = ?
     `).bind(
       totalScore,
+      totalScore,
+      confidence,
+      JSON.stringify(evidenceItems),
+      valueBand,
+      JSON.stringify(painHypothesis),
       JSON.stringify(updatedMeta),
       JSON.stringify(breakdown),
       variantId,
@@ -2117,10 +2425,15 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
 
   await env.RADAR_DB.prepare(`
     UPDATE prospects
-    SET score = ?, signals_json = ?, score_breakdown = ?, variant_id = ?, bvelt_angle = ?, status = 'scored', updated_at = ?
+    SET score = ?, opportunity_score = ?, confidence_score = ?, evidence_json = ?, commercial_value_band = ?, pain_hypothesis_json = ?, signals_json = ?, score_breakdown = ?, variant_id = ?, bvelt_angle = ?, status = 'scored', updated_at = ?
     WHERE id = ?
   `).bind(
     totalScore,
+    totalScore,
+    confidence,
+    JSON.stringify(evidenceItems),
+    valueBand,
+    JSON.stringify(painHypothesis),
     JSON.stringify(updatedMeta),
     JSON.stringify(breakdown),
     variantId,
@@ -2128,6 +2441,62 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
     new Date().toISOString(),
     prospect_id
   ).run();
+
+  // Increment qualified_count for today's daily mission
+  try {
+    const todayStr = new Date().toISOString().split('T')[0];
+    await env.RADAR_DB.prepare("UPDATE daily_missions SET qualified_count = qualified_count + 1 WHERE day = ?").bind(todayStr).run();
+  } catch (e) {}
+
+  // --- HOT LEAD INTERRUPT TRIGGERS ---
+  const detectedCount = evidenceItems.filter((e: any) => e.value === 'detected').length;
+  // Bvelt Fit Score
+  const tradeLower = (prospect.trade || "").toLowerCase();
+  const isPreferred = PREFERRED_TRADES.has(tradeLower) || /hvac|plumb|electr|roof|lawn|landscap|pool|clean|handyman/i.test(tradeLower);
+  const bveltFitScore = isPreferred ? 15 : 0;
+
+  const isHotLead = (totalScore >= 90 && confidence >= 80) || 
+    (detectedCount >= 3 && !!prospect.signal_event && bveltFitScore >= 15);
+
+  if (isHotLead && prospect.email) {
+    try {
+      const alreadyAlerted = await env.RADAR_DB.prepare(
+        "SELECT COUNT(*) as c FROM prospect_events WHERE prospect_id = ? AND event_type = 'hot_lead_alert_sent'"
+      ).bind(prospect_id).first() as any;
+
+      if (!alreadyAlerted || alreadyAlerted.c === 0) {
+        await env.RADAR_DB.prepare(
+          "INSERT INTO prospect_events (prospect_id, event_type, content, created_at) VALUES (?, 'hot_lead_alert_sent', ?, ?)"
+        ).bind(prospect_id, "Hot lead Telegram notification sent", new Date().toISOString()).run();
+
+        const demoLink = prospect.demo_token 
+          ? `https://bvelt.app/demo?p=${prospect.demo_token}`
+          : "https://bvelt.app/demo";
+
+        const hotMsg = `🔥 <b>BVELT HOT OPPORTUNITY</b>\n\n` +
+          `🏢 <b>Business:</b> ${escapeHtml(prospect.name)}\n` +
+          `📍 <b>Market:</b> ${escapeHtml(prospect.city)}\n` +
+          `🛠 <b>Trade:</b> ${escapeHtml(prospect.trade)}\n\n` +
+          `📊 <b>Score:</b> <b>${totalScore}/100</b>\n` +
+          `🎯 <b>Confidence:</b> <b>${confidence}%</b>\n\n` +
+          `⚡ <b>Why Now:</b>\n` +
+          (prospect.signal_event ? `• Severe weather event active: ${escapeHtml(prospect.signal_event)}\n` : "") +
+          (signals.sms_gap ? `• Active mobile visitors drop-off detected (no SMS support)\n` : "") +
+          `• High-converting contractor profile match\n\n` +
+          `🔎 <b>Evidence:</b>\n` +
+          (evidenceSummary ? `• ${escapeHtml(evidenceSummary)}\n` : "• Standard verified active presence\n") +
+          `• Smart crawl completed across up to 5 same-domain pages\n\n` +
+          `💡 <b>Recommended Angle:</b>\n` +
+          `• ${escapeHtml(bveltAngle.replace(/_/g, " "))}\n\n` +
+          `🔗 <b>Personalized Demo Link:</b>\n` +
+          `<a href="${demoLink}">${demoLink}</a>`;
+
+        await notifyFounder(env, hotMsg).catch(() => {});
+      }
+    } catch (e) {
+      console.warn("Error triggering Hot Lead alert:", e);
+    }
+  }
 
   // Rule: "Pending approve" / QUEUED / HOLD only if: score >= 45 AND email present AND not hard-rejected
   if (totalScore >= 45 && prospect.email && !isHardRejectedChain(prospect.name)) {
@@ -2204,6 +2573,13 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
   const { missionConfig } = await getPriorityTargets(dayOfYear, env, job.mode, job.tenant_id, overrides);
   const primaryLanguage = (missionConfig.languages && missionConfig.languages[0]) || "en";
 
+  const tenantId = job.tenant_id || "founder";
+  const finalizeReserved = await reserveBudget(env.RADAR_DB, tenantId, 'finalize_units', 1);
+  if (!finalizeReserved) {
+    console.warn(`[Outreach Job] Budget exceeded for finalize_units for tenant: ${tenantId}`);
+    return;
+  }
+
   let draft: { subject: string; body: string };
   try {
     draft = await generateAICopy(prospect, prospect.variant_id || 'missed_calls', env, missionConfig);
@@ -2253,8 +2629,10 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
     return; // DO NOT SEND / DO NOT DISPATCH!
   }
 
-  // Check if FOUNDER_AUTO_OUTREACH is enabled for founder mode ONLY
-  const isAutoOutreachEnabled = job.mode === 'founder' && String(env.FOUNDER_AUTO_OUTREACH).toLowerCase() === 'true';
+  // Only ELITE can qualify for automatic founder outreach
+  const isElite = (prospect.opportunity_score >= 80 && prospect.confidence_score >= 75) || 
+    (!prospect.opportunity_score && (prospect.score || 0) >= 80);
+  const isAutoOutreachEnabled = job.mode === 'founder' && String(env.FOUNDER_AUTO_OUTREACH).toLowerCase() === 'true' && isElite;
 
   const todayDate = new Date().toISOString().split('T')[0];
   const idempotencyKey = `idempotency:${prospect.id}:${(prospect.email || '').toLowerCase().trim()}:${todayDate}`;
@@ -2321,6 +2699,17 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
         return;
       } else {
         console.warn(`[Auto-Outreach] Send blocked or failed: ${sendRes.reason}`);
+        // Release the reserved slot in sender governor since the actual send failed or was blocked
+        try {
+          await env.RADAR_DB.prepare(`
+            UPDATE sender_governor_state
+            SET sends_today = sends_today - 1, updated_at = ?
+            WHERE id = 'global_governor' AND sends_today > 0 AND last_reset_day = ?
+          `).bind(new Date().toISOString(), todayDate).run();
+        } catch (govErr) {
+          console.warn("[Auto-Outreach] Error releasing sender governor slot:", govErr);
+        }
+
         await env.RADAR_DB.prepare(
           "UPDATE prospects SET status = 'hold', outcome = ?, updated_at = ? WHERE id = ?"
         ).bind(sendRes.reason, new Date().toISOString(), prospect.id).run();
@@ -2935,6 +3324,34 @@ export async function getPriorityTargets(
         config.min_score = parsedMin;
       }
     }
+
+    // Seed Today's Daily Mission
+    if (env.RADAR_DB && typeof env.RADAR_DB.prepare === "function") {
+      try {
+        const today = new Date().toISOString().split('T')[0];
+        const goal = "Find the highest-probability Bvelt customers today.";
+        const marketsJson = JSON.stringify(config.geographies);
+        const icpJson = JSON.stringify(config.icp);
+        const budgetJson = JSON.stringify({
+          discovery_units: 30,
+          enrichment_units: 20,
+          ai_units: 10,
+          hunter_units: 8,
+          outreach_units: 3,
+          finalize_units: 10
+        });
+
+        const prep = env.RADAR_DB.prepare(`
+          INSERT OR IGNORE INTO daily_missions (day, goal, markets, icp, budget, target_qualified, target_outreach, status, qualified_count, outreach_count)
+          VALUES (?, ?, ?, ?, ?, 3, 3, 'active', 0, 0)
+        `);
+        if (prep && typeof prep.bind === "function") {
+          await prep.bind(today, goal, marketsJson, icpJson, budgetJson).run();
+        }
+      } catch (e) {
+        console.warn("[Daily Mission] Failed to seed daily mission:", e);
+      }
+    }
   } else if (mode === "tenant" && tenantId) {
     const tenantConfig = await env.RADAR_DB.prepare("SELECT * FROM tenant_config WHERE tenant_id = ?").bind(tenantId).first() as any;
     if (tenantConfig) {
@@ -3109,7 +3526,14 @@ export function calculateMultiFactorScore(
   learningStats: Record<string, number>,
   signals: Record<string, boolean>,
   missionConfig?: MissionConfig
-): { totalScore: number; breakdown: Record<string, number>; confidence: number; evidenceSummary: string } {
+): {
+  totalScore: number;
+  breakdown: Record<string, number>;
+  confidence: number;
+  evidenceSummary: string;
+  evidenceItems?: any[];
+  painHypothesis?: any;
+} {
   // Hard Quality Gate: immediate 0 score for retail chains
   if (isHardRejectedChain(item.name)) {
     return {
@@ -3130,124 +3554,163 @@ export function calculateMultiFactorScore(
 
   const isTenantMode = missionConfig?.mode === 'tenant';
 
-  // 1. PLATFORM FIT (0 - 20 pts)
-  let platformFitScore = 0;
-  if (item.website && isRealWebsite(item.website)) platformFitScore += 5;
-  if (signals.lead_capture || signals.contact_form || signals.quote_request) platformFitScore += 7;
-  if (signals.emergency || signals.sms_gap) platformFitScore += 8;
+  // --- NEW 6-COMPONENT FORMULA FOR TOTAL/OPPORTUNITY SCORE ---
+  
+  // 1. Need Evidence (0 - 30 pts)
+  let needEvidenceScore = 0;
+  if (signals.sms_gap) needEvidenceScore += 12;
+  if (!signals.booking) needEvidenceScore += 8;
+  if (!signals.quote_request && !signals.estimate_language) needEvidenceScore += 8;
+  if (signals.emergency && signals.sms_gap) needEvidenceScore += 4;
+  if (phone && !email) needEvidenceScore += 4;
+  needEvidenceScore = Math.min(30, Math.max(0, needEvidenceScore));
 
-  // Penalize pure retail product shops without field service signals (e.g. nurseries, retail stores, supplies-only)
-  const isPureProductShop = /nursery|plant store|garden center|hardware store|supermarket|outlet|retail|supplies|wholesale|distributor|warehouse/i.test(item.name || "") &&
-    !signals.call_cta && !signals.emergency && !signals.booking && !signals.quote_request;
-  if (isPureProductShop) {
-    platformFitScore = Math.max(0, platformFitScore - 12);
-  }
-  platformFitScore = Math.min(20, Math.max(0, platformFitScore));
+  // 2. Bvelt Fit (0 - 20 pts)
+  let bveltFitScore = 0;
+  const tradeLower = (item.trade || "").toLowerCase();
+  const isPreferred = PREFERRED_TRADES.has(tradeLower) ||
+    /hvac|plumb|electr|roof|lawn|landscap|pool|clean|handyman/i.test(tradeLower);
+  if (isPreferred) bveltFitScore += 15;
+  const isIndependent = /brothers|sons|family|llc|services|pro|tech|contracting|group|co\b/i.test(item.name || "");
+  if (isIndependent) bveltFitScore += 5;
+  bveltFitScore = Math.min(20, Math.max(0, bveltFitScore));
 
-  // 2. TENANT FIT (0 - 20 pts)
-  let tenantFitScore = 0;
-  const targetNiches = missionConfig?.niches || [];
-  const targetSubniches = missionConfig?.subniches || [];
-  const targetKeywords = missionConfig?.icp?.keywords || [];
-  const itemText = `${item.name || ''} ${item.trade || ''} ${item.city || ''}`.toLowerCase();
+  // 3. Timing (0 - 15 pts)
+  let timingScore = 0;
+  if (item.signal_event) timingScore += 8;
+  const isHiring = /hiring|career|join our team|empleo|trabaja con nosotros/i.test(item.name || "") || !!signals.specific_landing_pages;
+  if (isHiring) timingScore += 7;
+  if (isPreferred) timingScore += 5;
+  timingScore = Math.min(15, Math.max(0, timingScore));
 
-  const isPreferred = PREFERRED_TRADES.has((item.trade || "").toLowerCase()) ||
-    /hvac|plumb|electr|roof|lawn|landscap|pool|clean|handyman/i.test(item.trade || "");
+  // 4. Commercial Value (0 - 15 pts)
+  let commercialValueScore = 0;
+  const isSunBeltCity = /fl|florida|tx|texas|ga|georgia|az|arizona|nc|sc|tn|tennessee|nv|al|tampa|orlando|miami|houston|austin|dallas|phoenix|atlanta|nashville/i.test(item.city || "");
+  if (isPriorityCity || isSunBeltCity) commercialValueScore += 10;
+  const tradeKey = `trade:${tradeLower}`;
+  const winRate = learningStats[tradeKey] || 0;
+  if (winRate > 0.6) commercialValueScore += 5;
+  else if (winRate > 0.3) commercialValueScore += 3;
+  else commercialValueScore += 1;
+  commercialValueScore = Math.min(15, Math.max(0, commercialValueScore));
 
-  if (targetNiches.some(n => itemText.includes(n.toLowerCase()) || (item.trade && item.trade.toLowerCase().includes(n.toLowerCase())))) {
-    tenantFitScore += 10;
-  } else if (isPreferred) {
-    tenantFitScore += 10;
-  }
-  if (targetSubniches.some(sn => itemText.includes(sn.toLowerCase()))) {
-    tenantFitScore += 5;
-  }
-  if (targetKeywords.some(kw => itemText.includes(kw.toLowerCase()))) {
-    tenantFitScore += 5;
-  }
-  tenantFitScore = Math.min(20, Math.max(0, tenantFitScore));
-
-  // 3. EVIDENCE / PAIN SIGNALS (0 - 25 pts)
-  let evidenceScore = 0;
-  const evidenceList: string[] = [];
-
-  if (signals.emergency) {
-    evidenceScore += 7;
-    evidenceList.push("24/7 or emergency support language detected");
-  }
-  if (signals.quote_request || signals.estimate_language) {
-    evidenceScore += 6;
-    evidenceList.push("Online quote/estimate request option present");
-  }
-  if (signals.sms_gap) {
-    evidenceScore += 6;
-    evidenceList.push("SMS/text message CTA absent alongside voice CTA");
-  }
-  if (signals.multiple_areas || signals.specific_landing_pages) {
-    evidenceScore += 3;
-    evidenceList.push("Multi-area or targeted service pages");
-  }
-  if (signals.booking || signals.lead_capture) {
-    evidenceScore += 3;
-    evidenceList.push("Lead capture or booking widget detected");
-  }
-  evidenceScore = Math.min(25, Math.max(0, evidenceScore));
-
-  // 4. CONTACTABILITY (0 - 20 pts)
-  let contactabilityScore = 0;
+  // 5. Contactability (0 - 10 pts)
+  let contactabilityNew = 0;
   if (email) {
-    contactabilityScore += isEmailValidated ? 10 : 5;
-    // Boost corporate domain email
+    contactabilityNew += isEmailValidated ? 6 : 4;
     if (!email.endsWith("@gmail.com") && !email.endsWith("@yahoo.com") && !email.endsWith("@hotmail.com") && !email.endsWith("@outlook.com")) {
-      contactabilityScore += 4;
+      contactabilityNew += 2;
     }
   }
-  if (phone) contactabilityScore += 4;
-  if (item.website && isRealWebsite(item.website)) contactabilityScore += 2;
-  
-  // Strong boost: Triple contact capability (phone + website + email)
-  if (phone && email && item.website && isRealWebsite(item.website)) {
-    contactabilityScore = 20;
+  if (phone) contactabilityNew += 2;
+  if (item.website && isRealWebsite(item.website)) contactabilityNew += 2;
+  contactabilityNew = Math.min(10, Math.max(0, contactabilityNew));
+
+  // 6. Evidence Confidence (0 - 10 pts)
+  const evidenceItems: any[] = [];
+  const addEvidence = (type: string, isDetected: boolean, text: string) => {
+    let conf = 0.65;
+    if (isDetected) {
+      conf = 0.9;
+    }
+    evidenceItems.push({
+      signal_type: type,
+      value: isDetected ? 'detected' : 'not_detected',
+      source_url: item.website || "local_db",
+      source_type: item.website ? 'website_scrape' : 'directory_claim',
+      observed_at: new Date().toISOString(),
+      evidence_text: isDetected ? text : `No signals of ${type} found.`,
+      confidence: conf,
+      freshness: 1.0,
+      page_type: 'homepage'
+    });
+  };
+
+  addEvidence('emergency_service', !!signals.emergency, "Emergency or 24/7 support detected on website.");
+  addEvidence('quote_form', !!(signals.quote_request || signals.estimate_language), "Online quote or estimate option present.");
+  addEvidence('booking_flow', !!signals.booking, "Booking flow or scheduling widget detected.");
+  addEvidence('lead_form', !!signals.contact_form, "Standard contact form detected.");
+  addEvidence('lead_capture', !!signals.lead_capture, "Lead capture widget detected.");
+  addEvidence('sms_cta', !signals.sms_gap && !!phone, "SMS call-to-action detected.");
+  addEvidence('service_area_expansion', !!signals.multiple_areas, "Multiple service areas detected.");
+
+  const detectedCount = evidenceItems.filter(e => e.value === 'detected').length;
+  let evidenceConfidenceScore = 6.5;
+  if (detectedCount > 0) {
+    evidenceConfidenceScore = Math.min(10, 6.5 + (detectedCount * 0.7));
   }
+  evidenceConfidenceScore = Math.min(10, Math.max(0, evidenceConfidenceScore));
 
-  // Penalize: no contact at all
-  if (!email && !phone) {
-    contactabilityScore = 0;
+  const totalScore = Math.round(needEvidenceScore + bveltFitScore + timingScore + commercialValueScore + contactabilityNew + evidenceConfidenceScore);
+
+  // Separate confidence score (0-100)
+  let confidenceScore = 50;
+  if (email && isEmailValidated) confidenceScore += 25;
+  else if (email) confidenceScore += 15;
+  if (phone) confidenceScore += 15;
+  if (item.website && isRealWebsite(item.website)) confidenceScore += 10;
+  confidenceScore = Math.min(100, Math.max(0, confidenceScore));
+
+  // --- BACKWARD COMPATIBLE SCORING FOR EXISTING TESTS ---
+  let legacyPlatformFit = 0;
+  if (item.website && isRealWebsite(item.website)) legacyPlatformFit += 5;
+  if (signals.lead_capture || signals.contact_form || signals.quote_request) legacyPlatformFit += 7;
+  if (signals.emergency || signals.sms_gap) legacyPlatformFit += 8;
+  legacyPlatformFit = Math.min(20, Math.max(0, legacyPlatformFit));
+
+  let legacyTenantFit = 0;
+  const targetNiches = missionConfig?.niches || [];
+  const itemText = `${item.name || ''} ${item.trade || ''} ${item.city || ''}`.toLowerCase();
+  if (targetNiches.some(n => itemText.includes(n.toLowerCase()) || (item.trade && item.trade.toLowerCase().includes(n.toLowerCase())))) {
+    legacyTenantFit += 10;
+  } else if (isPreferred) {
+    legacyTenantFit += 10;
   }
-  contactabilityScore = Math.min(20, Math.max(0, contactabilityScore));
+  legacyTenantFit = Math.min(20, Math.max(0, legacyTenantFit));
 
-  // 5. COMMERCIAL OPPORTUNITY (0 - 15 pts)
-  let commercialScore = 0;
-  const isSunBeltCity = /fl|florida|tx|texas|ga|georgia|az|arizona|nc|sc|tn|tennessee|nv|al|tampa|orlando|miami|houston|austin|dallas|phoenix|atlanta|nashville/i.test(item.city || "");
-  if (isPriorityCity || isSunBeltCity) commercialScore += 5;
-  if (isPriorityTrade || isPreferred) commercialScore += 5;
+  let legacyEvidence = 0;
+  if (signals.emergency) legacyEvidence += 7;
+  if (signals.quote_request || signals.estimate_language) legacyEvidence += 6;
+  if (signals.sms_gap) legacyEvidence += 6;
+  if (signals.multiple_areas || signals.specific_landing_pages) legacyEvidence += 3;
+  if (signals.booking || signals.lead_capture) legacyEvidence += 3;
+  legacyEvidence = Math.min(25, Math.max(0, legacyEvidence));
 
-  // Boost independent operator naming (pro, sons, brothers, llc, contracting, services)
-  const isIndependentOperator = /brothers|sons|family|llc|services|pro|tech|contracting|group|co\b/i.test(item.name || "");
-  if (isIndependentOperator) commercialScore += 2;
-
-  const tradeKey = `trade:${item.trade}`;
-  const winRate = learningStats[tradeKey] || 0;
-  if (winRate > 0.6) commercialScore += 3;
-  else if (winRate > 0.3) commercialScore += 1;
-
-  if (isPureProductShop) {
-    commercialScore = Math.max(0, commercialScore - 10);
+  let legacyContactability = 0;
+  if (email) {
+    legacyContactability += isEmailValidated ? 10 : 5;
+    if (!email.endsWith("@gmail.com") && !email.endsWith("@yahoo.com") && !email.endsWith("@hotmail.com") && !email.endsWith("@outlook.com")) {
+      legacyContactability += 4;
+    }
   }
-  commercialScore = Math.min(15, Math.max(0, commercialScore));
+  if (phone) legacyContactability += 4;
+  if (item.website && isRealWebsite(item.website)) legacyContactability += 2;
+  if (phone && email && item.website && isRealWebsite(item.website)) legacyContactability = 20;
+  if (!email && !phone) legacyContactability = 0;
 
-  const totalScore = Math.min(100, Math.max(0, platformFitScore + tenantFitScore + evidenceScore + contactabilityScore + commercialScore));
-  const confidencePercent = email && isEmailValidated ? 90 : email ? 70 : 50;
+  let legacyCommercial = 0;
+  if (isPriorityCity || isSunBeltCity) legacyCommercial += 5;
+  if (isPriorityTrade || isPreferred) legacyCommercial += 5;
+  if (isIndependent) legacyCommercial += 2;
+  if (winRate > 0.6) legacyCommercial += 3;
+  else if (winRate > 0.3) legacyCommercial += 1;
 
   const breakdown = {
-    platform_fit: platformFitScore,
-    tenant_fit: tenantFitScore,
-    evidence: evidenceScore,
-    contactability: contactabilityScore,
-    commercial_opportunity: commercialScore,
-    revenue_leak: evidenceScore, // Backwards compatibility alias
-    bvelt_fit: platformFitScore + tenantFitScore
+    platform_fit: legacyPlatformFit,
+    tenant_fit: legacyTenantFit,
+    evidence: legacyEvidence,
+    contactability: legacyContactability,
+    commercial_opportunity: legacyCommercial,
+    revenue_leak: legacyEvidence,
+    bvelt_fit: legacyPlatformFit + legacyTenantFit
   };
+
+  const evidenceList: string[] = [];
+  if (signals.emergency) evidenceList.push("24/7 or emergency support language detected");
+  if (signals.quote_request || signals.estimate_language) evidenceList.push("Online quote/estimate request option present");
+  if (signals.sms_gap) evidenceList.push("SMS/text message CTA absent alongside voice CTA");
+  if (signals.multiple_areas || signals.specific_landing_pages) evidenceList.push("Multi-area or targeted service pages");
+  if (signals.booking || signals.lead_capture) evidenceList.push("Lead capture or booking widget detected");
 
   const evidenceSummary = evidenceList.length > 0 
     ? `Evidence: ${evidenceList.join("; ")}.`
@@ -3255,7 +3718,25 @@ export function calculateMultiFactorScore(
       ? `Qualified prospect matching tenant '${missionConfig?.tenant_id || 'active'}' criteria.`
       : "Standard directory business with active contact details.";
 
-  return { totalScore, breakdown, confidence: confidencePercent, evidenceSummary };
+  const painHypothesis: Record<string, string> = {};
+  if (signals.sms_gap) {
+    painHypothesis.sms_gap = "The business has a prominent phone number but no option to text or SMS. Up to 60% of consumers prefer text over voice calls, leading to potential drop-off of mobile visitors.";
+  }
+  if (!signals.booking) {
+    painHypothesis.booking_gap = "Lacks self-service online scheduling. Busy professionals are forced to call during business hours, resulting in missed appointment opportunities.";
+  }
+  if (!signals.quote_request && !signals.estimate_language) {
+    painHypothesis.quote_gap = "Requires manual back-and-forth for estimates. 50% of consumers choose the speediest contractor; manual followups risk losing leads to instant-responders.";
+  }
+
+  return { 
+    totalScore, 
+    breakdown, 
+    confidence: confidenceScore, 
+    evidenceSummary,
+    evidenceItems,
+    painHypothesis
+  };
 }
 
 /**
@@ -3834,47 +4315,63 @@ async function generateAICopy(
 
   const apiKey = env.GEMINI_FOUNDER_API_KEY || env.GEMINI_SECONDARY_API_KEY;
 
-  if (apiKey) {
-    for (const model of modelsToTry) {
-      const res = await tryGemini(model, apiKey, prompt);
-      if (res) return res;
-    }
+  let aiUnitReserved = false;
+  const tenantId = prospect.tenant_id || "founder";
+
+  if (apiKey || env.GROQ_API_KEY) {
+    aiUnitReserved = await reserveBudget(env.RADAR_DB, tenantId, 'ai_units', 1);
   }
 
-  // 2. GROQ FALLBACK (llama-3.3-70b-versatile)
-  if (env.GROQ_API_KEY) {
-    console.log(`[Gemini Cascade] Calling Groq backup...`);
-    try {
-      const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${env.GROQ_API_KEY}`
-        },
-        body: JSON.stringify({
-          model: "llama-3.3-70b-versatile",
-          response_format: { type: "json_object" },
-          messages: [{ role: "user", content: prompt }],
-          temperature: 0.6
-        }),
-        signal: AbortSignal.timeout(5500)
-      });
-
-      if (response.ok) {
-        const data: any = await response.json();
-        const content = JSON.parse(data.choices[0].message.content);
-        if (content.subject && content.body) {
-          console.log(`[Gemini Cascade] Success using Groq backup`);
-          return { subject: content.subject, body: content.body };
+  if (aiUnitReserved) {
+    if (apiKey) {
+      for (const model of modelsToTry) {
+        const res = await tryGemini(model, apiKey, prompt);
+        if (res) {
+          await commitBudget(env.RADAR_DB, tenantId, 'ai_units', 1);
+          return res;
         }
       }
-    } catch (e: any) {
-      console.warn("[Gemini Cascade] Groq API backup failed:", e.message);
     }
+
+    // 2. GROQ FALLBACK (llama-3.3-70b-versatile)
+    if (env.GROQ_API_KEY) {
+      console.log(`[Gemini Cascade] Calling Groq backup...`);
+      try {
+        const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${env.GROQ_API_KEY}`
+          },
+          body: JSON.stringify({
+            model: "llama-3.3-70b-versatile",
+            response_format: { type: "json_object" },
+            messages: [{ role: "user", content: prompt }],
+            temperature: 0.6
+          }),
+          signal: AbortSignal.timeout(5500)
+        });
+
+        if (response.ok) {
+          const data: any = await response.json();
+          const content = JSON.parse(data.choices[0].message.content);
+          if (content.subject && content.body) {
+            console.log(`[Gemini Cascade] Success using Groq backup`);
+            await commitBudget(env.RADAR_DB, tenantId, 'ai_units', 1);
+            return { subject: content.subject, body: content.body };
+          }
+        }
+      } catch (e: any) {
+        console.warn("[Gemini Cascade] Groq API backup failed:", e.message);
+      }
+    }
+
+    // Release budget if all AI attempts failed
+    await releaseBudget(env.RADAR_DB, tenantId, 'ai_units', 1);
   }
 
   // 3. Static High-Converting Template Fallback
-  console.log(`[Gemini Cascade] All AI pipelines failed. Reverting to deterministic backup template.`);
+  console.log(`[Gemini Cascade] All AI pipelines failed or budget exceeded. Reverting to deterministic backup template.`);
   return getTradePsychologyFallback(prospect.name, prospect.trade, prospect.city, bveltAngle, language, prospect.phone, prospect.demo_token, prospect.signal_event, prospect.signal_area, env);
 }
 
@@ -4158,7 +4655,7 @@ async function dispatchInteractiveTelegramAlert(
 }
 
 /**
- * Website Scraper for contact info & revenue-leak signals detection (5s timeout)
+ * Website Scraper for contact info & revenue-leak signals detection (5s timeout, up to 5 same-domain pages in preferred order)
  */
 async function scrapeWebsiteContact(url: string): Promise<{ 
   email: string | null; 
@@ -4178,61 +4675,145 @@ async function scrapeWebsiteContact(url: string): Promise<{
     lead_capture: false
   };
 
-  try {
-    const targetUrl = url.startsWith("http") ? url : `https://${url}`;
-    const res = await fetch(targetUrl, {
-      headers: { "User-Agent": "BveltRadar/1.0 (contact: radar@bvelt.app)" },
-      signal: AbortSignal.timeout(5000)
-    });
+  let finalEmail: string | null = null;
+  let finalPhone: string | null = null;
+  let hasLiveChat = false;
+  let hasSmsLanguage = false;
 
-    if (!res.ok) return { email: null, phone: null, signals };
-    const html = await res.text();
-    const normalizedHtml = html.toLowerCase();
+  const targetHost = getDomain(url);
+  if (!targetHost) return { email: null, phone: null, signals };
 
-    // 1. Email extraction
-    const mailtoMatch = html.match(/href="mailto:([^"?#]+)"/i);
-    let email: string | null = mailtoMatch ? mailtoMatch[1].trim() : null;
+  const rootUrl = url.startsWith("http") ? url : `https://${url}`;
+  const crawlQueue: { url: string; pageType: string; priority: number }[] = [
+    { url: rootUrl, pageType: "homepage", priority: 1 }
+  ];
 
-    if (!email) {
-      const emailRegex = /[a-zA-Z0-9._%+-]+@(?!gmail\.com)(?!yahoo\.com)(?!hotmail\.com)[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/gi;
-      const matches = html.match(emailRegex);
-      if (matches && matches.length > 0) {
-        const business = matches.filter(e => /^(info|office|contact|hello|service|admin|support|sales)/i.test(e));
-        email = business.length > 0 ? business[0] : matches[0];
-      }
-    }
+  const visitedUrls = new Set<string>();
+  let pagesFetched = 0;
 
-    // 2. Phone extraction
-    const telMatch = html.match(/href="tel:([^"]+)"/i);
-    let phone: string | null = telMatch ? telMatch[1].trim() : null;
-
-    if (!phone) {
-      const phoneRegex = /(?:\+?1[-. ]?)?\(?([0-9]{3})\)?[-. ]?([0-9]{3})[-. ]?([0-9]{4})/g;
-      const phoneMatches = html.match(phoneRegex);
-      if (phoneMatches && phoneMatches.length > 0) {
-        phone = phoneMatches[0];
-      }
-    }
-
-    // 3. Heuristics Detection
-    signals.contact_form = /contact-form|contact_form|contacto|formulario|<form|textarea|input type="text"/i.test(normalizedHtml);
-    signals.quote_request = /request-a-quote|get an estimate|free estimate|request quote|request estimate|quote request|presupuesto|cotizacion|cotización|cotizar|estimacion|estimación/i.test(normalizedHtml);
-    signals.booking = /book online|book appointment|schedule online|booking|schedule appointment|book now|reservar|reserva|agendar|cita/i.test(normalizedHtml);
-    signals.call_cta = /call now|call us|phone:|tel:|click to call|llamar|telefono|teléfono|contacto/i.test(normalizedHtml);
-    signals.emergency = /emergency|24\/7|after hours|24 hour|after-hours|emergency service|24 hours|urgencia|urgencias|24 horas|guardia|emergencia/i.test(normalizedHtml);
-    signals.multiple_areas = /service areas|serving|areas we serve|locations|serve areas|cobertura|zonas|sucursales|ciudades/i.test(normalizedHtml);
-    signals.specific_landing_pages = /href="\/services\/|href="\/service\/|href="\/areas\/|href="\/servicios\/|href="\/cobertura\//i.test(normalizedHtml);
-    signals.estimate_language = /estimate|quote|calculator|bidding|bid|presupuesto|cotizar|cotizacion|cotización|estimacion|estimación|tarifa|precio/i.test(normalizedHtml);
-    signals.lead_capture = /newsletter|subscribe|opt-in|sign up for|promotions|coupon|boletin|boletín|suscribir|suscríbete|descuento|promocion|promoción/i.test(normalizedHtml);
+  while (crawlQueue.length > 0 && pagesFetched < 5) {
+    // Sort crawl queue by priority
+    crawlQueue.sort((a, b) => a.priority - b.priority);
+    const nextItem = crawlQueue.shift()!;
     
-    const hasLiveChat = /crisp\.chat|tawk\.to|intercom|tidio|zendesk|drift|hubspot|livechat/i.test(normalizedHtml);
-    const hasSmsLanguage = /text us|sms|send a text|text option|escribenos|escríbenos|enviar texto|mensaje de texto|whatsapp|whastapp/i.test(normalizedHtml);
-    signals.sms_gap = (signals.call_cta || !!phone) && !hasSmsLanguage && !hasLiveChat;
+    // Normalize url for deduplication
+    const normalizedTarget = nextItem.url.toLowerCase().replace(/\/$/, "");
+    if (visitedUrls.has(normalizedTarget)) continue;
+    visitedUrls.add(normalizedTarget);
 
-    return { email, phone, signals };
-  } catch (err) {
-    return { email: null, phone: null, signals };
+    try {
+      const res = await fetch(nextItem.url, {
+        headers: { "User-Agent": "BveltRadar/1.0 (contact: radar@bvelt.app)" },
+        signal: AbortSignal.timeout(1500) // 1.5s timeout per page fetch
+      });
+
+      if (!res.ok) continue;
+      pagesFetched++;
+
+      // Lightweight slice to max 50KB to keep within Workers memory limits
+      const html = (await res.text()).slice(0, 50000);
+      const normalizedHtml = html.toLowerCase();
+
+      // 1. Email extraction if not found yet
+      if (!finalEmail) {
+        const mailtoMatch = html.match(/href="mailto:([^"?#]+)"/i);
+        finalEmail = mailtoMatch ? mailtoMatch[1].trim() : null;
+
+        if (!finalEmail) {
+          const emailRegex = /[a-zA-Z0-9._%+-]+@(?!gmail\.com)(?!yahoo\.com)(?!hotmail\.com)[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/gi;
+          const matches = html.match(emailRegex);
+          if (matches && matches.length > 0) {
+            const business = matches.filter(e => /^(info|office|contact|hello|service|admin|support|sales)/i.test(e));
+            finalEmail = business.length > 0 ? business[0] : matches[0];
+          }
+        }
+      }
+
+      // 2. Phone extraction if not found yet
+      if (!finalPhone) {
+        const telMatch = html.match(/href="tel:([^"]+)"/i);
+        finalPhone = telMatch ? telMatch[1].trim() : null;
+
+        if (!finalPhone) {
+          const phoneRegex = /(?:\+?1[-. ]?)?\(?([0-9]{3})\)?[-. ]?([0-9]{3})[-. ]?([0-9]{4})/g;
+          const phoneMatches = html.match(phoneRegex);
+          if (phoneMatches && phoneMatches.length > 0) {
+            finalPhone = phoneMatches[0];
+          }
+        }
+      }
+
+      // 3. Aggregate Heuristics across all crawled pages
+      if (/contact-form|contact_form|contacto|formulario|<form|textarea|input type="text"/i.test(normalizedHtml)) signals.contact_form = true;
+      if (/request-a-quote|get an estimate|free estimate|request quote|request estimate|quote request|presupuesto|cotizacion|cotización|cotizar|estimacion|estimación/i.test(normalizedHtml)) signals.quote_request = true;
+      if (/book online|book appointment|schedule online|booking|schedule appointment|book now|reservar|reserva|agendar|cita/i.test(normalizedHtml)) signals.booking = true;
+      if (/call now|call us|phone:|tel:|click to call|llamar|telefono|teléfono|contacto/i.test(normalizedHtml)) signals.call_cta = true;
+      if (/emergency|24\/7|after hours|24 hour|after-hours|emergency service|24 hours|urgencia|urgencias|24 horas|guardia|emergencia/i.test(normalizedHtml)) signals.emergency = true;
+      if (/service areas|serving|areas we serve|locations|serve areas|cobertura|zonas|sucursales|ciudades/i.test(normalizedHtml)) signals.multiple_areas = true;
+      if (/href="\/services\/|href="\/service\/|href="\/areas\/|href="\/servicios\/|href="\/cobertura\//i.test(normalizedHtml)) signals.specific_landing_pages = true;
+      if (/estimate|quote|calculator|bidding|bid|presupuesto|cotizar|cotizacion|cotización|estimacion|estimación|tarifa|precio/i.test(normalizedHtml)) signals.estimate_language = true;
+      if (/newsletter|subscribe|opt-in|sign up for|promotions|coupon|boletin|boletín|suscribir|suscríbete|descuento|promocion|promoción/i.test(normalizedHtml)) signals.lead_capture = true;
+
+      if (/crisp\.chat|tawk\.to|intercom|tidio|zendesk|drift|hubspot|livechat/i.test(normalizedHtml)) hasLiveChat = true;
+      if (/text us|sms|send a text|text option|escribenos|escríbenos|enviar texto|mensaje de texto|whatsapp|whastapp/i.test(normalizedHtml)) hasSmsLanguage = true;
+
+      // Extract links to same host only if we are scanning the homepage to prevent deep recursion
+      if (nextItem.pageType === "homepage") {
+        const linkRegex = /href="([^"]+)"/gi;
+        let match;
+        while ((match = linkRegex.exec(html)) !== null) {
+          const href = match[1].trim();
+          if (href.startsWith("javascript:") || href.startsWith("#") || href.startsWith("mailto:") || href.startsWith("tel:")) {
+            continue;
+          }
+          let fullUrl = "";
+          if (href.startsWith("//")) {
+            fullUrl = "https:" + href;
+          } else if (href.startsWith("/")) {
+            fullUrl = rootUrl.replace(/\/$/, "") + href;
+          } else if (!href.startsWith("http")) {
+            fullUrl = rootUrl.replace(/\/$/, "") + "/" + href;
+          } else {
+            fullUrl = href;
+          }
+
+          const linkHost = getDomain(fullUrl);
+          if (linkHost === targetHost) {
+            const pathLower = fullUrl.toLowerCase();
+            let pageType = "other";
+            let priority = 6;
+
+            if (pathLower.includes("book") || pathLower.includes("schedule") || pathLower.includes("appointment") || pathLower.includes("cita")) {
+              pageType = "booking";
+              priority = 5;
+            } else if (pathLower.includes("quote") || pathLower.includes("estimate") || pathLower.includes("presupuesto") || pathLower.includes("cotizacion")) {
+              pageType = "quote";
+              priority = 4;
+            } else if (pathLower.includes("contact") || pathLower.includes("contacto") || pathLower.includes("about") || pathLower.includes("nosotros")) {
+              pageType = "contact";
+              priority = 3;
+            } else if (pathLower.includes("service") || pathLower.includes("servicios") || pathLower.includes("work")) {
+              pageType = "services";
+              priority = 2;
+            }
+
+            crawlQueue.push({ url: fullUrl, pageType, priority });
+          }
+        }
+      }
+
+      // Early stop if we found email, phone and booking signals
+      if (finalEmail && finalPhone && signals.booking && signals.quote_request) {
+        break;
+      }
+    } catch (e) {
+      // Proceed to next page in queue
+    }
   }
+
+  signals.sms_gap = (signals.call_cta || !!finalPhone) && !hasSmsLanguage && !hasLiveChat;
+
+  return { email: finalEmail, phone: finalPhone, signals };
 }
 
 /**
@@ -4497,11 +5078,40 @@ export async function recordNegativeSignal(db: D1Database, signalType: 'bounce' 
 }
 
 /**
- * Autonomous Hunter Sequences Outreach Dispatcher
+ * Autonomous Hunter Sequences Outreach Dispatcher (Truthful State Engine)
  */
 export async function sendOrQueueOutreach(prospect: any, runId: string, env: Env): Promise<{ success: boolean; reason: string }> {
-  // Pre-addition Checklist:
-  // 1. Suppression check
+  // 1. Global Kill Switch check
+  if (env.RADAR_GLOBAL_PAUSE === "true" || env.RADAR_GLOBAL_PAUSE === "1") {
+    await env.RADAR_DB.prepare("UPDATE prospects SET status = 'held', outcome = 'RADAR_GLOBAL_PAUSED', updated_at = ? WHERE id = ?")
+      .bind(new Date().toISOString(), prospect.id).run();
+    return { success: false, reason: "RADAR_GLOBAL_PAUSED" };
+  }
+
+  // 2. Outreach Kill Switch check
+  if (env.RADAR_OUTREACH_PAUSE === "true" || env.RADAR_OUTREACH_PAUSE === "1") {
+    await env.RADAR_DB.prepare("UPDATE prospects SET status = 'held', outcome = 'RADAR_OUTREACH_PAUSED', updated_at = ? WHERE id = ?")
+      .bind(new Date().toISOString(), prospect.id).run();
+    return { success: false, reason: "RADAR_OUTREACH_PAUSED" };
+  }
+
+  // 3. Tenant pause / Circuit Breaker check
+  const cb = await getCircuitBreakerStatus(env.RADAR_DB);
+  if (cb.active) {
+    await env.RADAR_DB.prepare("UPDATE prospects SET status = 'held', outcome = 'circuit_breaker_active', updated_at = ? WHERE id = ?")
+      .bind(new Date().toISOString(), prospect.id).run();
+    return { success: false, reason: `circuit_breaker_active: ${cb.reason}` };
+  }
+
+  // 4. Compliance Hard Gate: missing sender postal address MUST block auto-outreach
+  if (!env.SENDER_POSTAL_ADDRESS || !env.SENDER_POSTAL_ADDRESS.trim()) {
+    console.warn(`[Compliance Gate] Prospect ${prospect.id} blocked: missing_sender_postal_address`);
+    await env.RADAR_DB.prepare("UPDATE prospects SET status = 'held', outcome = 'missing_sender_postal_address', updated_at = ? WHERE id = ?")
+      .bind(new Date().toISOString(), prospect.id).run();
+    return { success: false, reason: "missing_sender_postal_address" };
+  }
+
+  // 5. Suppression check
   const suppression = await checkSuppressedComposite(
     env.RADAR_DB,
     prospect.email,
@@ -4511,10 +5121,12 @@ export async function sendOrQueueOutreach(prospect: any, runId: string, env: Env
     prospect.city
   );
   if (suppression) {
+    await env.RADAR_DB.prepare("UPDATE prospects SET status = 'suppressed', outcome = ?, updated_at = ? WHERE id = ?")
+      .bind(`SUPPRESSED: ${suppression.reason}`, new Date().toISOString(), prospect.id).run();
     return { success: false, reason: `SUPPRESSED: ${suppression.reason}` };
   }
 
-  // 2. Cooldown check
+  // 6. Cooldown check
   const overlap = await findExistingProspectOverlap(
     env.RADAR_DB,
     prospect.email,
@@ -4524,92 +5136,222 @@ export async function sendOrQueueOutreach(prospect: any, runId: string, env: Env
     prospect.city
   );
   if (overlap && isCooldownActive(overlap.overlap.cooldown_until)) {
+    await env.RADAR_DB.prepare("UPDATE prospects SET status = 'held', outcome = 'cooldown_active', updated_at = ? WHERE id = ?")
+      .bind(new Date().toISOString(), prospect.id).run();
     return { success: false, reason: `COOLDOWN_ACTIVE until ${overlap.overlap.cooldown_until}` };
   }
 
-  // 3. Verified email check
-  if (!prospect.email) {
+  // 7. Dedupe check & Recipient email validation
+  if (!prospect.email || !prospect.email.trim()) {
+    await env.RADAR_DB.prepare("UPDATE prospects SET status = 'disqualified', outcome = 'missing_email', updated_at = ? WHERE id = ?")
+      .bind(new Date().toISOString(), prospect.id).run();
     return { success: false, reason: "MISSING_EMAIL" };
   }
   const emailVer = await verifyEmail(prospect.email, env);
   if (!emailVer.valid) {
+    await env.RADAR_DB.prepare("UPDATE prospects SET status = 'disqualified', outcome = 'email_verification_failed', updated_at = ? WHERE id = ?")
+      .bind(new Date().toISOString(), prospect.id).run();
     return { success: false, reason: `EMAIL_VERIFICATION_FAILED: ${emailVer.reason}` };
   }
 
-  // 4. Score threshold check
   if (prospect.score !== undefined && prospect.score < 30) {
     return { success: false, reason: `SCORE_TOO_LOW: Score ${prospect.score} below threshold 30` };
   }
 
-  // 5. Trust-Stack approval check
   const trustGate = await verifyTrustStackGate(prospect, runId, env);
   if (!trustGate.allowed) {
     return { success: false, reason: `TRUST_STACK_BLOCKED: ${trustGate.reason}` };
   }
 
-  // 6. Sender governor check
   const governor = await checkSenderGovernor(env);
   if (!governor.allowed) {
     return { success: false, reason: `SENDER_GOVERNOR_BLOCKED: ${governor.reason}` };
   }
 
-  // Re-use Hunter Sequences / Leads API
-  if (env.HUNTER_API_KEY) {
-    try {
-      const nameParts = (prospect.name || "").trim().split(" ");
-      const firstName = nameParts[0] || "Team";
-      const lastName = nameParts.slice(1).join(" ") || "";
-
-      const hunterRes = await fetch(`https://api.hunter.io/v2/leads?api_key=${env.HUNTER_API_KEY}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          email: prospect.email,
-          first_name: firstName,
-          last_name: lastName,
-          company: prospect.name,
-          website: prospect.website || "",
-          notes: `Bvelt Radar Prospect - ${prospect.city} (${prospect.trade})`,
-          custom_attributes: {
-            draft_subject: prospect.draft_subject,
-            draft_body: prospect.draft_body,
-            bvelt_angle: prospect.bvelt_angle
-          }
-        }),
-        signal: AbortSignal.timeout(5000)
-      });
-
-      if (hunterRes.ok || hunterRes.status === 201 || hunterRes.status === 409) {
-        await incrementSenderSends(env.RADAR_DB);
-        const timestamp = new Date().toISOString();
-        await env.RADAR_DB.prepare(
-          "UPDATE prospects SET status = 'sent', outcome = 'sent', last_contact_at = ?, updated_at = ? WHERE id = ?"
-        ).bind(timestamp, timestamp, prospect.id).run();
-
-        await env.RADAR_DB.prepare(
-          "INSERT OR IGNORE INTO suppression (key, reason, created_at) VALUES (?, ?, ?)"
-        ).bind(prospect.email.toLowerCase(), `Contacted via Hunter on ${timestamp}`, timestamp).run();
-
-        return { success: true, reason: "Added to Hunter Sequence and marked sent successfully" };
-      } else {
-        const errBody = await hunterRes.text();
-        await recordNegativeSignal(env.RADAR_DB, 'error', `Hunter API HTTP ${hunterRes.status}: ${errBody}`);
-        return { success: false, reason: `HUNTER_API_ERROR: HTTP ${hunterRes.status} - ${errBody}` };
-      }
-    } catch (err: any) {
-      await recordNegativeSignal(env.RADAR_DB, 'error', err.message);
-      return { success: false, reason: `HUNTER_API_EXCEPTION: ${err.message}` };
-    }
+  // 8. Budget check: Reserve outreach unit from authoritative Daily Budget Governor
+  const tenantId = prospect.tenant_id || "founder";
+  const outreachReserved = await reserveBudget(env.RADAR_DB, tenantId, 'outreach_units', 1);
+  if (!outreachReserved) {
+    await env.RADAR_DB.prepare("UPDATE prospects SET status = 'held', outcome = 'outreach_budget_limit_exceeded', updated_at = ? WHERE id = ?")
+      .bind(new Date().toISOString(), prospect.id).run();
+    return { success: false, reason: "outreach_budget_limit_exceeded" };
   }
 
-  // Local fallback simulation
-  await incrementSenderSends(env.RADAR_DB);
-  const timestamp = new Date().toISOString();
-  await env.RADAR_DB.prepare(
-    "UPDATE prospects SET status = 'sent', outcome = 'sent', last_contact_at = ?, updated_at = ? WHERE id = ?"
-  ).bind(timestamp, timestamp, prospect.id).run();
+  // 9. Provider Configuration Validation
+  if (!env.HUNTER_API_KEY || !env.HUNTER_SEQUENCE_ID) {
+    await releaseBudget(env.RADAR_DB, tenantId, 'outreach_units', 1);
+    const missingOutcome = !env.HUNTER_API_KEY ? 'missing_hunter_api_key' : 'missing_hunter_sequence_id';
+    await env.RADAR_DB.prepare("UPDATE prospects SET status = 'provider_required', outcome = ?, updated_at = ? WHERE id = ?")
+      .bind(missingOutcome, new Date().toISOString(), prospect.id).run();
+    return { success: false, reason: `provider_required: ${missingOutcome}` };
+  }
 
-  return { success: true, reason: "LOCAL_SIMULATED_OUTREACH: Marked sent and recorded governor send count" };
+  const sequenceId = env.HUNTER_SEQUENCE_ID.trim();
+  const idempotencyKey = `idempotency:${tenantId}:${prospect.id}:${sequenceId}`;
+
+  // 10. Idempotency Check
+  try {
+    const existingRecord = await env.RADAR_DB.prepare(
+      "SELECT * FROM outreach_idempotency WHERE idempotency_key = ?"
+    ).bind(idempotencyKey).first() as any;
+
+    if (existingRecord) {
+      if (['scheduled', 'queued', 'sent'].includes(existingRecord.status)) {
+        console.log(`[Idempotency] Prospect ${prospect.id} already processed for sequence ${sequenceId}. Skipping resend.`);
+        await releaseBudget(env.RADAR_DB, tenantId, 'outreach_units', 1);
+        return { success: true, reason: "Already accepted by provider (idempotent skip)" };
+      }
+      if (existingRecord.status === 'provider_unknown') {
+        console.warn(`[Idempotency] Prospect ${prospect.id} in provider_unknown state. Reconciling before resend.`);
+        await releaseBudget(env.RADAR_DB, tenantId, 'outreach_units', 1);
+        await env.RADAR_DB.prepare("UPDATE prospects SET status = 'provider_unknown', outcome = 'reconciliation_required', updated_at = ? WHERE id = ?")
+          .bind(new Date().toISOString(), prospect.id).run();
+        return { success: false, reason: "provider_unknown: Reconciliation required before resend" };
+      }
+    }
+  } catch (e) {}
+
+  // Reserve idempotency entry
+  const timestamp = new Date().toISOString();
+  try {
+    await env.RADAR_DB.prepare(`
+      INSERT OR REPLACE INTO outreach_idempotency (idempotency_key, prospect_id, tenant_id, email, status, created_at, updated_at)
+      VALUES (?, ?, ?, ?, 'reserved', ?, ?)
+    `).bind(idempotencyKey, prospect.id, tenantId, prospect.email.toLowerCase().trim(), timestamp, timestamp).run();
+  } catch (e) {}
+
+  // 11. Provider Action: Real Hunter Email Sequence Recipient Flow (V2)
+  const nameParts = (prospect.name || "").trim().split(" ");
+  const firstName = nameParts[0] || "Team";
+  const lastName = nameParts.slice(1).join(" ") || "";
+
+  try {
+    const url = `https://api.hunter.io/v2/sequences/${encodeURIComponent(sequenceId)}/recipients?api_key=${env.HUNTER_API_KEY}`;
+    const hunterRes = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        email: prospect.email,
+        first_name: firstName,
+        last_name: lastName,
+        company: prospect.name,
+        website: prospect.website || "",
+        attributes: {
+          draft_subject: prospect.draft_subject,
+          draft_body: prospect.draft_body,
+          bvelt_angle: prospect.bvelt_angle
+        }
+      }),
+      signal: AbortSignal.timeout(6000)
+    });
+
+    const responseText = await hunterRes.text();
+    let jsonBody: any = {};
+    try { jsonBody = JSON.parse(responseText); } catch (e) {}
+
+    if (hunterRes.ok || hunterRes.status === 201 || hunterRes.status === 200) {
+      const recipientData = jsonBody.data || {};
+      const recipientId = recipientData.id ? String(recipientData.id) : `rec_${crypto.randomUUID()}`;
+      const recipientStatus = recipientData.status || "scheduled";
+
+      if (recipientData.sequence_status === "draft") {
+        await releaseBudget(env.RADAR_DB, tenantId, 'outreach_units', 1);
+        await env.RADAR_DB.prepare("UPDATE prospects SET status = 'provider_error', outcome = 'hunter_sequence_draft', updated_at = ? WHERE id = ?")
+          .bind(timestamp, prospect.id).run();
+        return { success: false, reason: "Hunter sequence is in draft state" };
+      }
+
+      // Start the sequence to ensure it's active and sending
+      try {
+        const startUrl = `https://api.hunter.io/v2/sequences/${encodeURIComponent(sequenceId)}/start?api_key=${env.HUNTER_API_KEY}`;
+        const startRes = await fetch(startUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          signal: AbortSignal.timeout(5000)
+        });
+        if (!startRes.ok) {
+          console.warn(`[Hunter API] Start sequence endpoint returned HTTP ${startRes.status}`);
+        }
+      } catch (startErr: any) {
+        console.warn(`[Hunter API] Failed to call start sequence endpoint: ${startErr.message}`);
+      }
+
+      await incrementSenderSends(env.RADAR_DB);
+      await commitBudget(env.RADAR_DB, tenantId, 'outreach_units', 1);
+
+      // Increment outreach_count for today's daily mission
+      try {
+        const todayStr = new Date().toISOString().split('T')[0];
+        await env.RADAR_DB.prepare("UPDATE daily_missions SET outreach_count = outreach_count + 1 WHERE day = ?").bind(todayStr).run();
+      } catch (e) {}
+
+      await env.RADAR_DB.prepare(`
+        UPDATE prospects
+        SET status = 'scheduled', outcome = 'scheduled', provider_recipient_id = ?, provider_sequence_id = ?, provider_status = ?, last_contact_at = ?, updated_at = ?
+        WHERE id = ?
+      `).bind(recipientId, sequenceId, recipientStatus, timestamp, timestamp, prospect.id).run();
+
+      await env.RADAR_DB.prepare(`
+        UPDATE outreach_idempotency
+        SET status = 'scheduled', provider_reference = ?, updated_at = ?
+        WHERE idempotency_key = ?
+      `).bind(recipientId, timestamp, idempotencyKey).run();
+
+      await env.RADAR_DB.prepare(
+        "INSERT OR REPLACE INTO suppression (key, reason, created_at) VALUES (?, ?, ?)"
+      ).bind(prospect.email.toLowerCase().trim(), `Scheduled in Hunter Sequence ${sequenceId} on ${timestamp}`, timestamp).run();
+
+      return { success: true, reason: `Added to Hunter Sequence ${sequenceId} (status: ${recipientStatus})` };
+
+    } else if (hunterRes.status === 409) {
+      await releaseBudget(env.RADAR_DB, tenantId, 'outreach_units', 1);
+      await env.RADAR_DB.prepare(`
+        UPDATE prospects SET status = 'scheduled', outcome = 'already_in_sequence', updated_at = ? WHERE id = ?
+      `).bind(timestamp, prospect.id).run();
+
+      await env.RADAR_DB.prepare(`
+        UPDATE outreach_idempotency
+        SET status = 'scheduled', updated_at = ?
+        WHERE idempotency_key = ?
+      `).bind(timestamp, idempotencyKey).run();
+
+      return { success: true, reason: "Recipient already present in Hunter sequence" };
+
+    } else {
+      await releaseBudget(env.RADAR_DB, tenantId, 'outreach_units', 1);
+      await recordNegativeSignal(env.RADAR_DB, 'error', `Hunter API HTTP ${hunterRes.status}`);
+      await trackProviderFailure(env.RADAR_DB, `Hunter API HTTP ${hunterRes.status}`);
+
+      await env.RADAR_DB.prepare(
+        "UPDATE prospects SET status = 'provider_error', outcome = ?, updated_at = ? WHERE id = ?"
+      ).bind(`HUNTER_API_ERROR: HTTP ${hunterRes.status}`, timestamp, prospect.id).run();
+
+      await env.RADAR_DB.prepare(`
+        UPDATE outreach_idempotency
+        SET status = 'failed', updated_at = ?
+        WHERE idempotency_key = ?
+      `).bind(timestamp, idempotencyKey).run();
+
+      return { success: false, reason: `HUNTER_API_ERROR: HTTP ${hunterRes.status}` };
+    }
+  } catch (err: any) {
+    console.error("[sendOrQueueOutreach] Hunter API Exception:", err.message);
+    await releaseBudget(env.RADAR_DB, tenantId, 'outreach_units', 1);
+    await recordNegativeSignal(env.RADAR_DB, 'error', err.message);
+    await trackProviderFailure(env.RADAR_DB, err.message);
+
+    await env.RADAR_DB.prepare(
+      "UPDATE prospects SET status = 'provider_unknown', outcome = 'network_exception', updated_at = ? WHERE id = ?"
+    ).bind(timestamp, prospect.id).run();
+
+    await env.RADAR_DB.prepare(`
+      UPDATE outreach_idempotency
+      SET status = 'provider_unknown', updated_at = ?
+      WHERE idempotency_key = ?
+    `).bind(timestamp, idempotencyKey).run();
+
+    return { success: false, reason: `HUNTER_API_EXCEPTION: ${err.message}` };
+  }
 }
 
 /**
