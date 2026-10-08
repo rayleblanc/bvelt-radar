@@ -74,9 +74,6 @@ export interface Env {
   RADAR_DB: D1Database;
   RADAR_QUEUE?: Queue<RadarJobMessage>;
   CACHE?: KVNamespace;
-  AI?: {
-    run: (model: string, input: any) => Promise<any>;
-  };
   FOUNDER_SERVICE_KEY: string;
   TELEGRAM_BOT_TOKEN: string;
   TELEGRAM_CHAT_ID: string;
@@ -90,16 +87,6 @@ export interface Env {
   TRUST_STACK_KEY?: string;
   FOUNDING_CITIES?: string; // e.g. "Tampa, FL;Austin, TX"
   FOUNDING_TRADES?: string; // e.g. "landscaping;hvac;plumbing"
-  FOUNDING_COUNTRIES?: string;
-  FOUNDING_LANGUAGES?: string;
-  FOUNDING_MIN_SCORE?: string;
-  FOUNDER_ICP_DESCRIPTION?: string;
-  FOUNDER_ICP_KEYWORDS?: string;
-  FOUNDER_SERVICES?: string;
-  FOUNDER_ALLOWED_MARKETS?: string;
-  FOUNDER_CAMPAIGN_GOAL?: string;
-  FOUNDER_MESSAGING_ANGLE?: string;
-  FOUNDER_MAX_DAILY_OUTREACH?: string;
   FOUNDER_AUTO_OUTREACH?: string;
   TELEGRAM_WEBHOOK_SECRET?: string;
   SENDER_NAME?: string;
@@ -111,11 +98,6 @@ export interface Env {
   RADAR_GLOBAL_PAUSE?: string;
   RADAR_OUTREACH_PAUSE?: string;
   ALLOWED_ORIGINS?: string;
-  // Optional zero/low-cost enrichment sources. None are required for core operation.
-  WAYBACK_ENABLED?: string;
-  CENSUS_API_KEY?: string;
-  CENSUS_ENABLED?: string;
-  PERMIT_SOURCES_JSON?: string;
 }
 
 export function getBudgetLimit(unitType: string): number {
@@ -170,85 +152,17 @@ export async function isValidCorporateDomain(domain: string): Promise<boolean> {
   }
 }
 
-export interface PermitSourceConfig {
-  url: string;
-  dateField?: string;
-  limit?: number;
-  headers?: Record<string, string>;
-}
-
-/**
- * Public permit discovery.
- *
- * The old implementation only queried one Orlando dataset. This version keeps
- * that verified source as a fallback, adds the verified Austin dataset, and
- * allows additional cities to be configured without code changes through
- * PERMIT_SOURCES_JSON.
- *
- * Format:
- * {
- *   "Austin, TX": {"url":"https://.../$query...","dateField":"issue_date"},
- *   "Orlando, FL": {"url":"https://..."}
- * }
- *
- * We deliberately do not guess municipal dataset IDs. A bad dataset ID is
- * worse than returning no signal.
- */
-export async function fetchPublicPermits(city: string, env?: Env): Promise<any[]> {
-  const normalized = city.toLowerCase().trim();
-  const configured: Record<string, PermitSourceConfig> = {};
-
-  if (env?.PERMIT_SOURCES_JSON) {
+export async function fetchPublicPermits(city: string): Promise<any[]> {
+  // Socrata API for Orlando as proof of concept, expandable to Austin/Tampa
+  if (city.toLowerCase() === 'orlando') {
     try {
-      const parsed = JSON.parse(env.PERMIT_SOURCES_JSON);
-      if (parsed && typeof parsed === "object") {
-        for (const [key, value] of Object.entries(parsed)) {
-          if (value && typeof value === "object" && typeof (value as any).url === "string") {
-            configured[key.toLowerCase().trim()] = value as PermitSourceConfig;
-          }
-        }
-      }
+      const response = await fetch('https://data.cityoforlando.net/resource/4v5t-j59e.json?$limit=50&$order=issued_date DESC');
+      return await response.json();
     } catch (e) {
-      console.warn("[Permits] Invalid PERMIT_SOURCES_JSON; using verified built-ins.");
+      console.error('Error fetching Orlando permits:', e);
     }
   }
-
-  // Verified public Socrata datasets as of October 2026.
-  const builtIns: Record<string, PermitSourceConfig> = {
-    "orlando, fl": {
-      url: "https://data.cityoforlando.net/resource/ryhf-m453.json?$limit=50&$order=last_update_date DESC"
-    },
-    "austin, tx": {
-      url: "https://data.austintexas.gov/resource/3syk-w9eu.json?$limit=50&$order=issue_date DESC"
-    }
-  };
-
-  const source =
-    configured[normalized] ||
-    configured[normalized.split(",")[0].trim()] ||
-    builtIns[normalized];
-
-  if (!source) return [];
-
-  try {
-    const response = await fetch(source.url, {
-      headers: {
-        "Accept": "application/json",
-        "User-Agent": "BveltRadar/1.0 (public-data-research)",
-        ...(source.headers || {})
-      },
-      signal: AbortSignal.timeout(7000)
-    });
-    if (!response.ok) {
-      console.warn(`[Permits] ${city} returned HTTP ${response.status}`);
-      return [];
-    }
-    const data = await response.json();
-    return Array.isArray(data) ? data : [];
-  } catch (e: any) {
-    console.warn(`[Permits] ${city} fetch failed: ${e?.message || e}`);
-    return [];
-  }
+  return [];
 }
 
 export async function releaseBudget(
@@ -359,17 +273,15 @@ export interface MissionConfig {
 export const DEFAULT_FOUNDER_MISSION: MissionConfig = {
   mode: "founder",
   target: "bvelt_customers",
-  // No market is hardcoded here. Founder markets/trades come from
-  // FOUNDING_CITIES / FOUNDING_TRADES (or explicit runtime overrides).
-  niches: [],
-  subniches: [],
-  services: [],
-  geographies: [],
-  countries: [],
-  languages: [],
+  niches: ["landscaping", "lawn_care", "hvac", "plumbing", "house_cleaning", "pool_cleaning", "handyman", "roofing", "pest_control"],
+  subniches: ["residential_contractors", "commercial_contractors", "emergency_service_providers"],
+  services: ["repair", "maintenance", "installation", "cleaning"],
+  geographies: ["Tampa, FL", "Austin, TX", "Orlando, FL", "Houston, TX", "Atlanta, GA", "Nashville, TN"],
+  countries: ["US", "MX", "ES", "CO", "CA", "GB", "AU"],
+  languages: ["en", "es"],
   icp: {
-    description: "Configurable local-service ICP for Bvelt.",
-    keywords: []
+    description: "Local service businesses with visible phone lines, websites, high-margin jobs, and lead-capture or emergency response friction across any market.",
+    keywords: ["plumber", "hvac", "electrician", "contractor", "cleaning", "landscaping"]
   },
   min_score: 0,
   max_daily_outreach: 10
@@ -383,6 +295,33 @@ const LIMITS = {
   max_hunter_credits_per_day: 8, // Strict budget conservation
 };
 
+// Priority Target Pool: High demand, high contractor density, lower SaaS saturation
+const PRIORITY_CITIES = [
+  "Tampa, FL",
+  "Orlando, FL",
+  "Jacksonville, FL",
+  "Austin, TX",
+  "Houston, TX",
+  "San Antonio, TX",
+  "Phoenix, AZ",
+  "Charlotte, NC",
+  "Raleigh, NC",
+  "Nashville, TN",
+  "Atlanta, GA",
+  "Birmingham, AL",
+];
+
+const PRIORITY_TRADES = [
+  "landscaping",
+  "lawn_care",
+  "hvac",
+  "plumbing",
+  "house_cleaning",
+  "pool_cleaning",
+  "handyman",
+  "roofing",
+  "pest_control",
+];
 
 // Mapping of contractor trades to their ideal B2B target niches
 const TENANT_TARGET_MAP: Record<string, string[]> = {
@@ -800,28 +739,6 @@ export default {
 
         const results = await env.RADAR_DB.prepare(queryStr).bind(...params).all();
         return Response.json(results.results || [], { headers: corsHeaders });
-      }
-
-      // 8b. Opportunity Intelligence APIs
-      if (path === "/api/opportunities" && method === "GET") {
-        return await handleOpportunities(env, url, corsHeaders);
-      }
-      if (path === "/api/missions" && method === "GET") {
-        return await handleMissions(env, url, corsHeaders);
-      }
-      if (path === "/api/learning" && method === "GET") {
-        return await handleLearning(env, corsHeaders);
-      }
-      if (path === "/api/config" && method === "GET") {
-        return await handleConfigGet(env, corsHeaders);
-      }
-      if (path === "/api/config" && method === "POST") {
-        const body = await request.json().catch(() => ({})) as any;
-        return await handleConfigPut(body, env, corsHeaders);
-      }
-      if (path === "/api/opportunity-event" && method === "POST") {
-        const body = await request.json().catch(() => ({})) as any;
-        return await handleOpportunityEvent(body, env, corsHeaders);
       }
 
       // 9. Suppression Fetching Endpoint
@@ -2104,7 +2021,7 @@ export async function startProspectingRun(
 
   const tId = tenantId || "founder";
   try {
-    const existingRun = await db.prepare("SELECT * FROM runs WHERE day = ? AND mode = ? AND COALESCE(tenant_id, 'founder') = ?").bind(today, mode, tId).first() as any;
+    const existingRun = await db.prepare("SELECT * FROM runs WHERE day = ? AND mode = ?").bind(today, mode).first() as any;
     if (existingRun) {
       console.log(`[startProspectingRun] Run already exists today for mode ${mode}. Returning existing run ID: ${existingRun.id}`);
       return {
@@ -2126,10 +2043,8 @@ export async function startProspectingRun(
 
   // Register run record in D1
   await db.prepare(
-    "INSERT INTO runs (id, day, mode, tenant_id, discovered, finalized, ai_calls, hunter_calls, errors_json, created_at) VALUES (?, ?, ?, ?, 0, 0, 0, 0, '[]', ?)"
-  ).bind(runId, today, mode, tenantId || "founder", new Date().toISOString()).run();
-
-  const mission = await createOpportunityMission(env, runId, mode, tenantId, activeCities, activeTrades);
+    "INSERT INTO runs (id, day, mode, discovered, finalized, ai_calls, hunter_calls, errors_json, created_at) VALUES (?, ?, ?, 0, 0, 0, 0, '[]', ?)"
+  ).bind(runId, today, mode, new Date().toISOString()).run();
 
   let jobsEnqueued = 0;
   for (const city of activeCities) {
@@ -2289,11 +2204,11 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
     let signalEvent: string | null = candidate.signal_event || null;
     let signalArea: string | null = candidate.signal_area || null;
 
-    if (!signalEvent) {
+    if (!signalEvent && env.FOUNDING_CITIES) {
       try {
-        const stateMatch = String(candidate.city || city || "").match(/\b[A-Z]{2}\b/g);
-        const extractedStates = Array.from(new Set(stateMatch || []));
-        const alerts = extractedStates.length ? await getAlerts(extractedStates) : [];
+        const foundingStr = env.FOUNDING_CITIES;
+        const extractedStates = Array.from(new Set(foundingStr.match(/\b[A-Z]{2}\b/g) || ["FL", "TX"]));
+        const alerts = await getAlerts(extractedStates);
         const candCity = (candidate.city || "").split(',')[0].trim().toLowerCase();
         const candTrade = (candidate.trade || "").toLowerCase();
 
@@ -2320,8 +2235,8 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
         id, mode, tenant_id, name, city, trade, website, phone, email, 
         score, signals_json, score_breakdown, variant_id, status, source, 
         created_at, updated_at, bvelt_angle, identity_key, demo_token, 
-        signal_event, signal_area, postal_code
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '{}', '{}', 'missed_calls', 'discovered', ?, ?, ?, 'missed_calls', ?, ?, ?, ?, ?)
+        signal_event, signal_area
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '{}', '{}', 'missed_calls', 'discovered', ?, ?, ?, 'missed_calls', ?, ?, ?, ?)
     `).bind(
       prospectId,
       job.mode,
@@ -2445,31 +2360,9 @@ async function handleEnrichJob(job: RadarJobMessage, env: Env): Promise<void> {
   const domain = prospect.website && isRealWebsite(prospect.website) ? getDomain(prospect.website) : null;
   let hasValidMx = false;
 
-  // Step b: DNS MX via documented Cloudflare DNS-over-HTTPS endpoint.
+  // Step b: DNS MX via Cloudflare DNS-over-HTTPS
   if (domain) {
     hasValidMx = await checkDomainMxRecords(domain);
-  }
-
-  // Step b.1: independent website-age evidence. This never creates an
-  // outreach contact and is only a weak scoring signal.
-  let websiteFreshness: WebsiteFreshnessSignal = {
-    available: false, last_capture: null, age_days: null, stale: false
-  };
-  if (domain && env.WAYBACK_ENABLED !== "0") {
-    websiteFreshness = await getWebsiteFreshness(domain, true);
-    if (websiteFreshness.stale) {
-      (signals as any).stale_website = true;
-    }
-  }
-
-  // Step b.2: optional ZIP-level Census signal when OSM exposed a postcode.
-  let censusHousing: any = null;
-  const postalCode = prospect.postal_code || null;
-  if (env.CENSUS_ENABLED === "1" && env.CENSUS_API_KEY && postalCode) {
-    censusHousing = await getCensusZipHousingSignal(String(postalCode), env.CENSUS_API_KEY);
-    if (censusHousing?.older_than_35y) {
-      (signals as any).old_housing_area = true;
-    }
   }
 
   // Step c: Fallback patterns contact@, info@, hello@, office@, admin@ ONLY if MX exists
@@ -2515,8 +2408,6 @@ async function handleEnrichJob(job: RadarJobMessage, env: Env): Promise<void> {
 
   const signalMetadata = {
     scraped_phone: websitePhone,
-    website_freshness: websiteFreshness,
-    census_housing: censusHousing,
     scraped_email: emailCandidate,
     is_email_validated: isEmailValidated,
     signals
@@ -2658,8 +2549,6 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
       new Date().toISOString(),
       prospect_id
     ).run();
-    await persistStrategicDecision(env.RADAR_DB, prospect_id, prospect, missionConfig, signals, breakdown, totalScore, confidence, evidenceItems).catch(() => {});
-    await syncOpportunityFromProspect(env, prospect_id, job, missionConfig).catch((e) => console.warn("[Opportunity] sync failed:", e));
     return;
   }
 
@@ -2682,13 +2571,10 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
     prospect_id
   ).run();
 
-  await persistStrategicDecision(env.RADAR_DB, prospect_id, prospect, missionConfig, signals, breakdown, totalScore, confidence, evidenceItems).catch(() => {});
-  await syncOpportunityFromProspect(env, prospect_id, job, missionConfig).catch((e) => console.warn("[Opportunity] sync failed:", e));
-
   // Increment qualified_count for today's daily mission
   try {
     const todayStr = new Date().toISOString().split('T')[0];
-    await env.RADAR_DB.prepare("UPDATE daily_missions SET qualified_count = qualified_count + 1 WHERE tenant_id = ? AND day = ?").bind(job.tenant_id || "founder", todayStr).run();
+    await env.RADAR_DB.prepare("UPDATE daily_missions SET qualified_count = qualified_count + 1 WHERE day = ?").bind(todayStr).run();
   } catch (e) {}
 
   // --- HOT LEAD INTERRUPT TRIGGERS ---
@@ -2768,11 +2654,9 @@ async function handleApproveJob(job: RadarJobMessage, env: Env): Promise<void> {
     return;
   }
 
-  // Qualification is channel-agnostic. A prospect may be valuable before an
-  // outreach channel is available; the outreach job decides whether a legal
-  // channel exists. This is essential for Tenant opportunity discovery.
-  if ((prospect.score || 0) < 45) {
-    await env.RADAR_DB.prepare("UPDATE prospects SET status = 'disqualified', outcome = 'low_score', updated_at = ? WHERE id = ?")
+  // Quality gate check: score >= 45 and email must be present
+  if ((prospect.score || 0) < 45 || !prospect.email) {
+    await env.RADAR_DB.prepare("UPDATE prospects SET status = 'disqualified', outcome = 'low_score_or_no_email', updated_at = ? WHERE id = ?")
       .bind(new Date().toISOString(), prospect_id).run();
     return;
   }
@@ -2807,11 +2691,8 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
     return;
   }
 
-  // Outreach requires a usable channel. Qualification itself does not.
-  if ((prospect.score || 0) < 45) return;
-  if (!prospect.email && !prospect.phone) {
-    await env.RADAR_DB.prepare("UPDATE prospects SET status = 'hold', decision_state = 'hold', outcome = 'no_contact_channel', updated_at = ? WHERE id = ?")
-      .bind(new Date().toISOString(), prospect_id).run();
+  // Quality gate check
+  if ((prospect.score || 0) < 45 || !prospect.email) {
     return;
   }
 
@@ -2880,7 +2761,7 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
   // Only ELITE can qualify for automatic founder outreach
   const isElite = (prospect.opportunity_score >= 80 && prospect.confidence_score >= 75) || 
     (!prospect.opportunity_score && (prospect.score || 0) >= 80);
-  const isAutoOutreachEnabled = job.mode === 'founder' && String(env.FOUNDER_AUTO_OUTREACH).toLowerCase() === 'true' && isElite && prospect.decision_state === 'auto_candidate' && Number(prospect.signal_freshness_score || 0) >= 85;
+  const isAutoOutreachEnabled = job.mode === 'founder' && String(env.FOUNDER_AUTO_OUTREACH).toLowerCase() === 'true' && isElite;
 
   const todayDate = new Date().toISOString().split('T')[0];
   const idempotencyKey = `idempotency:${prospect.id}:${(prospect.email || '').toLowerCase().trim()}:${todayDate}`;
@@ -3535,25 +3416,6 @@ async function runProspectingPipeline(
   return await startProspectingRun(env, mode, tenantId, overrides);
 }
 
-function normalizeTenantTargetNiche(value: string): string {
-  const v = String(value || "").toLowerCase().trim();
-  if (!v) return "";
-  if (/property\s*manage|property\s*manager|management company/.test(v)) return "property management";
-  if (/real\s*estate|realtor|estate\s*agent|brokerage/.test(v)) return "real estate";
-  if (/facility\s*manage|facility\s*manager/.test(v)) return "facility manager";
-  if (/hotel|motel|hospitality/.test(v)) return "hotel";
-  if (/restaurant|food service|cafe/.test(v)) return "restaurant";
-  if (/homeowner|hoa|owners association/.test(v)) return "homeowners association";
-  if (/general contractor|builder|construction contractor/.test(v)) return "general contractor";
-  if (/insurance/.test(v)) return "insurance agency";
-  if (/industrial|factory|plant/.test(v)) return "industrial plant";
-  if (/retail|store|supermarket/.test(v)) return "retail store";
-  if (/gym|fitness/.test(v)) return "gym";
-  if (/pool|aquatic/.test(v)) return "aquatic center";
-  if (/airbnb|short.?term rental/.test(v)) return "airbnb host";
-  return value.trim();
-}
-
 /**
  * Deterministic Regional & Trade Target Selector
  */
@@ -3577,72 +3439,39 @@ export async function getPriorityTargets(
     if (tenantConfig) {
       try {
         config.geographies = JSON.parse(tenantConfig.cities_json || '[]');
+        config.niches = JSON.parse(tenantConfig.trades_json || '[]');
         config.mode = "tenant";
-        config.tenant_id = tenantId;
         config.target = `tenant_${tenantId}_customers`;
-
-        // Tenant niche is the service the client sells. Its prospecting
-        // targets come from subniches_json / explicit ICP, not from founder
-        // contractor trades.
-        const configuredTargets = JSON.parse(tenantConfig.subniches_json || '[]');
-        const normalizedTargets = Array.isArray(configuredTargets)
-          ? configuredTargets.map(normalizeTenantTargetNiche).filter(Boolean)
-          : [];
-        const mappedTargets = TENANT_TARGET_MAP[String(tenantConfig.niche || '').toLowerCase()] || [];
-        config.niches = normalizedTargets.length ? normalizedTargets : mappedTargets;
         if (tenantConfig.countries_json) config.countries = JSON.parse(tenantConfig.countries_json);
         if (tenantConfig.languages_json) config.languages = JSON.parse(tenantConfig.languages_json);
         
-        // If subniches are omitted, infer only from the tenant's configured
-        // service niche. Never invent a market when the configuration is silent.
+        // If niches are empty, use the tenant's trade to find B2B targets
         if (config.niches.length === 0 && tenantConfig.niche) {
-          const trade = String(tenantConfig.niche).toLowerCase().trim();
-          config.niches = TENANT_TARGET_MAP[trade] || [];
+          const trade = tenantConfig.niche.toLowerCase();
+          config.niches = TENANT_TARGET_MAP[trade] || ["property management", "real estate"];
         }
-
-        if (tenantConfig.industry) config.industry = String(tenantConfig.industry);
-        if (tenantConfig.services_json) config.services = JSON.parse(tenantConfig.services_json || '[]');
-        if (tenantConfig.service_areas_json) config.service_areas = JSON.parse(tenantConfig.service_areas_json || '[]');
-        if (tenantConfig.regions_json) config.regions = JSON.parse(tenantConfig.regions_json || '[]');
-        if (tenantConfig.icp_description || tenantConfig.icp_keywords_json) {
-          config.icp = {
-            description: String(tenantConfig.icp_description || ''),
-            keywords: JSON.parse(tenantConfig.icp_keywords_json || '[]')
-          };
-        }
-        if (tenantConfig.minimum_score != null) config.min_score = Number(tenantConfig.minimum_score) || 0;
-        if (tenantConfig.daily_outreach_limit != null) config.max_daily_outreach = Number(tenantConfig.daily_outreach_limit) || 10;
-        if (tenantConfig.allowed_markets_json) config.allowed_markets = JSON.parse(tenantConfig.allowed_markets_json || '[]');
-        if (tenantConfig.campaign_goal) config.campaign_goal = String(tenantConfig.campaign_goal);
-        if (tenantConfig.messaging_angle) config.messaging_angle = String(tenantConfig.messaging_angle);
       } catch (e) {
         console.error("Error parsing tenant config: ", e);
       }
     } else {
-      // No tenant configuration means no autonomous tenant discovery.
-      // Never silently invent markets or ICPs.
-      config.geographies = [];
-      config.niches = [];
-      config.icp = { description: "", keywords: [] };
+      // Fallback generic tenant logic if ID provided but not found
+      config.geographies = ["Orlando", "Austin", "Tampa"];
+      config.niches = ["property_management", "real_estate", "hotel"];
     }
   } else if (mode === "tenant") {
-    // Tenant mode requires an explicit tenant configuration.
-    config.geographies = [];
-    config.niches = [];
-    config.icp = { description: "", keywords: [] };
+    // PoC Generic Tenant mode
+    config.geographies = ["Orlando", "Austin", "Tampa"];
+    config.niches = ["property_management", "real_estate", "hotel"];
+    config.icp = {
+      description: "Local B2B businesses with recurrent maintenance needs.",
+      keywords: ["property management", "estate agent", "hotel"]
+    };
   } else {
-    // Founder mode: persistent DB configuration wins over legacy env vars.
-    let storedFounder: any = null;
-    try {
-      const row = await env.RADAR_DB.prepare("SELECT value_json FROM radar_settings WHERE key='founder_targets'").first() as any;
-      if (row?.value_json) storedFounder = JSON.parse(row.value_json);
-    } catch {}
-    if (storedFounder?.cities?.length) config.geographies = storedFounder.cities.map(String).filter(Boolean);
-    if (storedFounder?.trades?.length) config.niches = storedFounder.trades.map(String).filter(Boolean);
-    if (env.FOUNDING_CITIES && !config.geographies.length) {
+    // Founder mode
+    if (env.FOUNDING_CITIES) {
       config.geographies = env.FOUNDING_CITIES.split(";").map(c => c.trim()).filter(Boolean);
     }
-    if (env.FOUNDING_TRADES && !config.niches.length) {
+    if (env.FOUNDING_TRADES) {
       config.niches = env.FOUNDING_TRADES.split(";").map(t => t.trim()).filter(Boolean);
     }
     if ((env as any).FOUNDING_COUNTRIES) {
@@ -3656,16 +3485,6 @@ export async function getPriorityTargets(
       if (!isNaN(parsedMin)) {
         config.min_score = parsedMin;
       }
-    }
-    if (env.FOUNDER_ICP_DESCRIPTION) config.icp.description = String(env.FOUNDER_ICP_DESCRIPTION);
-    if (env.FOUNDER_ICP_KEYWORDS) config.icp.keywords = String(env.FOUNDER_ICP_KEYWORDS).split(/[;,]/).map(x => x.trim()).filter(Boolean);
-    if (env.FOUNDER_SERVICES) config.services = String(env.FOUNDER_SERVICES).split(";").map(x => x.trim()).filter(Boolean);
-    if (env.FOUNDER_ALLOWED_MARKETS) config.allowed_markets = String(env.FOUNDER_ALLOWED_MARKETS).split(";").map(x => x.trim()).filter(Boolean);
-    if (env.FOUNDER_CAMPAIGN_GOAL) config.campaign_goal = String(env.FOUNDER_CAMPAIGN_GOAL);
-    if (env.FOUNDER_MESSAGING_ANGLE) config.messaging_angle = String(env.FOUNDER_MESSAGING_ANGLE);
-    if (env.FOUNDER_MAX_DAILY_OUTREACH) {
-      const n = parseInt(String(env.FOUNDER_MAX_DAILY_OUTREACH), 10);
-      if (Number.isFinite(n)) config.max_daily_outreach = Math.max(0, Math.min(50, n));
     }
   }
 
@@ -3685,11 +3504,10 @@ export async function getPriorityTargets(
         finalize_units: 10
       });
 
-      const missionTenantId = tenantId || "founder";
       await env.RADAR_DB.prepare(`
-        INSERT OR IGNORE INTO daily_missions (tenant_id, day, goal, markets, icp, budget, target_qualified, target_outreach, status, qualified_count, outreach_count)
-        VALUES (?, ?, ?, ?, ?, ?, 3, ?, 'active', 0, 0)
-      `).bind(missionTenantId, today, goal, marketsJson, icpJson, budgetJson, config.max_daily_outreach || 3).run();
+        INSERT OR IGNORE INTO daily_missions (day, goal, markets, icp, budget, target_qualified, target_outreach, status, qualified_count, outreach_count)
+        VALUES (?, ?, ?, ?, ?, 3, 3, 'active', 0, 0)
+      `).bind(today, goal, marketsJson, icpJson, budgetJson).run();
     } catch (e) {
       console.warn("[Daily Mission] Failed to seed daily mission:", e);
     }
@@ -3739,11 +3557,11 @@ export async function getPriorityTargets(
   });
 
   // Weather Signals: Call getAlerts ONCE with 2-letter state codes from FOUNDING_CITIES
-  const foundingStr = config.geographies.join(";");
-  const extractedStates = Array.from(new Set(foundingStr.match(/\b[A-Z]{2}\b/g) || []));
+  const foundingStr = env.FOUNDING_CITIES || config.geographies.join(";");
+  const extractedStates = Array.from(new Set(foundingStr.match(/\b[A-Z]{2}\b/g) || ["FL", "TX"]));
   let weatherAlerts: WeatherAlert[] = [];
   try {
-    if (extractedStates.length) weatherAlerts = await getAlerts(extractedStates);
+    weatherAlerts = await getAlerts(extractedStates);
   } catch (e) {
     console.warn("[Weather Signals] getAlerts warning:", e);
   }
@@ -3774,11 +3592,6 @@ export async function getPriorityTargets(
   }
 
   (config as any).weather_alerts = weatherAlerts;
-
-  // Never invent a market. Empty configuration is an explicit configuration error.
-  if (!sortedGeographies.length || !sortedNiches.length) {
-    throw new Error(`No target markets configured for ${mode}. Configure cities/markets and niches/services before running Radar.`);
-  }
 
   // Deterministically rotate across weighted geographies and niches (never single city)
   const cityIdx1 = dayOfYear % sortedGeographies.length;
@@ -3844,28 +3657,6 @@ export const PREFERRED_TRADES = new Set([
  * 4. contactability (0-20pts)
  * 5. commercial_opportunity (0-15pts)
  */
-
-async function persistStrategicDecision(db: D1Database, prospectId: string, prospect: any, missionConfig: MissionConfig, signals: Record<string, boolean>, breakdown: Record<string, number>, totalScore: number, confidence: number, evidenceItems: any[]): Promise<void> {
-  const text = `${prospect.name || ''} ${prospect.trade || ''} ${prospect.city || ''}`.toLowerCase();
-  const targetMatch = (missionConfig.niches || []).some(n => text.includes(String(n).toLowerCase()));
-  const keywordHits = (missionConfig.icp?.keywords || []).filter(k => text.includes(String(k).toLowerCase())).length;
-  const fit = Math.min(100, Math.round(missionConfig.mode === 'tenant' ? (targetMatch ? 70 : 25) + Math.min(25, keywordHits * 8) : (breakdown.bvelt_fit || 0) * 2.5));
-  const signalCount = Object.values(signals).filter(Boolean).length;
-  const intent = Math.min(100, Math.round((breakdown.commercial_opportunity || 0) * 5 + signalCount * 8));
-  const pain = Math.min(100, Math.round((breakdown.revenue_leak || 0) * 4));
-  const abilityToPay = Math.min(100, Math.round((breakdown.commercial_opportunity || 0) * 5));
-  const contactability = prospect.email ? (prospect.phone ? 100 : 80) : (prospect.phone ? 55 : 0);
-  const timing = Math.min(100, Math.round(signalCount * 12 + (prospect.signal_event ? 35 : 0)));
-  const evidence = Math.min(100, Math.round((breakdown.evidence || 0) * 4));
-  const whyNow = { signal_count: signalCount, signals: Object.keys(signals).filter(k => !!signals[k]), event: prospect.signal_event || null, evidence: evidenceItems.slice(0, 8) };
-  const estimatedValue = totalScore >= 80 ? 1500 : totalScore >= 60 ? 900 : totalScore >= 45 ? 500 : 200;
-  const expectedValue = Math.round(estimatedValue * (totalScore / 100) * (confidence / 100) * 100) / 100;
-  const minimum = Math.max(45, Number(missionConfig.min_score || 0));
-  const decisionState = totalScore < minimum ? 'stop' : contactability === 0 ? 'hold' : totalScore >= 80 && confidence >= 75 && signalCount >= 2 ? 'auto_candidate' : 'review';
-  const freshness = prospect.signal_event ? 100 : signalCount >= 2 ? 90 : 70;
-  await db.prepare(`UPDATE prospects SET fit_score = ?, intent_score = ?, pain_score = ?, ability_to_pay_score = ?, contactability_score = ?, timing_score = ?, evidence_score = ?, decision_state = ?, why_now_json = ?, expected_value = ?, signal_freshness_score = ? WHERE id = ?`).bind(fit, intent, pain, abilityToPay, contactability, timing, evidence, decisionState, JSON.stringify(whyNow), expectedValue, freshness, prospectId).run();
-}
-
 export function calculateMultiFactorScore(
   item: any,
   email: string | null,
@@ -3930,7 +3721,6 @@ export function calculateMultiFactorScore(
   if (item.signal_event) timingScore += 8;
   const isHiring = /hiring|career|join our team|empleo|trabaja con nosotros/i.test(item.name || "") || !!signals.specific_landing_pages;
   if (isHiring) timingScore += 7;
-  if ((signals as any).stale_website) timingScore += 4;
   if (isPreferred) timingScore += 5;
   timingScore = Math.min(15, Math.max(0, timingScore));
 
@@ -3984,8 +3774,6 @@ export function calculateMultiFactorScore(
   addEvidence('lead_capture', !!signals.lead_capture, "Lead capture widget detected.");
   addEvidence('sms_cta', !signals.sms_gap && !!phone, "SMS call-to-action detected.");
   addEvidence('service_area_expansion', !!signals.multiple_areas, "Multiple service areas detected.");
-  addEvidence('stale_website', !!(signals as any).stale_website, "Internet Archive shows a potentially stale last capture; this is a weak timing signal, not proof of current site age.");
-  addEvidence('old_housing_area', !!(signals as any).old_housing_area, "Census ZIP-level housing-age signal indicates an older housing stock area.");
 
   const detectedCount = evidenceItems.filter(e => e.value === 'detected').length;
   let evidenceConfidenceScore = 6.5;
@@ -4379,108 +4167,6 @@ export interface DiscoveryDiagnostics {
 /**
  * Multi-Source Discovery Cascade (Nominatim + Overpass Mirrors + BizData Safe Filter)
  */
-function cosineSimilarity(a: number[], b: number[]): number {
-  if (!a?.length || !b?.length || a.length !== b.length) return 0;
-  let dot = 0, na = 0, nb = 0;
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i];
-    na += a[i] * a[i];
-    nb += b[i] * b[i];
-  }
-  return na && nb ? dot / (Math.sqrt(na) * Math.sqrt(nb)) : 0;
-}
-
-function unpackEmbeddingVectors(result: any, count: number): number[][] {
-  const data = result?.data;
-  if (Array.isArray(data) && Array.isArray(data[0])) return data as number[][];
-  if (!Array.isArray(data)) return [];
-
-  const shape = Array.isArray(result?.shape) ? result.shape : [];
-  const dims = Number(shape[shape.length - 1]) || (data.length / count);
-  if (!dims || data.length < count * dims) return [];
-
-  const vectors: number[][] = [];
-  for (let i = 0; i < count; i++) {
-    vectors.push(data.slice(i * dims, (i + 1) * dims));
-  }
-  return vectors;
-}
-
-/**
- * Optional semantic dedupe using the free Workers AI embedding model.
- *
- * This is intentionally NOT part of the Gemini/Groq generation cascade.
- * If no AI binding is configured, deterministic D1/string dedupe remains
- * authoritative.
- */
-async function semanticDeduplicateCandidates(env: Env, candidates: any[]): Promise<any[]> {
-  if (!env.AI || candidates.length < 2) return candidates;
-
-  try {
-    const recentRows = await env.RADAR_DB.prepare(
-      "SELECT name, city, website, phone FROM prospects ORDER BY created_at DESC LIMIT 100"
-    ).all();
-
-    const historical = (recentRows?.results || []).map((r: any) => ({
-      name: r.name,
-      city: r.city,
-      website: r.website,
-      phone: r.phone,
-      historical: true
-    }));
-
-    const pool = [...candidates, ...historical];
-    const texts = pool.map((x: any) =>
-      [x.name, x.city, x.website ? getDomain(String(x.website)) : "", x.phone || ""]
-        .filter(Boolean)
-        .join(" | ")
-    );
-
-    const embeddingResult = await env.AI.run("@cf/baai/bge-small-en-v1.5", { text: texts });
-    const vectors = unpackEmbeddingVectors(embeddingResult, texts.length);
-    if (vectors.length !== texts.length) return candidates;
-
-    const kept: any[] = [];
-    const keptVectors: number[][] = [];
-
-    for (let i = 0; i < candidates.length; i++) {
-      const candidate = candidates[i];
-      let duplicate = false;
-
-      // Compare against recent persisted prospects in the same city and
-      // against candidates already retained in this discovery batch.
-      for (let j = 0; j < historical.length; j++) {
-        const h = historical[j];
-        if (String(h.city || "").toLowerCase() !== String(candidate.city || "").toLowerCase()) continue;
-        if (cosineSimilarity(vectors[i], vectors[candidates.length + j]) >= 0.93) {
-          duplicate = true;
-          break;
-        }
-      }
-
-      if (!duplicate) {
-        for (let j = 0; j < kept.length; j++) {
-          if (String(kept[j].city || "").toLowerCase() !== String(candidate.city || "").toLowerCase()) continue;
-          if (cosineSimilarity(vectors[i], keptVectors[j]) >= 0.93) {
-            duplicate = true;
-            break;
-          }
-        }
-      }
-
-      if (!duplicate) {
-        kept.push(candidate);
-        keptVectors.push(vectors[i]);
-      }
-    }
-
-    return kept;
-  } catch (e) {
-    console.warn("[Semantic Dedupe] Workers AI unavailable; keeping deterministic dedupe:", e);
-    return candidates;
-  }
-}
-
 export async function fetchLocalBusinessesWithDiagnostics(
   city: string, 
   trade: string, 
@@ -4567,7 +4253,7 @@ export async function fetchLocalBusinessesWithDiagnostics(
 
   // 1.5 Public Permit Data (Guerrilla Power - Real-time building permits as high-priority signals)
   try {
-    const permits = await fetchPublicPermits(city, env);
+    const permits = await fetchPublicPermits(city);
     if (permits && permits.length > 0) {
       for (const p of permits) {
         // Simple extraction for Socrata Orlando format
@@ -4613,11 +4299,10 @@ export async function fetchLocalBusinessesWithDiagnostics(
     }
   }
 
-  const semanticDeduped = await semanticDeduplicateCandidates(env, deduped);
   const discoveredRaw = rawBusinesses.length;
-  const filtered = discoveredRaw - semanticDeduped.length;
-  const reason = semanticDeduped.length > 0 
-    ? `Discovered ${semanticDeduped.length} businesses for ${city} - ${trade} across discovery cascade`
+  const filtered = discoveredRaw - deduped.length;
+  const reason = deduped.length > 0 
+    ? `Discovered ${deduped.length} businesses for ${city} - ${trade} across discovery cascade`
     : `Zero businesses discovered for ${city} - ${trade}. Nominatim: ${nominatimStatus}, Overpass: ${overpassStatus}, BizData: ${bizdataStatus}`;
 
   const diagnostics: DiscoveryDiagnostics = {
@@ -4632,13 +4317,13 @@ export async function fetchLocalBusinessesWithDiagnostics(
   };
 
   // Cache in KV for 24h
-  if (env.CACHE && semanticDeduped.length > 0) {
+  if (env.CACHE && deduped.length > 0) {
     try {
-      await env.CACHE.put(cacheKey, JSON.stringify(semanticDeduped), { expirationTtl: 86400 });
+      await env.CACHE.put(cacheKey, JSON.stringify(deduped), { expirationTtl: 86400 });
     } catch (e) {}
   }
 
-  return { businesses: semanticDeduped, diagnostics };
+  return { businesses: deduped, diagnostics };
 }
 
 /**
@@ -5800,7 +5485,7 @@ export async function sendOrQueueOutreach(prospect: any, runId: string, env: Env
       // Increment outreach_count for today's daily mission
       try {
         const todayStr = new Date().toISOString().split('T')[0];
-        await env.RADAR_DB.prepare("UPDATE daily_missions SET outreach_count = outreach_count + 1 WHERE tenant_id = ? AND day = ?").bind(tenantId || "founder", todayStr).run();
+        await env.RADAR_DB.prepare("UPDATE daily_missions SET outreach_count = outreach_count + 1 WHERE day = ?").bind(todayStr).run();
       } catch (e) {}
 
       await env.RADAR_DB.prepare(`
@@ -6140,171 +5825,6 @@ function getDomain(url: string): string | null {
   }
 }
 
-async function createOpportunityMission(
-  env: Env,
-  runId: string,
-  mode: string,
-  tenantId: string | null,
-  cities: string[],
-  trades: string[]
-): Promise<any> {
-  const id = crypto.randomUUID();
-  const now = new Date().toISOString();
-  const priority = Math.min(100, 30 + cities.length * 10 + trades.length * 8);
-  const mission = {
-    id,
-    run_id: runId,
-    mode,
-    tenant_id: tenantId,
-    goal: mode === "founder" ? "Find the highest-probability Bvelt buyers" : "Find high-value customers for the tenant",
-    rationale: "Target selection is constrained by configured markets, ICP and autonomous safety budgets.",
-    priority
-  };
-  try {
-    await env.RADAR_DB.prepare(`
-      INSERT INTO missions (id, run_id, mode, tenant_id, goal, query_json, rationale, priority, status, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', ?)
-    `).bind(id, runId, mode, tenantId, mission.goal, JSON.stringify({cities, trades}), mission.rationale, priority, now).run();
-  } catch (e) {
-    console.warn("[Opportunity Mission] creation failed:", e);
-  }
-  return mission;
-}
-
-function deriveOpportunitySignalsFromProspect(prospect: any, breakdown: any, parsedMeta: any) {
-  const now = new Date().toISOString();
-  const signals: any[] = [];
-  const add = (type: string, value: string, strength: number, source: string, freshness = 1) =>
-    signals.push({ type, value, strength, freshness, source, observed_at: now });
-  const raw = parsedMeta?.signals || {};
-  if (prospect.website) add("web_presence", "website_present", 0.55, prospect.source || "discovery");
-  if (prospect.phone) add("contactability", "phone", 0.70, "contact_enrichment");
-  if (prospect.email && parsedMeta?.is_email_validated) add("contactability", "verified_email", 0.95, "email_validation");
-  if (breakdown?.priority_trade) add("vertical_fit", "configured_trade", 0.90, "target_config");
-  if (breakdown?.priority_city) add("market_fit", "configured_market", 0.90, "target_config");
-  if (prospect.website && prospect.phone) add("digital_maturity", "website_and_phone", 0.65, "enrichment");
-  if (prospect.source === "overpass") add("local_presence", "osm_business", 0.50, "overpass");
-  for (const key of ["quote_request","booking","call_cta","sms_gap","emergency","multiple_areas","specific_landing_pages","estimate_language","lead_capture","stale_website","old_housing_area"]) {
-    if (raw[key]) add("pain_signal", key, 0.75, "website_research");
-  }
-  return signals;
-}
-
-async function syncOpportunityFromProspect(env: Env, prospectId: string, job: RadarJobMessage, missionConfig: MissionConfig): Promise<any> {
-  const db = env.RADAR_DB;
-  const prospect = await db.prepare("SELECT * FROM prospects WHERE id = ?").bind(prospectId).first() as any;
-  if (!prospect) return null;
-  let parsedMeta: any = {};
-  try { parsedMeta = JSON.parse(prospect.signals_json || "{}"); } catch {}
-  let breakdown: any = {};
-  try { breakdown = JSON.parse(prospect.score_breakdown || "{}"); } catch {}
-  let evidence: any = [];
-  try { evidence = JSON.parse(prospect.evidence_json || "[]"); } catch {}
-  let whyNow = "Evidence is still thin; enrich before spending outreach capacity.";
-  try {
-    const w = JSON.parse(prospect.why_now_json || "{}");
-    if (typeof w === "string") whyNow = w;
-    else if (w?.summary) whyNow = String(w.summary);
-    else if (w?.why_now) whyNow = String(w.why_now);
-  } catch {}
-  const signals = deriveOpportunitySignalsFromProspect(prospect, breakdown, parsedMeta);
-  const confidence = Math.max(0, Math.min(1, Number(prospect.confidence_score || 0) / 100));
-  const score = Number(prospect.opportunity_score ?? prospect.score ?? 0);
-  const expectedValue = Number(prospect.expected_value || Math.round(score * 3.9));
-  const nextAction = prospect.email && parsedMeta?.is_email_validated && score >= 70
-    ? "prepare_outreach"
-    : score >= 55 ? "research" : "enrich";
-  const actionReason = nextAction === "prepare_outreach"
-    ? "High fit, sufficient evidence and validated contactability."
-    : nextAction === "research"
-      ? "Promising opportunity; gather one more independent signal before outreach."
-      : "Evidence or contactability is insufficient for outreach.";
-  const graph = {
-    nodes: [
-      { type: "business", id: prospect.id, label: prospect.name },
-      { type: "market", id: prospect.city, label: prospect.city },
-      { type: "vertical", id: prospect.trade, label: prospect.trade }
-    ],
-    edges: [
-      { from: prospect.id, relation: "located_in", to: prospect.city },
-      { from: prospect.id, relation: "operates_in", to: prospect.trade }
-    ]
-  };
-  const existing = await db.prepare("SELECT id, first_seen_at FROM opportunities WHERE prospect_id = ?").bind(prospectId).first() as any;
-  const id = existing?.id || crypto.randomUUID();
-  const now = new Date().toISOString();
-  const stage = ["sent","delivered"].includes(prospect.status) ? "outreach" : ["human_review","paused"].includes(prospect.status) ? "review" : prospect.status === "blocked" ? "closed" : "qualified";
-  await db.prepare(`
-    INSERT INTO opportunities (id, prospect_id, mission_id, mode, tenant_id, stage, priority, expected_value, confidence, why_now, next_action, action_reason, evidence_json, graph_json, first_seen_at, last_signal_at, updated_at)
-    VALUES (?, ?, (SELECT id FROM missions WHERE run_id = ? ORDER BY created_at DESC LIMIT 1), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(prospect_id) DO UPDATE SET
-      mission_id=excluded.mission_id, mode=excluded.mode, tenant_id=excluded.tenant_id, stage=excluded.stage,
-      priority=excluded.priority, expected_value=excluded.expected_value, confidence=excluded.confidence,
-      why_now=excluded.why_now, next_action=excluded.next_action, action_reason=excluded.action_reason,
-      evidence_json=excluded.evidence_json, graph_json=excluded.graph_json, last_signal_at=excluded.last_signal_at, updated_at=excluded.updated_at
-  `).bind(id, prospectId, job.run_id, job.mode, job.tenant_id, stage, score, expectedValue, confidence, whyNow, nextAction, actionReason, JSON.stringify(evidence), JSON.stringify(graph), existing?.first_seen_at || now, now, now).run();
-  for (const s of signals) {
-    await db.prepare(`INSERT INTO opportunity_signals (id, opportunity_id, signal_type, signal_value, strength, freshness, source, observed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-      .bind(crypto.randomUUID(), id, s.type, s.value, s.strength, s.freshness, s.source, s.observed_at).run();
-  }
-  try {
-    await db.prepare("UPDATE missions SET result_count = result_count + 1 WHERE run_id = ?").bind(job.run_id).run();
-  } catch {}
-  await db.prepare(`INSERT INTO opportunity_actions (id, opportunity_id, action, channel, status, reason, payload_json, created_at) VALUES (?, ?, ?, ?, 'recommended', ?, ?, ?)`)
-    .bind(crypto.randomUUID(), id, nextAction, nextAction === "prepare_outreach" ? "email" : "research", actionReason, JSON.stringify({score, confidence, evidence_count: evidence.length}), now).run();
-  return { id, score, expectedValue, confidence, nextAction, whyNow };
-}
-
-async function handleOpportunities(env: Env, url: URL, headers: Record<string,string>): Promise<Response> {
-  const limit = Math.min(50, Math.max(1, Number(url.searchParams.get("limit") || 20)));
-  const rows = await env.RADAR_DB.prepare(`SELECT o.*, p.name, p.city, p.trade, p.website, p.email, p.phone, p.score, p.status, p.bvelt_angle, p.confidence_score FROM opportunities o JOIN prospects p ON p.id=o.prospect_id ORDER BY o.priority DESC, o.updated_at DESC LIMIT ?`).bind(limit).all();
-  return Response.json(rows.results || [], { headers });
-}
-
-async function handleMissions(env: Env, url: URL, headers: Record<string,string>): Promise<Response> {
-  const limit = Math.min(30, Math.max(1, Number(url.searchParams.get("limit") || 10)));
-  const rows = await env.RADAR_DB.prepare("SELECT * FROM missions ORDER BY created_at DESC LIMIT ?").bind(limit).all();
-  return Response.json(rows.results || [], { headers });
-}
-
-async function handleLearning(env: Env, headers: Record<string,string>): Promise<Response> {
-  const rows = await env.RADAR_DB.prepare(`SELECT trade, city, outcome, COUNT(*) count FROM prospects WHERE outcome IS NOT NULL GROUP BY trade, city, outcome ORDER BY count DESC LIMIT 100`).all();
-  return Response.json({ matrix: rows.results || [], weights: await getLearningStats(env.RADAR_DB) }, { headers });
-}
-
-async function handleConfigGet(env: Env, headers: Record<string,string>): Promise<Response> {
-  const row = await env.RADAR_DB.prepare("SELECT value_json FROM radar_settings WHERE key='founder_targets'").first() as any;
-  let cfg: any = { cities: [], trades: [] };
-  if (row) { try { cfg = JSON.parse(row.value_json); } catch {} }
-  if (!cfg.cities?.length) cfg.cities = env.FOUNDING_CITIES?.split(";").map(x=>x.trim()).filter(Boolean) || [];
-  if (!cfg.trades?.length) cfg.trades = env.FOUNDING_TRADES?.split(";").map(x=>x.trim()).filter(Boolean) || [];
-  return Response.json({ founder: cfg }, { headers });
-}
-
-async function handleConfigPut(body: any, env: Env, headers: Record<string,string>): Promise<Response> {
-  const cities = Array.isArray(body?.cities) ? body.cities.map(String).map((x:string)=>x.trim()).filter(Boolean).slice(0,100) : [];
-  const trades = Array.isArray(body?.trades) ? body.trades.map(String).map((x:string)=>x.trim()).filter(Boolean).slice(0,100) : [];
-  if (!cities.length || !trades.length) return Response.json({ error: "cities and trades are required" }, { status: 400, headers });
-  const now = new Date().toISOString();
-  await env.RADAR_DB.prepare("INSERT OR REPLACE INTO radar_settings (key,value_json,updated_at) VALUES ('founder_targets',?,?)").bind(JSON.stringify({cities,trades}),now).run();
-  return Response.json({ success: true, founder: { cities, trades } }, { headers });
-}
-
-async function handleOpportunityEvent(body: any, env: Env, headers: Record<string,string>): Promise<Response> {
-  const opportunityId = String(body?.opportunity_id || "");
-  const outcome = String(body?.outcome || "");
-  if (!opportunityId || !outcome) return Response.json({ error: "opportunity_id and outcome required" }, { status: 400, headers });
-  const value = Number(body?.value || 0);
-  const now = new Date().toISOString();
-  await env.RADAR_DB.prepare("INSERT INTO opportunity_outcomes (id,opportunity_id,outcome,value,notes,created_at) VALUES (?,?,?,?,?,?)")
-    .bind(crypto.randomUUID(), opportunityId, outcome, value, body?.notes ? String(body.notes).slice(0,2000) : null, now).run();
-  const stage = ["positive_reply","demo","trial","paid"].includes(outcome) ? outcome : ["negative_reply","unsubscribed","bounce"].includes(outcome) ? "closed" : "observed";
-  await env.RADAR_DB.prepare("UPDATE opportunities SET stage=?, updated_at=? WHERE id=?").bind(stage, now, opportunityId).run();
-  const context = await env.RADAR_DB.prepare(`SELECT p.city, p.trade, p.variant_id FROM opportunities o JOIN prospects p ON p.id=o.prospect_id WHERE o.id=?`).bind(opportunityId).first() as any;
-  if (context) await recordLearningEvent(env.RADAR_DB, context.city, context.trade, context.variant_id, ["positive_reply","demo","trial","paid"].includes(outcome), { outcome });
-  return Response.json({ success: true, opportunity_id: opportunityId, outcome }, { headers });
-}
-
 function getDayOfYear(now: Date): number {
   const start = new Date(now.getFullYear(), 0, 0);
   const diff = now.getTime() - start.getTime();
@@ -6334,111 +5854,12 @@ function escapeMarkdown(text: string): string {
     .replace(/\)/g, "\\)");
 }
 
-interface WebsiteFreshnessSignal {
-  available: boolean;
-  last_capture: string | null;
-  age_days: number | null;
-  stale: boolean;
-}
-
-/**
- * Internet Archive freshness signal.
- *
- * This is evidence about the archive's last successful capture, not proof
- * that the live site is stale. We therefore use it as a weak timing signal.
- */
-export async function getWebsiteFreshness(domain: string, enabled = true): Promise<WebsiteFreshnessSignal> {
-  if (!enabled || !domain) {
-    return { available: false, last_capture: null, age_days: null, stale: false };
-  }
-
-  try {
-    const target = encodeURIComponent(`https://${domain}/`);
-    const url = `https://archive.org/wayback/available?url=${target}`;
-    const res = await fetch(url, {
-      headers: { "Accept": "application/json", "User-Agent": "BveltRadar/1.0 (research)" },
-      signal: AbortSignal.timeout(5000)
-    });
-    if (!res.ok) return { available: false, last_capture: null, age_days: null, stale: false };
-
-    const data: any = await res.json();
-    const ts = data?.archived_snapshots?.closest?.timestamp;
-    if (!ts || !/^\d{14}$/.test(String(ts))) {
-      return { available: true, last_capture: null, age_days: null, stale: false };
-    }
-
-    const iso = `${String(ts).slice(0,4)}-${String(ts).slice(4,6)}-${String(ts).slice(6,8)}T${String(ts).slice(8,10)}:${String(ts).slice(10,12)}:${String(ts).slice(12,14)}Z`;
-    const ageDays = Math.max(0, Math.floor((Date.now() - Date.parse(iso)) / 86400000));
-    return {
-      available: true,
-      last_capture: iso,
-      age_days: ageDays,
-      stale: ageDays >= 730
-    };
-  } catch (e) {
-    return { available: false, last_capture: null, age_days: null, stale: false };
-  }
-}
-
-/**
- * Optional Census housing-age signal.
- *
- * Census Data API now requires an API key for data queries (Oct 2026).
- * We only call it when both CENSUS_API_KEY and a ZIP code are available.
- * No key = feature silently disabled.
- */
-export async function getCensusZipHousingSignal(zip: string | null | undefined, apiKey?: string): Promise<any | null> {
-  if (!zip || !/^\d{5}$/.test(zip) || !apiKey) return null;
-
-  try {
-    // ACS 5-year profile: median year structure built + housing-unit age buckets.
-    const vars = [
-      "NAME",
-      "DP04_0026E", // median year structure built
-      "DP04_0020E", // built 1980-1989
-      "DP04_0021E", // built 1970-1979
-      "DP04_0022E", // built 1960-1969
-      "DP04_0023E", // built 1950-1959
-      "DP04_0024E"  // built 1940-1949
-    ].join(",");
-
-    const url =
-      `https://api.census.gov/data/2024/acs/acs5/profile?get=${vars}` +
-      `&for=zip%20code%20tabulation%20area:${zip}&key=${encodeURIComponent(apiKey)}`;
-
-    const res = await fetch(url, {
-      headers: { "Accept": "application/json", "User-Agent": "BveltRadar/1.0 (public-data-research)" },
-      signal: AbortSignal.timeout(6000)
-    });
-    if (!res.ok) return null;
-
-    const rows: any = await res.json();
-    if (!Array.isArray(rows) || rows.length < 2) return null;
-
-    const header = rows[0] as string[];
-    const row = rows[1] as string[];
-    const out: Record<string, any> = {};
-    header.forEach((h, i) => out[h] = row[i]);
-
-    const medianYear = Number(out.DP04_0026E);
-    return {
-      zip,
-      name: out.NAME || `ZIP ${zip}`,
-      median_year_structure_built: Number.isFinite(medianYear) ? medianYear : null,
-      older_than_35y:
-        Number.isFinite(medianYear) ? (new Date().getUTCFullYear() - medianYear >= 35) : null
-    };
-  } catch (e) {
-    return null;
-  }
-}
-
 /**
  * Zero-cost Cloudflare 1.1.1.1 DNS over HTTPS MX verification
  */
 async function checkDomainMxRecords(domain: string): Promise<boolean> {
   try {
-    const res = await fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(domain)}&type=MX`, {
+    const res = await fetch(`https://1.1.1.1/dns-query?name=${encodeURIComponent(domain)}&type=MX`, {
       headers: { "accept": "application/dns-json" },
       signal: AbortSignal.timeout(3000)
     });

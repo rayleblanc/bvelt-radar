@@ -64,22 +64,6 @@ interface Prospect {
   updated_at?: string;
 }
 
-interface Opportunity {
-  id: string;
-  prospect_id: string;
-  name: string;
-  city: string;
-  trade: string;
-  score: number;
-  priority: number;
-  confidence: number;
-  expected_value: number;
-  stage: string;
-  why_now: string | null;
-  next_action: string | null;
-  action_reason: string | null;
-}
-
 interface Health {
   status: string;
   telegram_configured?: boolean;
@@ -122,7 +106,6 @@ export default function App() {
   const [health, setHealth] = useState<Health | null>(null);
   const [stats, setStats] = useState<StatsSummary | null>(null);
   const [prospects, setProspects] = useState<Prospect[]>([]);
-  const [opportunities, setOpportunities] = useState<Opportunity[]>([]);
   const [activeFilter, setActiveFilter] = useState<StatusCategory>('ALL');
   const [loading, setLoading] = useState(true);
   const [errorState, setErrorState] = useState<string | null>(null);
@@ -190,8 +173,6 @@ export default function App() {
       }
       
       if (prospectsRes && prospectsRes.ok) {
-        const oppRes = await fetch(`${apiUrl}/api/opportunities?limit=8`, { credentials: 'include' }).catch(() => null);
-        if (oppRes?.ok) setOpportunities(await oppRes.json());
         const rawList = await prospectsRes.json();
         const pList: any[] = Array.isArray(rawList) ? rawList : (rawList.prospects || []);
         
@@ -853,40 +834,6 @@ export default function App() {
                 <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Directorio de Prospectos Real</h3>
                 <Database className="w-3.5 h-3.5 text-slate-500" />
               </div>
-
-              {opportunities.length > 0 && (
-                <div className="bg-slate-950/60 border border-blue-950/60 rounded-2xl p-4 space-y-3">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <h3 className="text-xs font-bold text-blue-300 uppercase tracking-wider">Oportunidades prioritarias</h3>
-                      <p className="text-[9px] text-slate-500 mt-1">Evidence → prioridad → siguiente acción</p>
-                    </div>
-                    <Sparkles className="w-4 h-4 text-blue-400" />
-                  </div>
-                  <div className="space-y-2">
-                    {opportunities.map(o => (
-                      <div key={o.id} className="rounded-xl border border-slate-800 bg-slate-900/40 p-3">
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="min-w-0">
-                            <div className="text-xs font-bold text-slate-100 truncate">{o.name}</div>
-                            <div className="text-[10px] text-slate-500 font-mono mt-1">{o.trade} · {o.city}</div>
-                          </div>
-                          <div className="text-right shrink-0">
-                            <div className="text-sm font-bold text-emerald-400">{Math.round(o.priority || o.score || 0)}</div>
-                            <div className="text-[9px] text-slate-600 uppercase">priority</div>
-                          </div>
-                        </div>
-                        <div className="grid grid-cols-2 gap-2 mt-2 text-[9px] font-mono">
-                          <span className="rounded-lg bg-slate-900 p-2 text-slate-400">EV: <b className="text-slate-200">${Math.round(o.expected_value || 0)}</b></span>
-                          <span className="rounded-lg bg-slate-900 p-2 text-slate-400">Conf: <b className="text-slate-200">{Math.round((o.confidence || 0) * 100)}%</b></span>
-                        </div>
-                        {o.why_now && <div className="text-[10px] text-slate-400 mt-2 leading-relaxed">{o.why_now}</div>}
-                        {o.next_action && <div className="text-[9px] text-blue-300 font-mono mt-2 uppercase">→ {o.next_action.replaceAll('_',' ')}</div>}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
 
               {/* Status Filter Pills */}
               <div className="flex items-center gap-1.5 overflow-x-auto pb-1 no-scrollbar text-[10px] font-mono font-bold">

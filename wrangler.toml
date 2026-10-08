@@ -13,10 +13,21 @@ directory = "./dist"
 not_found_handling = "single-page-application"
 binding = "ASSETS"
 
-# Founder targeting is intentionally NOT hardcoded in this file.
-# Configure these existing variables in Cloudflare Dashboard > Settings > Variables:
-# FOUNDING_CITIES, FOUNDING_TRADES, FOUNDING_COUNTRIES, FOUNDING_LANGUAGES, FOUNDING_MIN_SCORE
-# keep_vars=true preserves dashboard values across deployments.
+[vars]
+# Optional default seeds (The engine is dynamically open to all markets, countries, and niches)
+FOUNDING_CITIES = "Tampa, FL;Orlando, FL;Austin, TX;Houston, TX;Atlanta, GA;Nashville, TN"
+FOUNDING_TRADES = "landscaping;lawn_care;hvac;plumbing;house_cleaning;pool_cleaning;handyman;roofing;pest_control"
+
+# SECRETS (Configure via `npx wrangler secret put <NAME>`):
+# - FOUNDER_SERVICE_KEY: Bearer token for authenticating admin & /run endpoints
+# - TELEGRAM_BOT_TOKEN: Bot token from @BotFather for sending interactive reports
+# - TELEGRAM_CHAT_ID: Founder chat/channel ID where daily digests and buttons are delivered
+# - GROQ_API_KEY: (Optional) Groq API key for trade-psychology copywriting (Llama-3.3-70b)
+# - GEMINI_FOUNDER_API_KEY: (Optional) Google Gemini Flash fallback for copywriting
+# - HUNTER_API_KEY: (Optional) Hunter.io API key for fallback domain email search (strict max 8 credits/day)
+# - ABSTRACT_API_KEY: (Optional) Abstract API key for email deliverability check
+# - TRUST_STACK_URL: (Optional) Trust stack URL for budget quota checks
+# - TRUST_SERVICE_KEY: (Optional) Service token for trust stack
 
 [[d1_databases]]
 binding = "RADAR_DB"
@@ -42,7 +53,3 @@ max_concurrency = 1
 [triggers]
 crons = ["0 12 * * *"]
 
-
-# Optional Workers AI binding used only for semantic deduplication; it does NOT alter Gemini/Groq generation.
-[ai]
-binding = "AI"
