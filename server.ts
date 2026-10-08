@@ -647,6 +647,11 @@ app.post('/events', handleEventRequest);
 app.post('/api/reply', handleEventRequest);
 app.post('/webhook/events', handleEventRequest);
 
+// Telegram Webhook endpoint (POST updates)
+app.post(['/telegram-webhook', '/telegram/webhook', '/api/telegram-webhook', '/api/telegram/webhook'], (req, res) => {
+  res.status(200).send("OK");
+});
+
 // Telegram Test endpoint (supports GET and POST)
 app.all(['/api/telegram-test', '/telegram-test'], async (req, res) => {
   const botToken = process.env.TELEGRAM_BOT_TOKEN;

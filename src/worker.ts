@@ -573,7 +573,8 @@ export default {
       }
 
       // 2. Telegram Webhook Callback Endpoint (handles interactive inline buttons)
-      if ((path === "/telegram/webhook" || path === "/telegram-webhook") && method === "POST") {
+      const cleanTelegramPath = path.replace(/\/$/, "");
+      if ((cleanTelegramPath === "/telegram/webhook" || cleanTelegramPath === "/telegram-webhook" || cleanTelegramPath === "/api/telegram-webhook" || cleanTelegramPath === "/api/telegram/webhook") && request.method === "POST") {
         return await handleTelegramWebhook(request, env, corsHeaders);
       }
 
@@ -687,7 +688,7 @@ export default {
       }
 
       // 2d. Serve PWA Console Static Assets for Root / Non-API Paths
-      if ((env as any).ASSETS && !path.startsWith("/api/") && !["/run", "/health", "/stats", "/decision", "/suppression", "/prospects", "/seeds", "/verify-key", "/logout", "/telegram/webhook", "/telegram-webhook"].includes(path)) {
+      if ((env as any).ASSETS && !path.startsWith("/api/") && !["/run", "/health", "/stats", "/decision", "/suppression", "/prospects", "/seeds", "/verify-key", "/logout", "/telegram/webhook", "/telegram-webhook", "/telegram/webhook/", "/telegram-webhook/"].includes(path)) {
         const assetRes = await (env as any).ASSETS.fetch(request);
         if (assetRes.status !== 404) {
           return assetRes;
