@@ -224,6 +224,9 @@ export default function App() {
   const [lastRunError, setLastRunError] = useState<string | null>(null);
   const [isTestingTelegram, setIsTestingTelegram] = useState(false);
   const [telegramToast, setTelegramToast] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const [isTestingEmail, setIsTestingEmail] = useState(false);
+  const [emailTestAddress, setEmailTestAddress] = useState('');
+  const [emailToast, setEmailToast] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null);
 
   // App UI states
   const [showConfig, setShowConfig] = useState(false);
@@ -548,6 +551,42 @@ export default function App() {
     } finally {
       setIsTestingTelegram(false);
       setTimeout(() => setTelegramToast(null), 8000);
+    }
+  };
+
+  // Test Outbound Email Connectivity
+  const testEmailOutbound = async () => {
+    setIsTestingEmail(true);
+    setEmailToast(null);
+    try {
+      const res = await fetch(`${apiUrl}/api/email-test`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to: emailTestAddress.trim() || undefined }),
+        credentials: 'include'
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.success) {
+        if (data.status === 'dispatched') {
+          setEmailToast({
+            type: 'success',
+            message: `✅ Email enviado en vivo vía ${String(data.provider || '').toUpperCase()} (ID: ${data.message_id || data.messageId || 'OK'})`
+          });
+        } else {
+          setEmailToast({
+            type: 'info',
+            message: `ℹ️ Modo Simulado OK: Para envíos reales a bandejas, configura RESEND_API_KEY en Cloudflare (gratis en resend.com)`
+          });
+        }
+      } else {
+        const err = data.error || data.details || `HTTP ${res.status}: Falló el despacho`;
+        setEmailToast({ type: 'error', message: `❌ Error Email: ${err}` });
+      }
+    } catch (e: any) {
+      setEmailToast({ type: 'error', message: `❌ Error de red: ${e.message}` });
+    } finally {
+      setIsTestingEmail(false);
+      setTimeout(() => setEmailToast(null), 10000);
     }
   };
 
@@ -1018,6 +1057,53 @@ export default function App() {
                   <button 
                     onClick={() => setTelegramToast(null)} 
                     className="text-slate-400 hover:text-white text-xs px-1"
+                  >
+                    ✕
+                  </button>
+                </div>
+              )}
+
+              {/* Email Outbound Live Test */}
+              <div className="pt-2 border-t border-slate-800/60 space-y-2">
+                <div className="flex items-center justify-between text-[11px] font-mono text-slate-400">
+                  <span className="flex items-center gap-1.5">
+                    <Mail className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                    <span>Outbound Email: <strong className="text-slate-200">Resend / Brevo</strong></span>
+                  </span>
+                  <span className="text-[10px] text-slate-500 font-mono">100% Gratis</span>
+                </div>
+                <div className="flex gap-2">
+                  <input
+                    type="email"
+                    placeholder="tu@correo.com (probar recepción)"
+                    value={emailTestAddress}
+                    onChange={(e) => setEmailTestAddress(e.target.value)}
+                    className="flex-1 bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-200 placeholder:text-slate-600 focus:outline-none focus:border-blue-500"
+                  />
+                  <button
+                    onClick={testEmailOutbound}
+                    disabled={isTestingEmail}
+                    className="py-2 px-3 rounded-xl bg-slate-900/80 hover:bg-slate-800/80 active:scale-[0.98] border border-slate-800 text-slate-300 text-xs font-mono font-bold flex items-center gap-1.5 whitespace-nowrap transition-all"
+                  >
+                    <Mail className={`w-3.5 h-3.5 text-emerald-400 ${isTestingEmail ? 'animate-bounce' : ''}`} />
+                    {isTestingEmail ? 'ENVIANDO...' : 'Probar Email'}
+                  </button>
+                </div>
+              </div>
+
+              {/* Email Test Toast */}
+              {emailToast && (
+                <div className={`p-3 rounded-xl border text-xs font-mono flex items-center justify-between ${
+                  emailToast.type === 'success' 
+                    ? 'bg-emerald-950/40 border-emerald-800/50 text-emerald-300' 
+                    : emailToast.type === 'info'
+                    ? 'bg-blue-950/40 border-blue-800/50 text-blue-300'
+                    : 'bg-rose-950/40 border-rose-800/50 text-rose-300'
+                }`}>
+                  <span className="leading-relaxed">{emailToast.message}</span>
+                  <button 
+                    onClick={() => setEmailToast(null)} 
+                    className="text-slate-400 hover:text-white text-xs px-1 ml-2 shrink-0"
                   >
                     ✕
                   </button>

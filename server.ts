@@ -4,6 +4,8 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { createServer as createViteServer } from 'vite';
+import { dispatchEmail } from './src/emailDispatcher';
+import { auditDomainSecurityAndMx, auditWebsitePerformance, auditCityWeatherEmergency } from './src/openAudits';
 
 // Load environment variables
 dotenv.config();
@@ -395,6 +397,35 @@ app.get('/stats', secureMiddleware, (req, res) => {
   });
 });
 
+// Outbound Email Connectivity Test Endpoint
+app.all(['/api/email-test', '/email-test', '/api/radar/test-email'], async (req, res) => {
+  const recipient = (req.body?.to || req.body?.email || req.query?.to || req.query?.email || process.env.OUTBOUND_EMAIL_FROM || "test@example.com").toString();
+
+  const testRes = await dispatchEmail({
+    to: recipient,
+    recipientName: "Bvelt Founder Test",
+    subject: "⚡ Test Outbound - Bvelt Radar (Local)",
+    body: `Hola,\n\nEste es un email de verificación enviado desde Bvelt Radar.\n\nFecha: ${new Date().toISOString()}\n\nReply STOP to opt out`,
+    from: process.env.OUTBOUND_EMAIL_FROM,
+    resendApiKey: process.env.RESEND_API_KEY,
+    brevoApiKey: process.env.BREVO_API_KEY,
+    senderName: process.env.SENDER_NAME
+  });
+
+  res.status(testRes.success ? 200 : 502).json({
+    success: testRes.success,
+    status: testRes.status,
+    provider: testRes.provider,
+    message_id: testRes.messageId,
+    error: testRes.error || null,
+    details: testRes.details,
+    configured_providers: {
+      resend: !!process.env.RESEND_API_KEY,
+      brevo: !!process.env.BREVO_API_KEY
+    }
+  });
+});
+
 // 3. Mark sent / discard decision trigger
 app.post('/decision', secureMiddleware, async (req, res) => {
   const { id, action, notes } = req.body;
@@ -414,7 +445,30 @@ app.post('/decision', secureMiddleware, async (req, res) => {
       logToAgent('success', 'Trust budget confirmed (Founder monthly quota fits).');
     }
 
+    let dispatchOutcome: any = { success: true, provider: 'simulated', status: 'simulated', messageId: `sim_${id.substring(0, 8)}` };
+    if (prospect.email && prospect.email.includes('@')) {
+      const draftSubject = prospect.draft_subject || `Bvelt - Pregunta sobre llamadas de clientes (${prospect.name || 'su negocio'})`;
+      const draftBody = prospect.draft_body || `Hola equipo de ${prospect.name},\n\n¿Qué ocurre cuando un cliente potencial llama a su negocio mientras están ocupados en obra y no pueden atender el teléfono?\n\nBvelt responde automáticamente por SMS en 15 segundos para no perder ningún trabajo: https://bvelt.app\n\nSaludos,\nEquipo Bvelt\n\nReply STOP to opt out`;
+
+      logToAgent('info', `Despachando correo a ${prospect.email}...`);
+      dispatchOutcome = await dispatchEmail({
+        to: prospect.email,
+        recipientName: prospect.name,
+        subject: draftSubject,
+        body: draftBody,
+        from: process.env.OUTBOUND_EMAIL_FROM,
+        prospectId: prospect.id,
+        resendApiKey: process.env.RESEND_API_KEY,
+        brevoApiKey: process.env.BREVO_API_KEY,
+        senderName: process.env.SENDER_NAME
+      });
+      logToAgent('success', `Resultado despacho: ${dispatchOutcome.status} vía ${dispatchOutcome.provider} (ID: ${dispatchOutcome.messageId})`);
+    }
+
     prospect.status = "sent";
+    prospect.dispatch_provider = dispatchOutcome.provider;
+    prospect.dispatch_message_id = dispatchOutcome.messageId;
+    prospect.dispatch_status = dispatchOutcome.status;
     prospect.updated_at = timestamp;
 
     // Suppress domains and emails
@@ -442,7 +496,12 @@ app.post('/decision', secureMiddleware, async (req, res) => {
       logToAgent('info', 'Forwarding confirmation notification to Telegram bot...');
     }
 
-    return res.json({ success: true, message: `Prospect ${id} marked as SENT. Added to suppression.`, id });
+    return res.json({
+      success: true,
+      message: `Prospect ${id} marked as SENT. Dispatch: ${dispatchOutcome.status} (${dispatchOutcome.provider}). Added to suppression.`,
+      dispatch: dispatchOutcome,
+      id
+    });
 
   } else if (action === "discard") {
     prospect.status = "discarded";

@@ -12,6 +12,8 @@
  */
 
 import { getAlerts, tradeForEvent, WeatherAlert } from './weatherSignals';
+import { dispatchEmail, EmailDispatchResult } from './emailDispatcher';
+import { auditDomainSecurityAndMx, auditWebsitePerformance, auditCityWeatherEmergency } from './openAudits';
 
 // Global type declarations for Cloudflare Worker compilation
 declare global {
@@ -98,6 +100,10 @@ export interface Env {
   RADAR_GLOBAL_PAUSE?: string;
   RADAR_OUTREACH_PAUSE?: string;
   ALLOWED_ORIGINS?: string;
+  RESEND_API_KEY?: string;
+  BREVO_API_KEY?: string;
+  OUTBOUND_EMAIL_FROM?: string;
+  PAGESPEED_API_KEY?: string;
 }
 
 export function getBudgetLimit(unitType: string): number {
@@ -376,6 +382,26 @@ const OVERPASS_TRADE_TAGS: Record<string, string[]> = {
   "industrial plant": ['industrial="factory"', 'man_made="works"']
 };
 
+function isAuthorized(request: Request, env: Env, serviceKey?: string, validSessionHash?: string): boolean {
+  const cookieHeader = request.headers.get("Cookie") || "";
+  const parsedCookies: Record<string, string> = {};
+  cookieHeader.split(";").forEach(c => {
+    const [k, ...v] = c.trim().split("=");
+    if (k) parsedCookies[k.trim()] = decodeURIComponent(v.join("=").trim());
+  });
+
+  const authHeader = request.headers.get("Authorization");
+  const sessionCookie = parsedCookies["bvelt_session"];
+
+  if (validSessionHash && sessionCookie === validSessionHash) {
+    return true;
+  }
+  if (serviceKey && authHeader && authHeader.startsWith("Bearer ") && authHeader.split(" ")[1] === serviceKey) {
+    return true;
+  }
+  return false;
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
@@ -406,6 +432,13 @@ export default {
     }
 
     try {
+      const serviceKey = env.FOUNDER_SERVICE_KEY;
+      let validSessionHash = "";
+      if (serviceKey) {
+        const hashBuffer = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`bvelt_radar_session:${serviceKey}`));
+        validSessionHash = Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, "0")).join("");
+      }
+
       // 1. Enhanced Health Check (public)
       if (path === "/health" && method === "GET") {
         return await handleHealth(env, corsHeaders);
@@ -413,6 +446,9 @@ export default {
 
       // 1ab. Telegram Test Endpoint (Supports GET and POST)
       if ((path === "/api/telegram-test" || path === "/telegram-test") && (method === "GET" || method === "POST")) {
+        if (!isAuthorized(request, env, serviceKey, validSessionHash)) {
+          return Response.json({ error: "unauthorized" }, { status: 401, headers: corsHeaders });
+        }
         const botToken = env.TELEGRAM_BOT_TOKEN;
         const chatId = env.TELEGRAM_CHAT_ID;
 
@@ -543,6 +579,9 @@ export default {
 
       // 2b. Telegram Test Endpoint (Supports GET and POST, checks token/chat_id, returns 400 if missing)
       if ((path === "/api/telegram-test" || path === "/telegram-test") && (method === "GET" || method === "POST")) {
+        if (!isAuthorized(request, env, serviceKey, validSessionHash)) {
+          return Response.json({ error: "unauthorized" }, { status: 401, headers: corsHeaders });
+        }
         const botToken = env.TELEGRAM_BOT_TOKEN;
         const chatId = env.TELEGRAM_CHAT_ID;
 
@@ -577,21 +616,46 @@ export default {
         }
       }
 
-      // Helper to parse cookies from request header
-      const cookieHeader = request.headers.get("Cookie") || "";
-      const parsedCookies: Record<string, string> = {};
-      cookieHeader.split(";").forEach(c => {
-        const [k, ...v] = c.trim().split("=");
-        if (k) parsedCookies[k.trim()] = decodeURIComponent(v.join("=").trim());
-      });
+      // 2c. Outbound Email Connectivity Test Endpoint
+      if ((path === "/api/email-test" || path === "/email-test" || path === "/api/radar/test-email") && (method === "GET" || method === "POST")) {
+        if (!isAuthorized(request, env, serviceKey, validSessionHash)) {
+          return Response.json({ error: "unauthorized" }, { status: 401, headers: corsHeaders });
+        }
+        let recipient = "";
+        if (method === "POST") {
+          try {
+            const body: any = await request.json();
+            recipient = body.to || body.email || "";
+          } catch (e) {}
+        }
+        if (!recipient) {
+          recipient = url.searchParams.get("to") || url.searchParams.get("email") || (env.OUTBOUND_EMAIL_FROM || "").replace(/.*<([^>]+)>.*/, "$1") || "test@example.com";
+        }
 
-      const serviceKey = env.FOUNDER_SERVICE_KEY;
+        const testRes = await dispatchEmail({
+          to: recipient,
+          recipientName: "Bvelt Founder Test",
+          subject: "⚡ Test de Verificación Outbound - Bvelt Radar",
+          body: `Hola,\n\nEste es un email de verificación enviado desde Bvelt Radar.\n\nFecha: ${new Date().toISOString()}\n\nReply STOP to opt out`,
+          from: env.OUTBOUND_EMAIL_FROM,
+          resendApiKey: env.RESEND_API_KEY,
+          brevoApiKey: env.BREVO_API_KEY,
+          senderName: env.SENDER_NAME
+        });
 
-      // Compute deterministic session hash for current founder secret
-      let validSessionHash = "";
-      if (serviceKey) {
-        const hashBuffer = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`bvelt_radar_session:${serviceKey}`));
-        validSessionHash = Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, "0")).join("");
+        return Response.json({
+          success: testRes.success,
+          status: testRes.status,
+          provider: testRes.provider,
+          message_id: testRes.messageId,
+          error: testRes.error || null,
+          details: testRes.details,
+          configured_providers: {
+            resend: !!env.RESEND_API_KEY,
+            brevo: !!env.BREVO_API_KEY,
+            hunter_sequence: !!(env.HUNTER_API_KEY && env.HUNTER_SEQUENCE_ID)
+          }
+        }, { headers: corsHeaders, status: testRes.success ? 200 : 502 });
       }
 
       // 2b. Public Key Verification Endpoint with HttpOnly Session Cookie
@@ -631,19 +695,11 @@ export default {
       }
 
       // 3. Security Verification for Admin/Worker Endpoints (Supports HttpOnly Cookie OR Bearer token)
-      const authHeader = request.headers.get("Authorization");
-      const sessionCookie = parsedCookies["bvelt_session"];
-
-      let isAuthorized = false;
-      if (validSessionHash && sessionCookie === validSessionHash) {
-        isAuthorized = true;
-      } else if (authHeader && authHeader.startsWith("Bearer ") && authHeader.split(" ")[1] === serviceKey) {
-        isAuthorized = true;
-      }
+      const authorized = isAuthorized(request, env, serviceKey, validSessionHash);
 
       // Special handling for /run supporting both GET and POST with either auth method
       if (path === "/run") {
-        if (!isAuthorized) {
+        if (!authorized) {
           return Response.json({ error: "Unauthorized. Missing or invalid service key." }, { status: 401, headers: corsHeaders });
         }
         if (method === "GET" || method === "POST") {
@@ -684,7 +740,7 @@ export default {
       }
 
       // Enforce authorization for remaining admin endpoints (/stats, /decision, /suppression, /api/telegram-test)
-      if (!isAuthorized) {
+      if (!authorized) {
         return Response.json({ error: "Unauthorized. Missing or invalid service key." }, { status: 401, headers: corsHeaders });
       }
 
@@ -1748,12 +1804,15 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
       if (action && prospectId) {
         // Execute decision (approve maps to sent/approved, discard to discard, suppress to suppress)
         const decisionAction = (action === "approve" || action === "sent") ? "sent" : (action === "discard" ? "discard" : action);
-        await handleDecision(prospectId, decisionAction, `Triggered via Telegram Button (${action})`, env, {});
+        const decisionRes = await handleDecision(prospectId, decisionAction, `Triggered via Telegram Button (${action})`, env, {});
+        const decisionJson: any = await decisionRes.json().catch(() => ({}));
 
         // Answer callback query so Telegram spinner stops
         if (env.TELEGRAM_BOT_TOKEN) {
           const actionText = (action === "approve" || action === "sent")
-            ? "✅ Aprobado y puesto en cola de envío"
+            ? (decisionJson?.success === false && decisionJson?.dispatch?.error
+                ? "❌ No se pudo enviar"
+                : "✅ Aprobado y puesto en cola de envío")
             : action === "discard"
             ? "❌ Descartado"
             : "🚫 Dominio Suprimido";
@@ -1769,18 +1828,99 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
             signal: AbortSignal.timeout(4000)
           }).catch(e => console.warn("answerCallbackQuery warning: ", e));
 
+          let dispatchInfo = "";
+          if (decisionJson?.dispatch?.status === "dispatched") {
+            dispatchInfo = `\n\n📧 <b>Email despachado de verdad</b> vía <code>${decisionJson.dispatch.provider}</code> (ID: <code>${escapeHtml(decisionJson.dispatch.messageId)}</code>).`;
+          } else if (decisionJson?.dispatch?.status === "simulated") {
+            dispatchInfo = `\n\n⚠️ <i>Email guardado en modo simulado. Configura RESEND_API_KEY en Cloudflare para envíos reales gratis (3,000/mes).</i>`;
+          } else if (decisionJson?.dispatch?.error) {
+            dispatchInfo = `\n\n❌ <i>Error al despachar email: ${escapeHtml(decisionJson.dispatch.error)}</i>`;
+          }
+
           // Send confirmation text in chat
           await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               chat_id: chatId,
-              text: `<b>${actionText}</b>: ID <code>${escapeHtml(prospectId)}</code> actualizado y registrado en D1.`,
+              text: `<b>${actionText}</b>: ID <code>${escapeHtml(prospectId)}</code> registrado en D1.${dispatchInfo}`,
               parse_mode: "HTML"
             }),
             signal: AbortSignal.timeout(4000)
           }).catch(e => console.warn("sendMessage confirmation warning: ", e));
         }
+      }
+    }
+
+    // Handle Telegram Text Commands (/testmail, /status, /digest, /help)
+    if (update.message?.text && env.TELEGRAM_BOT_TOKEN) {
+      const msgText = (update.message.text || "").trim();
+      if (msgText.startsWith("/testmail")) {
+        const parts = msgText.split(/\s+/);
+        const targetEmail = parts[1] || (env.OUTBOUND_EMAIL_FROM || "").replace(/.*<([^>]+)>.*/, "$1") || "test@example.com";
+
+        const testRes = await dispatchEmail({
+          to: targetEmail,
+          recipientName: "Bvelt Founder Test",
+          subject: "⚡ Test Outbound Live - Bvelt Radar",
+          body: `Hola,\n\nEste es un mensaje de prueba enviado desde tu bot de Telegram en Bvelt Radar.\n\nProveedor detectado: ${env.RESEND_API_KEY ? "Resend API" : env.BREVO_API_KEY ? "Brevo API" : "Simulado"}\nFecha: ${new Date().toISOString()}\n\nReply STOP to opt out`,
+          from: env.OUTBOUND_EMAIL_FROM,
+          resendApiKey: env.RESEND_API_KEY,
+          brevoApiKey: env.BREVO_API_KEY,
+          senderName: env.SENDER_NAME
+        });
+
+        let replyMsg = "";
+        if (testRes.status === "dispatched") {
+          replyMsg = `✅ <b>Email despachado exitosamente!</b>\n\n<b>Destinatario:</b> <code>${escapeHtml(targetEmail)}</code>\n<b>Proveedor:</b> <code>${testRes.provider}</code>\n<b>Message ID:</b> <code>${escapeHtml(testRes.messageId)}</code>`;
+        } else if (testRes.status === "simulated") {
+          replyMsg = `⚠️ <b>Modo Simulado Activo</b>\n\nNo tienes configurada ninguna clave de envío de correos.\n\n<b>Pasos para envíos reales gratis:</b>\n1. Ve a <a href="https://resend.com">resend.com</a> y obtén tu API Key (3,000 emails/mes gratis).\n2. En Cloudflare Dashboard > Settings > Variables and Secrets, agrega:\n• <code>RESEND_API_KEY</code> = tu clave re_...\n• <code>OUTBOUND_EMAIL_FROM</code> = tu email o <code>onboarding@resend.dev</code>`;
+        } else {
+          replyMsg = `❌ <b>Fallo al enviar correo:</b>\n${escapeHtml(testRes.error || "Error desconocido")}`;
+        }
+
+        await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ chat_id: chatId, text: replyMsg, parse_mode: "HTML" }),
+          signal: AbortSignal.timeout(4000)
+        }).catch(() => {});
+
+      } else if (msgText.startsWith("/status")) {
+        const provStatus = env.RESEND_API_KEY ? "✅ Resend (3,000/mes gratis)" : env.BREVO_API_KEY ? "✅ Brevo (300/día gratis)" : "⚠️ Simulado (Falta RESEND_API_KEY)";
+        const statusMsg = `<b>📊 Bvelt Radar Status</b>\n\n<b>Email Outbound:</b> ${provStatus}\n<b>Bot Telegram:</b> ✅ Conectado\n<b>Plataforma:</b> <a href="https://bvelt.app">https://bvelt.app</a>\n\n<i>Escribe /digest para ver las 3 mejores oportunidades o /testmail tu@correo.com para probar el envío.</i>`;
+        await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ chat_id: chatId, text: statusMsg, parse_mode: "HTML" }),
+          signal: AbortSignal.timeout(4000)
+        }).catch(() => {});
+
+      } else if (msgText.startsWith("/digest")) {
+        const topOpps = await env.RADAR_DB.prepare(
+          "SELECT * FROM prospects WHERE email IS NOT NULL AND status IN ('queued', 'enriched', 'drafted') ORDER BY score DESC LIMIT 3"
+        ).all() as any;
+
+        if (topOpps.results && topOpps.results.length > 0) {
+          await dispatchInteractiveTelegramAlert(topOpps.results, [], [], env);
+        } else {
+          await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ chat_id: chatId, text: "🔍 No hay prospectos pendientes en cola en este momento.", parse_mode: "HTML" }),
+            signal: AbortSignal.timeout(4000)
+          }).catch(() => {});
+        }
+
+      } else if (msgText.startsWith("/start") || msgText.startsWith("/help")) {
+        const provStatus = env.RESEND_API_KEY ? "✅ Resend Activo" : env.BREVO_API_KEY ? "✅ Brevo Activo" : "⚠️ Simulado (Configura RESEND_API_KEY)";
+        const helpMsg = `🤖 <b>Bvelt Radar Founder Bot</b>\n\n<b>Comandos disponibles:</b>\n• /status - Ver cuotas y estado de proveedores\n• /digest - Enviar las 3 mejores oportunidades con botones para aprobar\n• /testmail &lt;correo&gt; - Enviar email de prueba inmediato\n\n<b>Email Outbound:</b> ${provStatus}`;
+        await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ chat_id: chatId, text: helpMsg, parse_mode: "HTML" }),
+          signal: AbortSignal.timeout(4000)
+        }).catch(() => {});
       }
     }
 
@@ -1905,11 +2045,103 @@ async function handleDecision(
       }, { status: 403, headers });
     }
 
+    // Execute Outbound Email Dispatch
+    let dispatchOutcome: any = { success: true, provider: 'simulated', status: 'simulated', messageId: `sim_${id.substring(0, 8)}` };
+    if (prospect.email && prospect.email.includes('@')) {
+      const draftSubject = prospect.draft_subject || `Bvelt - Pregunta sobre llamadas de clientes (${prospect.name || 'su negocio'})`;
+      const draftBody = prospect.draft_body || `Hola equipo de ${prospect.name},\n\n¿Qué ocurre cuando un cliente potencial llama a su negocio mientras están ocupados en obra y no pueden atender el teléfono?\n\nBvelt responde automáticamente por SMS en 15 segundos para no perder ningún trabajo: https://bvelt.app\n\nSaludos,\nEquipo Bvelt\n\nReply STOP to opt out`;
+
+      // Compliance Hard Gate: missing sender postal address MUST block outbound dispatch
+      if ((env.RESEND_API_KEY || env.BREVO_API_KEY) && !env.SENDER_POSTAL_ADDRESS?.trim()) {
+        return Response.json({
+          success: false,
+          blocked: true,
+          reason: "missing_sender_postal_address"
+        }, { status: 400, headers });
+      }
+
+      dispatchOutcome = await dispatchEmail({
+        to: prospect.email,
+        recipientName: prospect.name,
+        subject: draftSubject,
+        body: draftBody,
+        from: env.OUTBOUND_EMAIL_FROM,
+        prospectId: prospect.id,
+        resendApiKey: env.RESEND_API_KEY,
+        brevoApiKey: env.BREVO_API_KEY,
+        senderName: env.SENDER_NAME
+      });
+
+      if (dispatchOutcome.status === "failed") {
+        try {
+          await db.prepare(
+            "UPDATE prospects SET dispatch_provider = ?, dispatch_status = 'failed', dispatch_error = ?, updated_at = ? WHERE id = ?"
+          ).bind(dispatchOutcome.provider, dispatchOutcome.error || null, timestamp, id).run();
+        } catch (e) {}
+
+        try {
+          await db.prepare(`
+            INSERT INTO email_dispatch_logs (id, prospect_id, tenant_id, recipient_email, subject, provider, status, message_id, error_message, payload_preview, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `).bind(
+            `disp_${crypto.randomUUID()}`,
+            id,
+            prospect.tenant_id || 'founder',
+            prospect.email,
+            prospect.draft_subject || 'Outreach',
+            dispatchOutcome.provider,
+            'failed',
+            dispatchOutcome.messageId || null,
+            dispatchOutcome.error || null,
+            (prospect.draft_body || '').substring(0, 150),
+            timestamp
+          ).run();
+        } catch (e) {}
+
+        return Response.json({
+          success: false,
+          id,
+          dispatch: {
+            status: "failed",
+            provider: dispatchOutcome.provider,
+            error: dispatchOutcome.error
+          }
+        }, { status: 502, headers });
+      }
+    }
+
     // Update prospect with outcome sent and 21-day cooldown (max 21 days for normal outreach)
     const cooldown21d = new Date(Date.now() + 21 * 24 * 60 * 60 * 1000).toISOString();
-    await db.prepare(
-      "UPDATE prospects SET status = 'sent', outcome = 'sent', last_contact_at = ?, cooldown_until = ?, updated_at = ? WHERE id = ?"
-    ).bind(timestamp, cooldown21d, timestamp, id).run();
+    try {
+      await db.prepare(
+        "UPDATE prospects SET status = 'sent', outcome = 'sent', last_contact_at = ?, cooldown_until = ?, dispatch_provider = ?, dispatch_message_id = ?, dispatch_status = ?, updated_at = ? WHERE id = ?"
+      ).bind(timestamp, cooldown21d, dispatchOutcome.provider, dispatchOutcome.messageId || null, dispatchOutcome.status, timestamp, id).run();
+    } catch (e) {
+      await db.prepare(
+        "UPDATE prospects SET status = 'sent', outcome = 'sent', last_contact_at = ?, cooldown_until = ?, updated_at = ? WHERE id = ?"
+      ).bind(timestamp, cooldown21d, timestamp, id).run();
+    }
+
+    try {
+      if (prospect.email) {
+        await db.prepare(`
+          INSERT INTO email_dispatch_logs (id, prospect_id, tenant_id, recipient_email, subject, provider, status, message_id, error_message, payload_preview, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).bind(
+          `disp_${crypto.randomUUID()}`,
+          id,
+          prospect.tenant_id || 'founder',
+          prospect.email,
+          prospect.draft_subject || 'Outreach',
+          dispatchOutcome.provider,
+          dispatchOutcome.status,
+          dispatchOutcome.messageId || null,
+          dispatchOutcome.error || null,
+          (prospect.draft_body || '').substring(0, 150),
+          timestamp
+        ).run();
+      }
+    } catch (e) {}
 
     // Auto-suppress email and domain for 21-day cooldown window
     if (prospect.email) {
@@ -1936,7 +2168,12 @@ async function handleDecision(
       } catch (e) {}
     }
 
-    return Response.json({ success: true, message: `Prospect ${id} marked as SENT with 21-day cooldown. Added to suppression.`, id }, { headers });
+    return Response.json({
+      success: true,
+      message: `Prospect ${id} marked as SENT. Dispatch: ${dispatchOutcome.status} (${dispatchOutcome.provider}). Added to suppression.`,
+      dispatch: dispatchOutcome,
+      id
+    }, { headers });
 
   } else if (action === "replied" || action === "positive") {
     await db.prepare(
@@ -2522,8 +2759,32 @@ async function handleEnrichJob(job: RadarJobMessage, env: Env): Promise<void> {
   const domain = prospect.website && isRealWebsite(prospect.website) ? getDomain(prospect.website) : null;
   let hasValidMx = false;
 
-  // Step b: DNS MX via Cloudflare DNS-over-HTTPS
+  // Free Technical Audits: DoH (DMARC/SPF/MX), PageSpeed / Mobile Latency, Open-Meteo Weather
+  let dmarcAudit: any = null;
+  let webAudit: any = null;
+  let weatherAudit: any = null;
+
   if (domain) {
+    try {
+      dmarcAudit = await auditDomainSecurityAndMx(domain);
+      if (dmarcAudit?.hasCustomMx) hasValidMx = true;
+    } catch (e) {}
+  }
+
+  if (prospect.website && isRealWebsite(prospect.website)) {
+    try {
+      webAudit = await auditWebsitePerformance(prospect.website, env.PAGESPEED_API_KEY);
+    } catch (e) {}
+  }
+
+  if (prospect.city) {
+    try {
+      weatherAudit = await auditCityWeatherEmergency(prospect.city);
+    } catch (e) {}
+  }
+
+  // Step b: DNS MX via Cloudflare DNS-over-HTTPS fallback
+  if (domain && !hasValidMx) {
     hasValidMx = await checkDomainMxRecords(domain);
   }
 
@@ -2572,7 +2833,16 @@ async function handleEnrichJob(job: RadarJobMessage, env: Env): Promise<void> {
     scraped_phone: websitePhone,
     scraped_email: emailCandidate,
     is_email_validated: isEmailValidated,
-    signals
+    signals,
+    technical_audits: {
+      pagespeed_score: webAudit?.mobileScore || null,
+      fcp_seconds: webAudit?.fcpSeconds || null,
+      latency_ms: webAudit?.latencyMs || null,
+      is_slow_mobile: webAudit?.isSlow || false,
+      has_dmarc: dmarcAudit?.hasDmarc ?? false,
+      has_spf: dmarcAudit?.hasSpf ?? false,
+      weather_alert: weatherAudit?.weatherSignal || null
+    }
   };
 
   await env.RADAR_DB.prepare(`
@@ -2586,6 +2856,19 @@ async function handleEnrichJob(job: RadarJobMessage, env: Env): Promise<void> {
     new Date().toISOString(),
     prospect_id
   ).run();
+
+  try {
+    await env.RADAR_DB.prepare(`
+      UPDATE prospects
+      SET pagespeed_score = ?, dns_has_dmarc = ?, weather_context = ?
+      WHERE id = ?
+    `).bind(
+      webAudit?.mobileScore || null,
+      dmarcAudit ? (dmarcAudit.hasDmarc ? 1 : 0) : null,
+      weatherAudit?.weatherSignal || null,
+      prospect_id
+    ).run();
+  } catch (e) {}
 
   await enqueueJob(env, {
     run_id: job.run_id,
@@ -5971,15 +6254,19 @@ export async function sendOrQueueOutreach(prospect: any, runId: string, env: Env
   }
 
   // 9. Provider Configuration Validation
-  if (!env.HUNTER_API_KEY || !env.HUNTER_SEQUENCE_ID) {
+  const hasResend = !!(env.RESEND_API_KEY && env.RESEND_API_KEY.trim());
+  const hasBrevo = !!(env.BREVO_API_KEY && env.BREVO_API_KEY.trim());
+  const hasHunter = !!(env.HUNTER_API_KEY && env.HUNTER_SEQUENCE_ID);
+
+  if (!hasResend && !hasBrevo && !hasHunter) {
     await releaseBudget(env.RADAR_DB, tenantId, 'outreach_units', 1);
-    const missingOutcome = !env.HUNTER_API_KEY ? 'missing_hunter_api_key' : 'missing_hunter_sequence_id';
+    const missingOutcome = 'missing_email_provider_keys';
     await env.RADAR_DB.prepare("UPDATE prospects SET status = 'provider_required', outcome = ?, updated_at = ? WHERE id = ?")
       .bind(missingOutcome, new Date().toISOString(), prospect.id).run();
     return { success: false, reason: `provider_required: ${missingOutcome}` };
   }
 
-  const sequenceId = env.HUNTER_SEQUENCE_ID.trim();
+  const sequenceId = hasHunter ? env.HUNTER_SEQUENCE_ID!.trim() : (hasResend ? 'resend_live' : 'brevo_live');
   const idempotencyKey = `idempotency:${tenantId}:${prospect.id}:${sequenceId}`;
 
   // 10. Idempotency Check
@@ -6013,7 +6300,51 @@ export async function sendOrQueueOutreach(prospect: any, runId: string, env: Env
     `).bind(idempotencyKey, prospect.id, tenantId, prospect.email.toLowerCase().trim(), timestamp, timestamp).run();
   } catch (e) {}
 
-  // 11. Provider Action: Real Hunter Email Sequence Recipient Flow (V2)
+  // 11. Provider Action: Resend / Brevo Direct Outbound Flow
+  if (hasResend || hasBrevo) {
+    const dispatch = await dispatchEmail({
+      to: prospect.email,
+      recipientName: prospect.name,
+      subject: prospect.draft_subject,
+      body: prospect.draft_body,
+      from: env.OUTBOUND_EMAIL_FROM,
+      prospectId: prospect.id,
+      resendApiKey: env.RESEND_API_KEY,
+      brevoApiKey: env.BREVO_API_KEY,
+      senderName: env.SENDER_NAME
+    });
+
+    if (dispatch.success && dispatch.status === 'dispatched') {
+      await incrementSenderSends(env.RADAR_DB);
+      await commitBudget(env.RADAR_DB, tenantId, 'outreach_units', 1);
+
+      try {
+        const todayStr = new Date().toISOString().split('T')[0];
+        await env.RADAR_DB.prepare("UPDATE daily_missions SET outreach_count = outreach_count + 1 WHERE day = ?").bind(todayStr).run();
+      } catch (e) {}
+
+      await env.RADAR_DB.prepare(`
+        UPDATE prospects
+        SET status = 'sent', outcome = 'sent', dispatch_provider = ?, dispatch_message_id = ?, dispatch_status = 'dispatched', last_contact_at = ?, updated_at = ?
+        WHERE id = ?
+      `).bind(dispatch.provider, dispatch.messageId, timestamp, timestamp, prospect.id).run();
+
+      await env.RADAR_DB.prepare(`
+        UPDATE outreach_idempotency
+        SET status = 'sent', provider_reference = ?, updated_at = ?
+        WHERE idempotency_key = ?
+      `).bind(dispatch.messageId, timestamp, idempotencyKey).run();
+
+      return { success: true, reason: `Dispatched via ${dispatch.provider}` };
+    } else {
+      await releaseBudget(env.RADAR_DB, tenantId, 'outreach_units', 1);
+      await env.RADAR_DB.prepare("UPDATE prospects SET status = 'hold', outcome = ?, updated_at = ? WHERE id = ?")
+        .bind(dispatch.error || 'dispatch_failed', timestamp, prospect.id).run();
+      return { success: false, reason: dispatch.error || 'dispatch_failed' };
+    }
+  }
+
+  // 12. Provider Action: Hunter Email Sequence Recipient Flow (V2)
   const nameParts = (prospect.name || "").trim().split(" ");
   const firstName = nameParts[0] || "Team";
   const lastName = nameParts.slice(1).join(" ") || "";
