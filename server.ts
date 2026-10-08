@@ -1331,6 +1331,118 @@ app.get(['/prospects', '/api/prospects'], (req, res) => {
   res.json(db.prospects);
 });
 
+app.get(['/opportunities', '/api/opportunities'], (req, res) => {
+  const db = loadDb();
+  const opps = (db.prospects || []).map((p: any) => {
+    let stratWhyNow = {
+      what_is_happening: `${p.trade} service demand spike`,
+      why_now: "Peak seasonal call volume and active emergency lines",
+      why_it_matters: "Unanswered inbound inquiries leak high-margin revenue",
+      recommended_action: "Trigger automated SMS recovery sequence",
+      potential_economic_outcome: "$3,400/mo estimated retained jobs",
+      distinctions: {
+        observed_facts: [`Registered phone: ${p.phone || 'Yes'}`, `Website active: ${p.website || 'Yes'}`],
+        inferences: ["Technicians engaged in field operations during calls"],
+        estimates: ["3-5 missed customer opportunities recovered monthly"]
+      }
+    };
+    try {
+      if (p.why_now_json && p.why_now_json !== '{}') {
+        stratWhyNow = JSON.parse(p.why_now_json);
+      }
+    } catch (e) {}
+
+    return {
+      id: `opp_${p.id}`,
+      prospect_id: p.id,
+      tenant_id: p.tenant_id || "founder",
+      title: `${p.name} — ${p.trade} (${p.city})`,
+      strategic_score: p.strategic_score || p.score || 55,
+      fit_score: p.fit_score || 20,
+      intent_score: p.intent_score || 15,
+      pain_score: p.pain_score || 20,
+      ability_to_pay_score: p.ability_to_pay_score || 15,
+      contactability_score: p.contactability_score || 15,
+      timing_score: p.timing_score || 10,
+      evidence_score: p.evidence_score || 10,
+      signal_freshness_score: p.signal_freshness_score || 100,
+      expected_value: p.expected_value || 3400,
+      decision_state: p.decision_state || p.status || "identified",
+      why_now_json: JSON.stringify(stratWhyNow),
+      priority_tier: (p.score || 0) >= 80 ? "high" : (p.score || 0) >= 50 ? "medium" : "low",
+      prospect_name: p.name,
+      prospect_city: p.city,
+      prospect_trade: p.trade,
+      prospect_website: p.website,
+      prospect_phone: p.phone,
+      prospect_email: p.email,
+      prospect_status: p.status,
+      draft_subject: p.draft_subject,
+      draft_body: p.draft_body,
+      created_at: p.created_at || new Date().toISOString()
+    };
+  });
+  res.json(opps);
+});
+
+app.get(['/missions', '/api/missions'], (req, res) => {
+  const db = loadDb();
+  const today = new Date().toISOString().split('T')[0];
+  const qualifiedCount = (db.prospects || []).filter((p: any) => (p.score || 0) >= 45 && p.email).length;
+  const outreachCount = (db.prospects || []).filter((p: any) => p.status === 'sent' || p.status === 'scheduled').length;
+  res.json({
+    missions: [
+      {
+        id: "m_founder_default",
+        tenant_id: "founder",
+        name: "Founder Customer Acquisition",
+        goal: "Find and sign contractor businesses for Bvelt",
+        status: "active",
+        markets_json: JSON.stringify(DEFAULT_FOUNDER_MISSION.geographies),
+        icp_json: JSON.stringify(DEFAULT_FOUNDER_MISSION.icp),
+        budget_json: JSON.stringify({ daily_units: 30 }),
+        target_qualified: 5,
+        target_outreach: 5,
+        created_at: today,
+        updated_at: today
+      }
+    ],
+    daily_missions: [
+      {
+        tenant_id: "founder",
+        day: today,
+        goal: "Qualified contractor opportunities with clear phone & revenue leak",
+        markets: DEFAULT_FOUNDER_MISSION.geographies.join("; "),
+        icp: DEFAULT_FOUNDER_MISSION.icp.description,
+        budget: "Conservative edge quota",
+        target_qualified: 5,
+        target_outreach: 5,
+        qualified_count: qualifiedCount,
+        outreach_count: outreachCount,
+        status: "active"
+      }
+    ]
+  });
+});
+
+app.get(['/api/tenants/config', '/tenants/config'], (req, res) => {
+  const db = loadDb();
+  res.json(db.tenant_config || []);
+});
+
+app.post(['/api/tenants/config', '/tenants/config'], (req, res) => {
+  const db = loadDb();
+  const body = req.body || {};
+  const tenantId = body.tenant_id || `tenant_${Date.now()}`;
+  if (!db.tenant_config) db.tenant_config = [];
+  const idx = db.tenant_config.findIndex((t: any) => t.tenant_id === tenantId);
+  const record = { ...body, tenant_id: tenantId, updated_at: new Date().toISOString() };
+  if (idx >= 0) db.tenant_config[idx] = record;
+  else db.tenant_config.push(record);
+  saveDb(db);
+  res.json({ success: true, tenant_id: tenantId });
+});
+
 app.get('/api/runs', (req, res) => {
   const db = loadDb();
   res.json(db.runs);

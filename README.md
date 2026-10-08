@@ -85,3 +85,66 @@ npx wrangler deploy
 * `POST /decision`: Registra una decisión (`{ id, action: "sent" | "discard" | "suppress" }`).
 * `POST /telegram-webhook`: Maneja los callbacks de botones interactivos de Telegram.
 * `POST /suppression`: Añade manualmente un dominio o email a la lista negra.
+
+
+## 🔎 Public Research Enrichment (October 2026)
+
+The Worker can optionally enrich prospects with public evidence without changing the Gemini/Groq cascade:
+
+- **Cloudflare DNS-over-HTTPS** for MX existence checks. The implementation uses the documented `cloudflare-dns.com/dns-query` endpoint.
+- **Internet Archive freshness**: a weak signal based on the latest available snapshot. It is never treated as proof that a live site is stale.
+- **Municipal permits**: verified Austin and Orlando public datasets plus configurable `PERMIT_SOURCES_JSON`. The Worker does not guess dataset IDs for other cities.
+- **Census ZIP housing age**: optional and only activated with `CENSUS_ENABLED=1`, `CENSUS_API_KEY`, and a discovered ZIP code. Census API queries require an API key as of September 2026.
+- **Tenant isolation**: Tenant mode requires an explicit tenant configuration and no longer invents fallback cities. Its target niches come from `subniches_json` or the configured trade-to-B2B target map.
+
+### Intentionally not implemented
+
+Some ideas from earlier strategy notes were rejected rather than blindly added:
+
+1. **Direct SMTP handshake from Workers** — not a reliable/appropriate way to prove mailbox deliverability in this runtime.
+2. **Indeed scraping/API assumption** — no verified public anonymous search API was found, so Radar does not depend on undocumented endpoints.
+3. **Workers AI as a Gemini/Groq fallback** — deliberately not added because the existing Gemini/Groq cascade is preserved exactly.
+4. **Vectorize as a mandatory dependency** — not forced into deployment because it would require provisioning an external Vectorize index. Current deterministic D1 dedup remains the fail-safe.
+
+## Radar 16 — Autonomous Opportunity Engine
+
+This build keeps the previous Radar 15 enhancements and adds:
+
+- Tenant-isolated daily missions (`tenant_id + day`) so tenants cannot overwrite each other's mission counters.
+- Tenant-isolated run idempotency via `runs.tenant_id`.
+- Full Tenant Mission compilation from `industry`, `niche`, `subniches`, `services`, `service_areas`, `countries`, `regions`, `cities`, `languages`, ICP, minimum score, outreach limit, allowed markets, campaign goal and messaging angle.
+- Founder mission configuration for ICP, services, markets, campaign goal and messaging angle through existing dashboard variables.
+- Qualification no longer requires email; Tenant opportunities can survive until a usable outreach channel is found.
+- Outreach still requires a usable channel and keeps the existing Trust-Stack/suppression/cooldown protections.
+- Strategic decision dimensions persisted per prospect: fit, intent, pain, ability to pay, contactability, timing, evidence, decision state, why-now evidence, expected value and signal freshness.
+- Founder auto-outreach now requires the existing elite threshold PLUS the persisted `auto_candidate` decision and fresh signal evidence.
+- Gemini/Groq generation cascade was not changed.
+- Existing migrations 0001–0019 were not modified or renamed; new changes are in 0020 and 0021.
+
+## Fusion build: Autonomous + Intelligence
+
+This build keeps the complete Autonomous architecture (migrations 0001–0021, Cloudflare Queue, Budget Governor, Trust-Stack gates, sender/email verification, learning, evidence/strategic scoring, Daily Missions, research/weather signals, multi-tenant missions and auto-outreach controls) and adds migration **0022** for an Opportunity Intelligence layer.
+
+### Opportunity Intelligence
+
+After a prospect is enriched and scored, Radar now maintains:
+
+- Mission → Opportunity → Signal → Action → Outcome relationships.
+- Opportunity priority, expected value and confidence.
+- `why_now` and `next_action` derived from stored evidence.
+- Fresh signal history for contactability, fit, website/pain signals and market evidence.
+- A structured graph payload linking business, market and vertical.
+- Outcome events feeding the existing learning engine.
+- Mobile API endpoints: `/api/opportunities`, `/api/missions`, `/api/learning`, `/api/config`, `/api/opportunity-event`.
+
+### Targeting safety
+
+Founder targets can be persisted in D1 through `/api/config`; these targets take precedence over legacy `FOUNDING_CITIES` / `FOUNDING_TRADES`. No production fallback invents a city or trade when configuration is empty. The legacy environment variables remain supported for compatibility.
+
+### Database upgrade
+
+Apply migrations **0001 through 0022** to the existing `bvelt-radar-db`. Never rename or modify historical migrations that have already been applied. Migration 0022 is additive.
+
+### Validation
+
+The Worker and React source pass TypeScript transpilation checks. A complete dependency-backed `npm run build` must still be run in an environment where the package dependencies can be installed; this environment previously could not complete `npm install` because of network/time limits.

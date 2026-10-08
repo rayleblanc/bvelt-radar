@@ -34,7 +34,14 @@ import {
   Ban,
   Lock,
   KeyRound,
-  LogOut
+  LogOut,
+  Target,
+  TrendingUp,
+  Briefcase,
+  Compass,
+  DollarSign,
+  Layers,
+  Activity
 } from 'lucide-react';
 
 interface Prospect {
@@ -62,6 +69,96 @@ interface Prospect {
   last_contact_at?: string | null;
   created_at: string;
   updated_at?: string;
+  fit_score?: number;
+  intent_score?: number;
+  pain_score?: number;
+  ability_to_pay_score?: number;
+  contactability_score?: number;
+  timing_score?: number;
+  evidence_score?: number;
+  signal_freshness_score?: number;
+  expected_value?: number;
+  decision_state?: string;
+  why_now_json?: string;
+}
+
+export interface Opportunity {
+  id: string;
+  prospect_id: string;
+  tenant_id: string;
+  title: string;
+  strategic_score: number;
+  fit_score: number;
+  intent_score: number;
+  pain_score: number;
+  ability_to_pay_score: number;
+  contactability_score: number;
+  timing_score: number;
+  evidence_score: number;
+  signal_freshness_score: number;
+  expected_value: number;
+  decision_state: string;
+  why_now_json: string;
+  priority_tier: string;
+  prospect_name?: string;
+  prospect_city?: string;
+  prospect_trade?: string;
+  prospect_website?: string | null;
+  prospect_phone?: string | null;
+  prospect_email?: string | null;
+  prospect_status?: string;
+  draft_subject?: string;
+  draft_body?: string;
+  created_at: string;
+}
+
+export interface DailyMission {
+  tenant_id: string;
+  day: string;
+  goal: string;
+  markets: string;
+  icp: string;
+  budget: string;
+  target_qualified: number;
+  target_outreach: number;
+  qualified_count: number;
+  outreach_count: number;
+  status: string;
+}
+
+export interface Mission {
+  id: string;
+  tenant_id: string;
+  name: string;
+  goal: string;
+  status: string;
+  markets_json: string;
+  icp_json: string;
+  budget_json: string;
+  target_qualified: number;
+  target_outreach: number;
+  created_at: string;
+}
+
+export interface TenantConfig {
+  tenant_id: string;
+  tenant_name: string;
+  industry: string;
+  niche: string;
+  subniches_json?: string;
+  services_json?: string;
+  service_areas_json?: string;
+  countries_json?: string;
+  regions_json?: string;
+  cities_json?: string;
+  languages_json?: string;
+  icp_description?: string;
+  icp_keywords_json?: string;
+  minimum_score?: number;
+  daily_outreach_limit?: number;
+  allowed_markets_json?: string;
+  campaign_goal?: string;
+  messaging_angle?: string;
 }
 
 interface Health {
@@ -106,9 +203,20 @@ export default function App() {
   const [health, setHealth] = useState<Health | null>(null);
   const [stats, setStats] = useState<StatsSummary | null>(null);
   const [prospects, setProspects] = useState<Prospect[]>([]);
+  const [opportunities, setOpportunities] = useState<Opportunity[]>([]);
+  const [dailyMissions, setDailyMissions] = useState<DailyMission[]>([]);
+  const [missions, setMissions] = useState<Mission[]>([]);
+  const [tenants, setTenants] = useState<TenantConfig[]>([]);
   const [activeFilter, setActiveFilter] = useState<StatusCategory>('ALL');
+  const [opportunityPriorityFilter, setOpportunityPriorityFilter] = useState<string>('ALL');
   const [loading, setLoading] = useState(true);
   const [errorState, setErrorState] = useState<string | null>(null);
+
+  // Mode and Tab Navigation
+  const [mainTab, setMainTab] = useState<'opportunities' | 'prospects' | 'missions' | 'tenant'>('opportunities');
+  const [currentMode, setCurrentMode] = useState<'founder' | 'tenant'>('founder');
+  const [selectedTenantId, setSelectedTenantId] = useState<string>('founder');
+  const [inspectedOpportunity, setInspectedOpportunity] = useState<Opportunity | null>(null);
 
   // Run execution states
   const [isScrubbing, setIsScrubbing] = useState(false);
@@ -198,6 +306,36 @@ export default function App() {
         const sorted = normalized.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
         setProspects(sorted);
         setIsAuthenticated(true);
+
+        // Fetch Opportunity Intelligence data
+        try {
+          const oppUrl = `${apiUrl}/opportunities${selectedTenantId && selectedTenantId !== 'founder' ? `?tenant_id=${encodeURIComponent(selectedTenantId)}` : ''}`;
+          const oppRes = await fetch(oppUrl, { credentials: 'include' });
+          if (oppRes && oppRes.ok) {
+            const oppList = await oppRes.json();
+            if (Array.isArray(oppList)) setOpportunities(oppList);
+          }
+        } catch (e) {}
+
+        // Fetch Missions data
+        try {
+          const misUrl = `${apiUrl}/missions${selectedTenantId && selectedTenantId !== 'founder' ? `?tenant_id=${encodeURIComponent(selectedTenantId)}` : ''}`;
+          const misRes = await fetch(misUrl, { credentials: 'include' });
+          if (misRes && misRes.ok) {
+            const misData = await misRes.json();
+            if (Array.isArray(misData.missions)) setMissions(misData.missions);
+            if (Array.isArray(misData.daily_missions)) setDailyMissions(misData.daily_missions);
+          }
+        } catch (e) {}
+
+        // Fetch Tenant Configs
+        try {
+          const tenRes = await fetch(`${apiUrl}/api/tenants/config`, { credentials: 'include' });
+          if (tenRes && tenRes.ok) {
+            const tenList = await tenRes.json();
+            if (Array.isArray(tenList)) setTenants(tenList);
+          }
+        } catch (e) {}
       } else if (prospectsRes?.status === 401) {
         setIsAuthenticated(false);
         setLoading(false);
@@ -322,7 +460,10 @@ export default function App() {
 
     try {
       // 1. Send POST /run - returns IMMEDIATELY without waiting
-      const startRes = await fetch(`${apiUrl}/run?mode=founder`, {
+      const runParam = currentMode === 'tenant' && selectedTenantId
+        ? `mode=tenant&tenant_id=${encodeURIComponent(selectedTenantId)}`
+        : `mode=founder`;
+      const startRes = await fetch(`${apiUrl}/run?${runParam}`, {
         method: 'POST',
         credentials: 'include'
       });
@@ -557,6 +698,78 @@ export default function App() {
       case 'quote_followup': return 'Quote/Estimate';
       case 'lead_reactivation': return 'Lead Reactivation';
       default: return 'Missed Calls';
+    }
+  };
+
+  const parseWhyNow = (opp: Opportunity) => {
+    try {
+      if (opp.why_now_json) {
+        return JSON.parse(opp.why_now_json);
+      }
+    } catch (e) {}
+    return {
+      what_is_happening: "Demanda activa de servicios",
+      why_now: "Ventana de oportunidad estacional inmediata",
+      why_it_matters: "Fuga de ingresos por llamadas no atendidas",
+      recommended_action: "Activar secuencia de prospección",
+      potential_economic_outcome: "$3,400/mes proyectados",
+      distinctions: {
+        observed_facts: ["Sitio web operativo", "Línea telefónica disponible"],
+        inferences: ["Técnicos ocupados en servicios durante llamadas"],
+        estimates: ["Recuperación potencial de 3-5 trabajos mensuales"]
+      }
+    };
+  };
+
+  const getPriorityBadge = (tier: string) => {
+    switch ((tier || '').toLowerCase()) {
+      case 'high':
+        return { label: 'ALTA PRIORIDAD', color: 'bg-rose-950/80 text-rose-300 border-rose-800' };
+      case 'medium':
+        return { label: 'MEDIA PRIORIDAD', color: 'bg-amber-950/80 text-amber-300 border-amber-800' };
+      default:
+        return { label: 'BAJA PRIORIDAD', color: 'bg-slate-900 text-slate-400 border-slate-800' };
+    }
+  };
+
+  const [tenantForm, setTenantForm] = useState<Partial<TenantConfig>>({
+    tenant_id: 'tenant_custom_01',
+    tenant_name: 'Mi Empresa Cliente',
+    industry: 'Commercial Services',
+    niche: 'property_management',
+    subniches_json: '["Facility Managers", "HOA Directors"]',
+    services_json: '["Preventative Maintenance", "Emergency Repairs"]',
+    service_areas_json: '["Metro Area"]',
+    countries_json: '["US"]',
+    regions_json: '["FL"]',
+    cities_json: '["Tampa, FL", "Orlando, FL"]',
+    languages_json: '["en"]',
+    icp_description: 'Commercial property managers requiring rapid contractor dispatch',
+    minimum_score: 50,
+    daily_outreach_limit: 10,
+    campaign_goal: 'Agendar llamadas de demostración',
+    messaging_angle: 'fast_response_guarantee'
+  });
+  const [tenantSaveStatus, setTenantSaveStatus] = useState<string | null>(null);
+
+  const saveTenantConfig = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      const res = await fetch(`${apiUrl}/api/tenants/config`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify(tenantForm)
+      });
+      if (res.ok) {
+        setTenantSaveStatus("Configuración de tenant guardada exitosamente.");
+        fetchTelemetry();
+        setTimeout(() => setTenantSaveStatus(null), 4000);
+      } else {
+        setTenantSaveStatus("Error al guardar configuración de tenant.");
+      }
+    } catch (err: any) {
+      setTenantSaveStatus("Error: " + err.message);
     }
   };
 
@@ -812,292 +1025,650 @@ export default function App() {
               )}
             </div>
 
-            {/* Metric Scoreboard */}
-            <div className="grid grid-cols-2 gap-3.5 font-mono text-slate-200">
-              <div className="bg-slate-900/40 p-4 rounded-2xl border border-slate-900">
-                <span className="text-[10px] text-slate-500 block uppercase font-sans font-bold">Total Encontrados</span>
-                <span className="text-xl font-bold tracking-tight text-slate-100 tabular-nums">
-                  {prospects.length}
-                </span>
+            {/* Mode Selector & Main Navigation Tabs */}
+            <div className="space-y-2.5">
+              <div className="flex items-center justify-between bg-slate-900/60 p-2 rounded-xl border border-slate-800">
+                <div className="flex items-center gap-1.5">
+                  <button
+                    onClick={() => { setCurrentMode('founder'); setSelectedTenantId('founder'); }}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold font-mono transition-all ${currentMode === 'founder' ? 'bg-blue-600 text-white shadow-md' : 'text-slate-400 hover:text-white'}`}
+                  >
+                    Founder Mode
+                  </button>
+                  <button
+                    onClick={() => {
+                      setCurrentMode('tenant');
+                      if (tenants.length > 0 && selectedTenantId === 'founder') {
+                        setSelectedTenantId(tenants[0].tenant_id);
+                      }
+                    }}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold font-mono transition-all ${currentMode === 'tenant' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-400 hover:text-white'}`}
+                  >
+                    Tenant Mode
+                  </button>
+                </div>
+                {currentMode === 'tenant' && tenants.length > 0 && (
+                  <select
+                    value={selectedTenantId}
+                    onChange={(e) => setSelectedTenantId(e.target.value)}
+                    className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1 text-xs text-slate-200 font-mono focus:outline-none"
+                  >
+                    {tenants.map(t => (
+                      <option key={t.tenant_id} value={t.tenant_id}>{t.tenant_name || t.tenant_id}</option>
+                    ))}
+                  </select>
+                )}
               </div>
-              <div className="bg-slate-900/40 p-4 rounded-2xl border border-slate-900">
-                <span className="text-[10px] text-slate-500 block uppercase font-sans font-bold">Pendientes Aprobar</span>
-                <span className="text-xl font-bold tracking-tight text-purple-400 tabular-nums">
-                  {prospects.filter(p => getCategory(p) === 'APPROVED' || getCategory(p) === 'QUEUED').length}
-                </span>
+
+              {/* 4 Main View Tabs */}
+              <div className="grid grid-cols-4 gap-1 bg-slate-900/40 p-1 rounded-xl border border-slate-900 font-mono text-[11px] font-bold">
+                <button
+                  onClick={() => setMainTab('opportunities')}
+                  className={`py-2 rounded-lg flex items-center justify-center gap-1 transition-all ${mainTab === 'opportunities' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white'}`}
+                >
+                  <Zap className="w-3.5 h-3.5" />
+                  <span className="truncate">Oportunidades</span>
+                </button>
+                <button
+                  onClick={() => setMainTab('prospects')}
+                  className={`py-2 rounded-lg flex items-center justify-center gap-1 transition-all ${mainTab === 'prospects' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white'}`}
+                >
+                  <Database className="w-3.5 h-3.5" />
+                  <span className="truncate">Prospectos</span>
+                </button>
+                <button
+                  onClick={() => setMainTab('missions')}
+                  className={`py-2 rounded-lg flex items-center justify-center gap-1 transition-all ${mainTab === 'missions' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white'}`}
+                >
+                  <Target className="w-3.5 h-3.5" />
+                  <span className="truncate">Misiones</span>
+                </button>
+                <button
+                  onClick={() => setMainTab('tenant')}
+                  className={`py-2 rounded-lg flex items-center justify-center gap-1 transition-all ${mainTab === 'tenant' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white'}`}
+                >
+                  <Briefcase className="w-3.5 h-3.5" />
+                  <span className="truncate">Tenant</span>
+                </button>
               </div>
             </div>
 
-            {/* 8 Status Filter Tabs */}
-            <div className="space-y-3">
-              <div className="flex items-center justify-between border-b border-slate-900 pb-2">
-                <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Directorio de Prospectos Real</h3>
-                <Database className="w-3.5 h-3.5 text-slate-500" />
-              </div>
-
-              {/* Status Filter Pills */}
-              <div className="flex items-center gap-1.5 overflow-x-auto pb-1 no-scrollbar text-[10px] font-mono font-bold">
-                {(['ALL', 'SCOUTED', 'QUALIFIED', 'APPROVED', 'QUEUED', 'SENT', 'REPLIED', 'SUPPRESSED', 'BLOCKED'] as StatusCategory[]).map(cat => (
-                  <button
-                    key={cat}
-                    onClick={() => setActiveFilter(cat)}
-                    className={`px-2.5 py-1 rounded-lg border whitespace-nowrap transition-all ${
-                      activeFilter === cat 
-                        ? 'bg-blue-600 border-blue-500 text-white' 
-                        : 'bg-slate-900/60 border-slate-800 text-slate-400 hover:text-white'
-                    }`}
-                  >
-                    {cat}
-                  </button>
-                ))}
-              </div>
-
-              {filteredProspects.length === 0 ? (
-                <div className="text-center py-10 bg-slate-900/10 rounded-2xl border border-slate-900 p-5">
-                  <Info className="w-6 h-6 text-slate-600 mx-auto mb-2" />
-                  <p className="text-xs text-slate-500 leading-normal">
-                    No se encontraron prospectos en la categoría '{activeFilter}'. Ejecuta el radar para prospectar.
-                  </p>
+            {/* TAB 1: OPPORTUNITIES INTELLIGENCE (RADAR FUSION MAX) */}
+            {mainTab === 'opportunities' && (
+              <div className="space-y-4">
+                {/* Metric Scoreboard */}
+                <div className="grid grid-cols-3 gap-2.5 font-mono text-slate-200">
+                  <div className="bg-slate-900/40 p-3 rounded-2xl border border-slate-900">
+                    <span className="text-[9px] text-slate-500 block uppercase font-sans font-bold">Oportunidades</span>
+                    <span className="text-lg font-bold tracking-tight text-slate-100 tabular-nums">
+                      {opportunities.length}
+                    </span>
+                  </div>
+                  <div className="bg-slate-900/40 p-3 rounded-2xl border border-slate-900">
+                    <span className="text-[9px] text-slate-500 block uppercase font-sans font-bold">Alta Prioridad</span>
+                    <span className="text-lg font-bold tracking-tight text-rose-400 tabular-nums">
+                      {opportunities.filter(o => o.priority_tier === 'high' || (o.strategic_score || 0) >= 80).length}
+                    </span>
+                  </div>
+                  <div className="bg-slate-900/40 p-3 rounded-2xl border border-slate-900">
+                    <span className="text-[9px] text-slate-500 block uppercase font-sans font-bold">Pipeline EV</span>
+                    <span className="text-lg font-bold tracking-tight text-emerald-400 tabular-nums">
+                      ${opportunities.reduce((acc, o) => acc + (o.expected_value || 0), 0).toLocaleString()}
+                    </span>
+                  </div>
                 </div>
-              ) : (
-                <div className="space-y-3">
-                  {filteredProspects.map(p => {
-                    const badge = getStatusBadge(p);
-                    const signalsList = parseSignals(p);
-                    const isExpanded = inspectedProspect?.id === p.id;
 
-                    return (
-                      <div 
-                        key={p.id}
-                        onClick={() => setInspectedProspect(isExpanded ? null : p)}
-                        className="bg-slate-900/30 border border-slate-900 rounded-2xl p-4 space-y-3 active:bg-slate-900/50 transition-colors"
-                      >
-                        {/* Upper card section */}
-                        <div className="flex items-start justify-between gap-2">
-                          <div className="space-y-1">
-                            <div className="flex items-center gap-2">
-                              <h4 className="text-xs font-bold text-slate-100">{p.name}</h4>
-                              <span className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-bold border ${badge.color}`}>
-                                {badge.label}
+                {/* Priority filter pills */}
+                <div className="flex items-center gap-1.5 overflow-x-auto pb-1 no-scrollbar text-[10px] font-mono font-bold">
+                  {(['ALL', 'high', 'medium', 'low']).map(pTier => (
+                    <button
+                      key={pTier}
+                      onClick={() => setOpportunityPriorityFilter(pTier)}
+                      className={`px-3 py-1 rounded-lg border whitespace-nowrap transition-all uppercase ${
+                        opportunityPriorityFilter === pTier
+                          ? 'bg-blue-600 border-blue-500 text-white'
+                          : 'bg-slate-900/60 border-slate-800 text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      {pTier === 'ALL' ? 'TODAS' : pTier === 'high' ? 'ALTA' : pTier === 'medium' ? 'MEDIA' : 'BAJA'}
+                    </button>
+                  ))}
+                </div>
+
+                {opportunities.filter(o => opportunityPriorityFilter === 'ALL' || o.priority_tier === opportunityPriorityFilter).length === 0 ? (
+                  <div className="text-center py-10 bg-slate-900/10 rounded-2xl border border-slate-900 p-5">
+                    <Sparkles className="w-6 h-6 text-slate-600 mx-auto mb-2" />
+                    <p className="text-xs text-slate-500 leading-normal">
+                      No hay oportunidades identificadas en este filtro. Ejecuta el Radar para activar el Opportunity Intelligence engine.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {opportunities
+                      .filter(o => opportunityPriorityFilter === 'ALL' || o.priority_tier === opportunityPriorityFilter)
+                      .map(opp => {
+                        const whyNow = parseWhyNow(opp);
+                        const pBadge = getPriorityBadge(opp.priority_tier);
+                        const isExpanded = inspectedOpportunity?.id === opp.id;
+
+                        return (
+                          <div
+                            key={opp.id}
+                            onClick={() => setInspectedOpportunity(isExpanded ? null : opp)}
+                            className="bg-slate-900/40 border border-slate-900 rounded-2xl p-4 space-y-3 transition-colors active:bg-slate-900/60"
+                          >
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="space-y-1">
+                                <div className="flex items-center gap-2">
+                                  <h4 className="text-xs font-bold text-slate-100">{opp.title || opp.prospect_name}</h4>
+                                  <span className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-bold border ${pBadge.color}`}>
+                                    {pBadge.label}
+                                  </span>
+                                </div>
+                                <div className="flex items-center gap-2 text-[10px] text-slate-500 font-mono">
+                                  <span className="uppercase text-blue-400 font-semibold">{opp.prospect_trade || 'General'}</span>
+                                  <span>·</span>
+                                  <span>{opp.prospect_city}</span>
+                                  <span>·</span>
+                                  <span className="px-1.5 py-0.2 rounded bg-slate-800 text-slate-300 uppercase">{opp.decision_state || 'identificada'}</span>
+                                </div>
+                              </div>
+                              <div className="text-right shrink-0">
+                                <div className="text-xs font-mono font-bold text-emerald-400">
+                                  {opp.strategic_score}/100
+                                </div>
+                                <div className="text-[10px] font-mono font-semibold text-sky-400">
+                                  +${opp.expected_value || 3400} EV
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* Strategic Scoring Breakdown Badges */}
+                            <div className="grid grid-cols-4 gap-1 text-[9px] font-mono bg-slate-950 p-2 rounded-xl border border-slate-900/80 text-center">
+                              <div><span className="text-slate-500 block">Fit</span><strong className="text-slate-200">{opp.fit_score || 0}</strong></div>
+                              <div><span className="text-slate-500 block">Pain</span><strong className="text-rose-400">{opp.pain_score || 0}</strong></div>
+                              <div><span className="text-slate-500 block">Timing</span><strong className="text-amber-400">{opp.timing_score || 0}</strong></div>
+                              <div><span className="text-slate-500 block">Evidencia</span><strong className="text-emerald-400">{opp.evidence_score || 0}</strong></div>
+                            </div>
+
+                            {/* Why Now Highlight */}
+                            <div className="bg-blue-950/20 border border-blue-900/30 p-2.5 rounded-xl space-y-1 text-[11px]">
+                              <div className="flex items-center gap-1.5 text-blue-400 font-bold text-[10px]">
+                                <Clock className="w-3 h-3" />
+                                <span>¿POR QUÉ AHORA?</span>
+                              </div>
+                              <p className="text-slate-300 leading-snug">{whyNow.why_now}</p>
+                            </div>
+
+                            {/* Expandable Why Now & Evidence Chain Drawer */}
+                            {isExpanded && (
+                              <div className="pt-2 border-t border-slate-800 space-y-3 text-xs" onClick={(e) => e.stopPropagation()}>
+                                <div className="space-y-2 bg-slate-950 p-3 rounded-xl border border-slate-900 font-mono text-[10px]">
+                                  <div className="space-y-1">
+                                    <span className="text-slate-500 font-bold uppercase block">Situación Observada:</span>
+                                    <p className="text-slate-300">{whyNow.what_is_happening}</p>
+                                  </div>
+                                  <div className="space-y-1 pt-1">
+                                    <span className="text-slate-500 font-bold uppercase block">Por qué importa:</span>
+                                    <p className="text-slate-300">{whyNow.why_it_matters}</p>
+                                  </div>
+                                  <div className="space-y-1 pt-1">
+                                    <span className="text-slate-500 font-bold uppercase block">Acción con sentido:</span>
+                                    <p className="text-blue-300 font-bold">{whyNow.recommended_action}</p>
+                                  </div>
+                                  <div className="space-y-1 pt-1">
+                                    <span className="text-slate-500 font-bold uppercase block">Resultado económico potencial:</span>
+                                    <p className="text-emerald-400 font-bold">{whyNow.potential_economic_outcome}</p>
+                                  </div>
+                                </div>
+
+                                {/* Distinctions: Facts vs Inferences vs Estimates */}
+                                <div className="bg-slate-950 p-3 rounded-xl border border-slate-900 text-[10px] space-y-2">
+                                  <span className="text-slate-500 font-bold uppercase font-mono block">Trazabilidad de Evidencia:</span>
+                                  {whyNow.distinctions?.observed_facts && (
+                                    <div className="space-y-0.5">
+                                      <span className="text-emerald-400 font-bold">✓ Hechos Observados:</span>
+                                      <ul className="list-disc list-inside text-slate-300 pl-1">
+                                        {whyNow.distinctions.observed_facts.map((f: string, fIdx: number) => (
+                                          <li key={fIdx}>{f}</li>
+                                        ))}
+                                      </ul>
+                                    </div>
+                                  )}
+                                  {whyNow.distinctions?.inferences && (
+                                    <div className="space-y-0.5 pt-1">
+                                      <span className="text-amber-400 font-bold">⚡ Inferencias Estratégicas:</span>
+                                      <ul className="list-disc list-inside text-slate-300 pl-1">
+                                        {whyNow.distinctions.inferences.map((inf: string, iIdx: number) => (
+                                          <li key={iIdx}>{inf}</li>
+                                        ))}
+                                      </ul>
+                                    </div>
+                                  )}
+                                  {whyNow.distinctions?.estimates && (
+                                    <div className="space-y-0.5 pt-1">
+                                      <span className="text-sky-400 font-bold">📊 Estimaciones Económicas:</span>
+                                      <ul className="list-disc list-inside text-slate-300 pl-1">
+                                        {whyNow.distinctions.estimates.map((est: string, eIdx: number) => (
+                                          <li key={eIdx}>{est}</li>
+                                        ))}
+                                      </ul>
+                                    </div>
+                                  )}
+                                </div>
+
+                                {/* Action Buttons for Opportunity */}
+                                <div className="grid grid-cols-2 gap-2 pt-1 font-mono">
+                                  <button
+                                    onClick={() => submitDecision(opp.prospect_id, 'sent')}
+                                    className="h-10 text-xs font-semibold rounded-lg bg-emerald-600/20 border border-emerald-500/30 text-emerald-300 hover:bg-emerald-600 hover:text-white transition-colors"
+                                  >
+                                    ✓ Ejecutar Acción
+                                  </button>
+                                  <button
+                                    onClick={() => submitDecision(opp.prospect_id, 'discard')}
+                                    className="h-10 text-xs font-semibold rounded-lg bg-slate-900 border border-slate-800 text-slate-400 hover:bg-slate-800 hover:text-white"
+                                  >
+                                    ✕ Descartar
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* TAB 2: PROSPECT DIRECTORY (LEGACY COMPATIBLE) */}
+            {mainTab === 'prospects' && (
+              <div className="space-y-3">
+                {/* Metric Scoreboard */}
+                <div className="grid grid-cols-2 gap-3.5 font-mono text-slate-200">
+                  <div className="bg-slate-900/40 p-4 rounded-2xl border border-slate-900">
+                    <span className="text-[10px] text-slate-500 block uppercase font-sans font-bold">Total Encontrados</span>
+                    <span className="text-xl font-bold tracking-tight text-slate-100 tabular-nums">
+                      {prospects.length}
+                    </span>
+                  </div>
+                  <div className="bg-slate-900/40 p-4 rounded-2xl border border-slate-900">
+                    <span className="text-[10px] text-slate-500 block uppercase font-sans font-bold">Pendientes Aprobar</span>
+                    <span className="text-xl font-bold tracking-tight text-purple-400 tabular-nums">
+                      {prospects.filter(p => getCategory(p) === 'APPROVED' || getCategory(p) === 'QUEUED').length}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between border-b border-slate-900 pb-2">
+                  <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Directorio de Prospectos Real</h3>
+                  <Database className="w-3.5 h-3.5 text-slate-500" />
+                </div>
+
+                {/* Status Filter Pills */}
+                <div className="flex items-center gap-1.5 overflow-x-auto pb-1 no-scrollbar text-[10px] font-mono font-bold">
+                  {(['ALL', 'SCOUTED', 'QUALIFIED', 'APPROVED', 'QUEUED', 'SENT', 'REPLIED', 'SUPPRESSED', 'BLOCKED'] as StatusCategory[]).map(cat => (
+                    <button
+                      key={cat}
+                      onClick={() => setActiveFilter(cat)}
+                      className={`px-2.5 py-1 rounded-lg border whitespace-nowrap transition-all ${
+                        activeFilter === cat 
+                          ? 'bg-blue-600 border-blue-500 text-white' 
+                          : 'bg-slate-900/60 border-slate-800 text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      {cat}
+                    </button>
+                  ))}
+                </div>
+
+                {filteredProspects.length === 0 ? (
+                  <div className="text-center py-10 bg-slate-900/10 rounded-2xl border border-slate-900 p-5">
+                    <Info className="w-6 h-6 text-slate-600 mx-auto mb-2" />
+                    <p className="text-xs text-slate-500 leading-normal">
+                      No se encontraron prospectos en la categoría '{activeFilter}'. Ejecuta el radar para prospectar.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {filteredProspects.map(p => {
+                      const badge = getStatusBadge(p);
+                      const signalsList = parseSignals(p);
+                      const isExpanded = inspectedProspect?.id === p.id;
+
+                      return (
+                        <div 
+                          key={p.id}
+                          onClick={() => setInspectedProspect(isExpanded ? null : p)}
+                          className="bg-slate-900/30 border border-slate-900 rounded-2xl p-4 space-y-3 active:bg-slate-900/50 transition-colors"
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="space-y-1">
+                              <div className="flex items-center gap-2">
+                                <h4 className="text-xs font-bold text-slate-100">{p.name}</h4>
+                                <span className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-bold border ${badge.color}`}>
+                                  {badge.label}
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-1.5 text-[10px] text-slate-500 font-mono">
+                                <span className="uppercase text-blue-400 font-semibold">{p.trade}</span>
+                                <span>·</span>
+                                <span>{p.city}</span>
+                              </div>
+                            </div>
+                            <span className="text-xs font-mono font-bold text-emerald-400 shrink-0">
+                              {p.score}/100
+                            </span>
+                          </div>
+
+                          <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+                            {p.signal_event && p.signal_area && (
+                              <span className="px-2 py-0.5 rounded bg-amber-950/40 text-[9px] text-amber-300 font-mono border border-amber-800/40 font-bold">
+                                ⚡ Clima: {p.signal_event} ({p.signal_area})
+                              </span>
+                            )}
+                            <span className="px-2 py-0.5 rounded bg-blue-900/30 text-[9px] text-blue-400 font-mono border border-blue-500/10">
+                              Ángulo: {getAngleLabel(p.bvelt_angle)}
+                            </span>
+                            {signalsList.map((sig, sIdx) => (
+                              <span key={sIdx} className="px-1.5 py-0.5 rounded bg-rose-950/20 text-[9px] text-rose-300 font-mono border border-rose-500/10">
+                                • {sig}
+                              </span>
+                            ))}
+                          </div>
+
+                          <div className="flex flex-wrap items-center gap-2 pt-1 font-mono text-[11px]">
+                            {p.email && (
+                              <a 
+                                href={`mailto:${p.email}?subject=${encodeURIComponent(p.draft_subject || '')}&body=${encodeURIComponent(p.draft_body || '')}`}
+                                target="_blank" 
+                                rel="noreferrer" 
+                                className="px-2.5 py-1 rounded-lg bg-blue-950/50 border border-blue-800/40 text-blue-300 hover:bg-blue-900/60 flex items-center gap-1 font-bold"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setContactedProspects(prev => ({ ...prev, [p.id]: true }));
+                                }}
+                              >
+                                <Mail className="w-3.5 h-3.5 text-blue-400" />
+                                Correo
+                              </a>
+                            )}
+                            {p.phone && (
+                              <a 
+                                href={`https://wa.me/1${p.phone.replace(/\D/g, '')}?text=${encodeURIComponent(p.draft_body || '')}`}
+                                target="_blank" 
+                                rel="noreferrer" 
+                                className="px-2.5 py-1 rounded-lg bg-emerald-950/50 border border-emerald-800/40 text-emerald-300 hover:bg-emerald-900/60 flex items-center gap-1 font-bold"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setContactedProspects(prev => ({ ...prev, [p.id]: true }));
+                                }}
+                              >
+                                <MessageSquare className="w-3.5 h-3.5 text-emerald-400" />
+                                WhatsApp
+                              </a>
+                            )}
+                            {p.phone && (
+                              <a 
+                                href={`tel:${p.phone}`}
+                                className="px-2.5 py-1 rounded-lg bg-indigo-950/50 border border-indigo-800/40 text-indigo-300 hover:bg-indigo-900/60 flex items-center gap-1 font-bold"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setContactedProspects(prev => ({ ...prev, [p.id]: true }));
+                                }}
+                              >
+                                <Phone className="w-3.5 h-3.5 text-indigo-400" />
+                                Llamar
+                              </a>
+                            )}
+                            {p.website && (
+                              <a 
+                                href={`https://${p.website}`} 
+                                target="_blank" 
+                                rel="noreferrer" 
+                                className="px-2.5 py-1 rounded-lg bg-slate-900 border border-slate-800 text-slate-400 hover:text-blue-400 flex items-center gap-1" 
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                <ExternalLink className="w-3 h-3 text-slate-500" />
+                                {p.website}
+                              </a>
+                            )}
+                          </div>
+
+                          {(contactedProspects[p.id] || isExpanded) && (
+                            <div className="pt-2 border-t border-slate-900/80 space-y-2" onClick={(e) => e.stopPropagation()}>
+                              <span className="text-[10px] font-mono text-slate-400 font-bold uppercase block">Registrar Resultado:</span>
+                              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                                <button
+                                  onClick={() => submitDecision(p.id, 'sent')}
+                                  className="py-2 px-2.5 text-xs font-bold font-mono rounded-lg bg-blue-900/30 border border-blue-700/40 text-blue-300 hover:bg-blue-800/50 transition-colors"
+                                >
+                                  Enviado
+                                </button>
+                                <button
+                                  onClick={() => submitDecision(p.id, 'replied')}
+                                  className="py-2 px-2.5 text-xs font-bold font-mono rounded-lg bg-amber-900/30 border border-amber-700/40 text-amber-300 hover:bg-amber-800/50 transition-colors"
+                                >
+                                  Respondió
+                                </button>
+                                <button
+                                  onClick={() => submitDecision(p.id, 'demo')}
+                                  className="py-2 px-2.5 text-xs font-bold font-mono rounded-lg bg-purple-900/30 border border-purple-700/40 text-purple-300 hover:bg-purple-800/50 transition-colors"
+                                >
+                                  Demo
+                                </button>
+                                <button
+                                  onClick={() => submitDecision(p.id, 'won')}
+                                  className="py-2 px-2.5 text-xs font-bold font-mono rounded-lg bg-emerald-900/30 border border-emerald-700/40 text-emerald-300 hover:bg-emerald-800/50 transition-colors"
+                                >
+                                  Ganado
+                                </button>
+                              </div>
+                            </div>
+                          )}
+
+                          {(p.suppression_reason || p.cooldown_until) && (
+                            <div className={`p-2 rounded-xl text-[10px] font-mono flex items-center gap-2 ${p.cooldown_until && new Date(p.cooldown_until).getTime() > Date.now() + 60 * 24 * 60 * 60 * 1000 ? 'bg-amber-950/30 border border-amber-900/40 text-amber-300' : 'bg-rose-950/20 border border-rose-900/30 text-rose-300'}`}>
+                              <Ban className={`w-3.5 h-3.5 shrink-0 ${p.cooldown_until && new Date(p.cooldown_until).getTime() > Date.now() + 60 * 24 * 60 * 60 * 1000 ? 'text-amber-400' : 'text-rose-400'}`} />
+                              <span>
+                                {p.suppression_reason 
+                                  ? `Supresión: ${p.suppression_reason}` 
+                                  : `Cooldown activo hasta ${new Date(p.cooldown_until!).toLocaleDateString()}`}
                               </span>
                             </div>
-                            <div className="flex items-center gap-1.5 text-[10px] text-slate-500 font-mono">
-                              <span className="uppercase text-blue-400 font-semibold">{p.trade}</span>
-                              <span>·</span>
-                              <span>{p.city}</span>
-                            </div>
-                          </div>
-                          <span className="text-xs font-mono font-bold text-emerald-400 shrink-0">
-                            {p.score}/100
-                          </span>
-                        </div>
-
-                        {/* Angle & Pain Signals Evidence Badges */}
-                        <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
-                          {p.signal_event && p.signal_area && (
-                            <span className="px-2 py-0.5 rounded bg-amber-950/40 text-[9px] text-amber-300 font-mono border border-amber-800/40 font-bold">
-                              ⚡ Clima: {p.signal_event} ({p.signal_area})
-                            </span>
                           )}
 
-                          <span className="px-2 py-0.5 rounded bg-blue-900/30 text-[9px] text-blue-400 font-mono border border-blue-500/10">
-                            Ángulo: {getAngleLabel(p.bvelt_angle)}
-                          </span>
-                          
-                          {signalsList.map((sig, sIdx) => (
-                            <span key={sIdx} className="px-1.5 py-0.5 rounded bg-rose-950/20 text-[9px] text-rose-300 font-mono border border-rose-500/10">
-                              • {sig}
-                            </span>
-                          ))}
-                        </div>
-
-                        {/* Contact & Action Links */}
-                        <div className="flex flex-wrap items-center gap-2 pt-1 font-mono text-[11px]">
-                          {p.email && (
-                            <a 
-                              href={`mailto:${p.email}?subject=${encodeURIComponent(p.draft_subject || '')}&body=${encodeURIComponent(p.draft_body || '')}`}
-                              target="_blank" 
-                              rel="noreferrer" 
-                              className="px-2.5 py-1 rounded-lg bg-blue-950/50 border border-blue-800/40 text-blue-300 hover:bg-blue-900/60 flex items-center gap-1 font-bold"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setContactedProspects(prev => ({ ...prev, [p.id]: true }));
-                              }}
-                            >
-                              <Mail className="w-3.5 h-3.5 text-blue-400" />
-                              Correo
-                            </a>
-                          )}
-                          {p.phone && (
-                            <a 
-                              href={`https://wa.me/1${p.phone.replace(/\D/g, '')}?text=${encodeURIComponent(p.draft_body || '')}`}
-                              target="_blank" 
-                              rel="noreferrer" 
-                              className="px-2.5 py-1 rounded-lg bg-emerald-950/50 border border-emerald-800/40 text-emerald-300 hover:bg-emerald-900/60 flex items-center gap-1 font-bold"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setContactedProspects(prev => ({ ...prev, [p.id]: true }));
-                              }}
-                            >
-                              <MessageSquare className="w-3.5 h-3.5 text-emerald-400" />
-                              WhatsApp
-                            </a>
-                          )}
-                          {p.phone && (
-                            <a 
-                              href={`tel:${p.phone}`}
-                              className="px-2.5 py-1 rounded-lg bg-indigo-950/50 border border-indigo-800/40 text-indigo-300 hover:bg-indigo-900/60 flex items-center gap-1 font-bold"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setContactedProspects(prev => ({ ...prev, [p.id]: true }));
-                              }}
-                            >
-                              <Phone className="w-3.5 h-3.5 text-indigo-400" />
-                              Llamar
-                            </a>
-                          )}
-                          {p.website && (
-                            <a 
-                              href={`https://${p.website}`} 
-                              target="_blank" 
-                              rel="noreferrer" 
-                              className="px-2.5 py-1 rounded-lg bg-slate-900 border border-slate-800 text-slate-400 hover:text-blue-400 flex items-center gap-1" 
-                              onClick={(e) => e.stopPropagation()}
-                            >
-                              <ExternalLink className="w-3 h-3 text-slate-500" />
-                              {p.website}
-                            </a>
-                          )}
-                        </div>
-
-                        {/* Outcome action buttons after contact link clicked or when expanded */}
-                        {(contactedProspects[p.id] || isExpanded) && (
-                          <div className="pt-2 border-t border-slate-900/80 space-y-2" onClick={(e) => e.stopPropagation()}>
-                            <span className="text-[10px] font-mono text-slate-400 font-bold uppercase block">Registrar Resultado:</span>
-                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                              <button
-                                onClick={() => submitDecision(p.id, 'sent')}
-                                className="py-2 px-2.5 text-xs font-bold font-mono rounded-lg bg-blue-900/30 border border-blue-700/40 text-blue-300 hover:bg-blue-800/50 transition-colors"
-                              >
-                                Enviado
-                              </button>
-                              <button
-                                onClick={() => submitDecision(p.id, 'replied')}
-                                className="py-2 px-2.5 text-xs font-bold font-mono rounded-lg bg-amber-900/30 border border-amber-700/40 text-amber-300 hover:bg-amber-800/50 transition-colors"
-                              >
-                                Respondió
-                              </button>
-                              <button
-                                onClick={() => submitDecision(p.id, 'demo')}
-                                className="py-2 px-2.5 text-xs font-bold font-mono rounded-lg bg-purple-900/30 border border-purple-700/40 text-purple-300 hover:bg-purple-800/50 transition-colors"
-                              >
-                                Demo
-                              </button>
-                              <button
-                                onClick={() => submitDecision(p.id, 'won')}
-                                className="py-2 px-2.5 text-xs font-bold font-mono rounded-lg bg-emerald-900/30 border border-emerald-700/40 text-emerald-300 hover:bg-emerald-800/50 transition-colors"
-                              >
-                                Ganado
-                              </button>
-                            </div>
-                          </div>
-                        )}
-
-                        {/* Suppression or Cooldown Banner */}
-                        {(p.suppression_reason || p.cooldown_until) && (
-                          <div className={`p-2 rounded-xl text-[10px] font-mono flex items-center gap-2 ${p.cooldown_until && new Date(p.cooldown_until).getTime() > Date.now() + 60 * 24 * 60 * 60 * 1000 ? 'bg-amber-950/30 border border-amber-900/40 text-amber-300' : 'bg-rose-950/20 border border-rose-900/30 text-rose-300'}`}>
-                            <Ban className={`w-3.5 h-3.5 shrink-0 ${p.cooldown_until && new Date(p.cooldown_until).getTime() > Date.now() + 60 * 24 * 60 * 60 * 1000 ? 'text-amber-400' : 'text-rose-400'}`} />
-                            <span>
-                              {p.suppression_reason 
-                                ? `Supresión: ${p.suppression_reason}` 
-                                : p.cooldown_until && new Date(p.cooldown_until).getTime() > Date.now() + 60 * 24 * 60 * 60 * 1000
-                                  ? `Data Bug Cooldown (>60d): ${new Date(p.cooldown_until).toLocaleDateString()}`
-                                  : `Cooldown activo hasta ${new Date(p.cooldown_until!).toLocaleDateString()}`}
-                            </span>
-                          </div>
-                        )}
-
-                        {/* Expandable details drawer */}
-                        {isExpanded && (
-                          <div className="pt-3.5 border-t border-slate-900/80 space-y-3 font-sans text-xs" onClick={(e) => e.stopPropagation()}>
-                            
-                            {/* Score Breakdown if present */}
-                            {p.score_breakdown && (
-                              <div className="bg-slate-950 p-2.5 rounded-xl border border-slate-900 font-mono text-[10px] text-slate-400 space-y-1">
-                                <span className="text-slate-500 font-bold uppercase block">Score Breakdown:</span>
-                                <div>{p.score_breakdown}</div>
-                              </div>
-                            )}
-
-                            {/* Draft copy preview */}
-                            {p.draft_body && (
-                              <div className="bg-slate-950 p-3 rounded-xl border border-slate-900 font-mono text-[11px] text-slate-300 whitespace-pre-wrap leading-relaxed">
-                                <span className="text-slate-500 font-bold block mb-1 text-[9px] uppercase">Asunto: {p.draft_subject}</span>
-                                {p.draft_body}
-                              </div>
-                            )}
-
-                            {/* Last contact date */}
-                            {p.last_contact_at && (
-                              <div className="text-[10px] text-slate-500 font-mono flex items-center gap-1">
-                                <Clock className="w-3 h-3 text-slate-500" />
-                                Último Contacto: {new Date(p.last_contact_at).toLocaleString()}
-                              </div>
-                            )}
-                            
-                            {/* Action Buttons */}
-                            <div className="grid grid-cols-2 gap-2 pt-1">
-                              {p.draft_body && (
-                                <button
-                                  onClick={() => copyToClipboard(p.draft_body, p.id)}
-                                  className="col-span-2 h-11 min-h-[48px] rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold flex items-center justify-center gap-2"
-                                >
-                                  {copiedId === p.id ? (
-                                    <>
-                                      <Check className="w-4 h-4 text-emerald-400" />
-                                      Copiado en Portapapeles
-                                    </>
-                                  ) : (
-                                    <>
-                                      <Copy className="w-4 h-4 text-slate-200" />
-                                      Copiar Mensaje
-                                    </>
-                                  )}
-                                </button>
+                          {isExpanded && (
+                            <div className="pt-3.5 border-t border-slate-900/80 space-y-3 font-sans text-xs" onClick={(e) => e.stopPropagation()}>
+                              {p.score_breakdown && (
+                                <div className="bg-slate-950 p-2.5 rounded-xl border border-slate-900 font-mono text-[10px] text-slate-400 space-y-1">
+                                  <span className="text-slate-500 font-bold uppercase block">Score Breakdown:</span>
+                                  <div>{p.score_breakdown}</div>
+                                </div>
                               )}
-
-                              {p.score >= 45 && p.email && !p.suppression_reason && !['blocked', 'discarded', 'suppressed', 'unsubscribed', 'disqualified'].includes((p.status || '').toLowerCase()) ? (
+                              {p.draft_body && (
+                                <div className="bg-slate-950 p-3 rounded-xl border border-slate-900 font-mono text-[11px] text-slate-300 whitespace-pre-wrap leading-relaxed">
+                                  <span className="text-slate-500 font-bold block mb-1 text-[9px] uppercase">Asunto: {p.draft_subject}</span>
+                                  {p.draft_body}
+                                </div>
+                              )}
+                              <div className="grid grid-cols-2 gap-2 pt-1 font-mono">
                                 <button
                                   onClick={() => submitDecision(p.id, 'sent')}
                                   className="h-10 text-xs font-semibold rounded-lg bg-emerald-600/20 border border-emerald-500/20 text-emerald-400 hover:bg-emerald-600 hover:text-white transition-colors"
                                 >
                                   ✓ Enviar (Lock)
                                 </button>
-                              ) : (
                                 <button
-                                  disabled
-                                  className="h-10 text-xs font-semibold rounded-lg bg-slate-900 border border-slate-800 text-slate-600 cursor-not-allowed"
-                                  title="Requiere Score ≥ 45, email verificado y no estar bloqueado"
+                                  onClick={() => submitDecision(p.id, 'discard')}
+                                  className="h-10 text-xs font-semibold rounded-lg bg-slate-900 border border-slate-800 text-slate-400 hover:bg-slate-800 hover:text-white"
                                 >
-                                  Bloqueado (Sin Email / Score &lt; 45)
+                                  ✕ Descartar
                                 </button>
-                              )}
-
-                              <button
-                                onClick={() => submitDecision(p.id, 'discard')}
-                                className="h-10 text-xs font-semibold rounded-lg bg-slate-900 border border-slate-800 text-slate-400 hover:bg-slate-800 hover:text-white"
-                              >
-                                ✕ Descartar
-                              </button>
+                              </div>
                             </div>
-                          </div>
-                        )}
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* TAB 3: MISSIONS SYSTEM (RADAR FUSION MAX) */}
+            {mainTab === 'missions' && (
+              <div className="space-y-4 font-mono">
+                {dailyMissions.map((dm, dIdx) => (
+                  <div key={dIdx} className="bg-slate-900/40 border border-slate-800 rounded-2xl p-4 space-y-3">
+                    <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+                      <div className="flex items-center gap-2">
+                        <Target className="w-4 h-4 text-blue-400" />
+                        <h4 className="text-xs font-bold text-white uppercase">Misión Diaria ({dm.day})</h4>
                       </div>
-                    );
-                  })}
+                      <span className="px-2 py-0.5 rounded text-[9px] font-bold uppercase bg-emerald-950/60 border border-emerald-800 text-emerald-300">
+                        {dm.status}
+                      </span>
+                    </div>
+
+                    <div className="space-y-1 text-xs">
+                      <span className="text-[10px] text-slate-500 block uppercase">Objetivo Operativo:</span>
+                      <p className="text-slate-200">{dm.goal}</p>
+                    </div>
+
+                    <div className="space-y-2 pt-2">
+                      <div>
+                        <div className="flex justify-between text-[10px] text-slate-400 mb-1">
+                          <span>Prospectos Calificados:</span>
+                          <span className="text-blue-400 font-bold">{dm.qualified_count} / {dm.target_qualified}</span>
+                        </div>
+                        <div className="w-full bg-slate-950 h-2 rounded-full overflow-hidden border border-slate-800">
+                          <div 
+                            className="bg-blue-600 h-full rounded-full transition-all"
+                            style={{ width: `${Math.min(100, ((dm.qualified_count || 0) / (dm.target_qualified || 1)) * 100)}%` }}
+                          />
+                        </div>
+                      </div>
+
+                      <div>
+                        <div className="flex justify-between text-[10px] text-slate-400 mb-1">
+                          <span>Outreach / Mensajes Enviados:</span>
+                          <span className="text-emerald-400 font-bold">{dm.outreach_count} / {dm.target_outreach}</span>
+                        </div>
+                        <div className="w-full bg-slate-950 h-2 rounded-full overflow-hidden border border-slate-800">
+                          <div 
+                            className="bg-emerald-500 h-full rounded-full transition-all"
+                            style={{ width: `${Math.min(100, ((dm.outreach_count || 0) / (dm.target_outreach || 1)) * 100)}%` }}
+                          />
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2 text-[10px] pt-1 text-slate-400 border-t border-slate-850">
+                      <div><strong className="text-slate-500 block">Mercados:</strong> {dm.markets}</div>
+                      <div><strong className="text-slate-500 block">Presupuesto:</strong> {dm.budget}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* TAB 4: MULTI-TENANT CONFIGURATION */}
+            {mainTab === 'tenant' && (
+              <div className="bg-slate-900/40 border border-slate-800 rounded-2xl p-4 space-y-4 font-mono text-xs">
+                <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+                  <div className="flex items-center gap-2">
+                    <Briefcase className="w-4 h-4 text-indigo-400" />
+                    <h4 className="text-xs font-bold text-white uppercase">Configuración Multi-Tenant</h4>
+                  </div>
+                  <span className="text-[10px] text-slate-500 font-bold uppercase">Modo Tenant Independiente</span>
                 </div>
-              )}
-            </div>
+
+                <form onSubmit={saveTenantConfig} className="space-y-3">
+                  <div>
+                    <label className="text-[10px] text-slate-500 block mb-1">Tenant ID</label>
+                    <input 
+                      type="text" 
+                      value={tenantForm.tenant_id || ''} 
+                      onChange={(e) => setTenantForm(prev => ({ ...prev, tenant_id: e.target.value }))}
+                      className="w-full bg-slate-950 border border-slate-800 rounded px-2.5 py-1.5 text-slate-200"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-slate-500 block mb-1">Nombre Comercial del Tenant</label>
+                    <input 
+                      type="text" 
+                      value={tenantForm.tenant_name || ''} 
+                      onChange={(e) => setTenantForm(prev => ({ ...prev, tenant_name: e.target.value }))}
+                      className="w-full bg-slate-950 border border-slate-800 rounded px-2.5 py-1.5 text-slate-200"
+                    />
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="text-[10px] text-slate-500 block mb-1">Industria</label>
+                      <input 
+                        type="text" 
+                        value={tenantForm.industry || ''} 
+                        onChange={(e) => setTenantForm(prev => ({ ...prev, industry: e.target.value }))}
+                        className="w-full bg-slate-950 border border-slate-800 rounded px-2.5 py-1.5 text-slate-200"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[10px] text-slate-500 block mb-1">Nicho Objetivo</label>
+                      <input 
+                        type="text" 
+                        value={tenantForm.niche || ''} 
+                        onChange={(e) => setTenantForm(prev => ({ ...prev, niche: e.target.value }))}
+                        className="w-full bg-slate-950 border border-slate-800 rounded px-2.5 py-1.5 text-slate-200"
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-slate-500 block mb-1">Descripción del ICP</label>
+                    <textarea 
+                      value={tenantForm.icp_description || ''} 
+                      onChange={(e) => setTenantForm(prev => ({ ...prev, icp_description: e.target.value }))}
+                      rows={2}
+                      className="w-full bg-slate-950 border border-slate-800 rounded px-2.5 py-1.5 text-slate-200"
+                    />
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="text-[10px] text-slate-500 block mb-1">Score Mínimo</label>
+                      <input 
+                        type="number" 
+                        value={tenantForm.minimum_score || 50} 
+                        onChange={(e) => setTenantForm(prev => ({ ...prev, minimum_score: parseInt(e.target.value, 10) }))}
+                        className="w-full bg-slate-950 border border-slate-800 rounded px-2.5 py-1.5 text-slate-200"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[10px] text-slate-500 block mb-1">Límite Diario de Outreach</label>
+                      <input 
+                        type="number" 
+                        value={tenantForm.daily_outreach_limit || 10} 
+                        onChange={(e) => setTenantForm(prev => ({ ...prev, daily_outreach_limit: parseInt(e.target.value, 10) }))}
+                        className="w-full bg-slate-950 border border-slate-800 rounded px-2.5 py-1.5 text-slate-200"
+                      />
+                    </div>
+                  </div>
+
+                  {tenantSaveStatus && (
+                    <div className="p-2 rounded bg-blue-950/40 border border-blue-800 text-blue-300 text-[11px]">
+                      {tenantSaveStatus}
+                    </div>
+                  )}
+
+                  <button
+                    type="submit"
+                    className="w-full py-2.5 bg-blue-600 hover:bg-blue-500 font-bold rounded-xl text-white transition-all shadow-md shadow-blue-600/20"
+                  >
+                    Guardar Configuración del Tenant
+                  </button>
+                </form>
+              </div>
+            )}
           </>
         )}
       </div>

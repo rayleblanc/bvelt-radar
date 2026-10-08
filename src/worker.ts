@@ -741,6 +741,166 @@ export default {
         return Response.json(results.results || [], { headers: corsHeaders });
       }
 
+      // 8b. Opportunity Intelligence Endpoints
+      if ((path === "/opportunities" || path === "/api/opportunities") && method === "GET") {
+        const limit = parseInt(url.searchParams.get("limit") || "100", 10);
+        const tenantId = url.searchParams.get("tenant_id");
+        const priority = url.searchParams.get("priority");
+        const decisionState = url.searchParams.get("decision_state");
+        const minScore = parseInt(url.searchParams.get("min_score") || "0", 10);
+
+        let query = `
+          SELECT o.*, p.name as prospect_name, p.city as prospect_city, p.trade as prospect_trade,
+                 p.website as prospect_website, p.phone as prospect_phone, p.email as prospect_email,
+                 p.status as prospect_status, p.draft_subject, p.draft_body
+          FROM opportunities o
+          LEFT JOIN prospects p ON o.prospect_id = p.id
+          WHERE o.strategic_score >= ?
+        `;
+        const params: any[] = [minScore];
+
+        if (tenantId) {
+          query += " AND o.tenant_id = ?";
+          params.push(tenantId);
+        }
+        if (priority) {
+          query += " AND o.priority_tier = ?";
+          params.push(priority);
+        }
+        if (decisionState) {
+          query += " AND o.decision_state = ?";
+          params.push(decisionState);
+        }
+
+        query += " ORDER BY o.strategic_score DESC, o.created_at DESC LIMIT ?";
+        params.push(limit);
+
+        try {
+          const res = await env.RADAR_DB.prepare(query).bind(...params).all();
+          return Response.json(res.results || [], { headers: corsHeaders });
+        } catch (e: any) {
+          return Response.json([], { headers: corsHeaders });
+        }
+      }
+
+      if ((path.startsWith("/opportunities/") || path.startsWith("/api/opportunities/")) && method === "GET") {
+        const oppId = path.split("/").pop();
+        try {
+          const opp = await env.RADAR_DB.prepare(`
+            SELECT o.*, p.name as prospect_name, p.city as prospect_city, p.trade as prospect_trade,
+                   p.website as prospect_website, p.phone as prospect_phone, p.email as prospect_email,
+                   p.status as prospect_status, p.draft_subject, p.draft_body
+            FROM opportunities o
+            LEFT JOIN prospects p ON o.prospect_id = p.id
+            WHERE o.id = ? OR o.prospect_id = ?
+          `).bind(oppId, oppId).first();
+
+          if (!opp) {
+            return Response.json({ error: "Opportunity not found" }, { status: 404, headers: corsHeaders });
+          }
+
+          const signals = await env.RADAR_DB.prepare("SELECT * FROM opportunity_signals WHERE opportunity_id = ? ORDER BY observed_at DESC").bind(opp.id).all();
+          const actions = await env.RADAR_DB.prepare("SELECT * FROM opportunity_actions WHERE opportunity_id = ? ORDER BY proposed_at DESC").bind(opp.id).all();
+          const outcomes = await env.RADAR_DB.prepare("SELECT * FROM opportunity_outcomes WHERE opportunity_id = ? ORDER BY created_at DESC").bind(opp.id).all();
+
+          return Response.json({
+            ...opp,
+            signals: signals.results || [],
+            actions: actions.results || [],
+            outcomes: outcomes.results || []
+          }, { headers: corsHeaders });
+        } catch (e: any) {
+          return Response.json({ error: e.message }, { status: 500, headers: corsHeaders });
+        }
+      }
+
+      // 8c. Missions System Endpoints
+      if ((path === "/missions" || path === "/api/missions") && method === "GET") {
+        const tenantId = url.searchParams.get("tenant_id") || "founder";
+        try {
+          const customMissions = await env.RADAR_DB.prepare("SELECT * FROM missions WHERE tenant_id = ? ORDER BY created_at DESC").bind(tenantId).all();
+          const dailyMissions = await env.RADAR_DB.prepare("SELECT * FROM daily_missions WHERE tenant_id = ? ORDER BY day DESC LIMIT 30").bind(tenantId).all();
+          return Response.json({
+            missions: customMissions.results || [],
+            daily_missions: dailyMissions.results || []
+          }, { headers: corsHeaders });
+        } catch (e: any) {
+          return Response.json({ missions: [], daily_missions: [] }, { headers: corsHeaders });
+        }
+      }
+
+      if ((path === "/missions" || path === "/api/missions") && method === "POST") {
+        const body: any = await request.json().catch(() => ({}));
+        const id = body.id || `mission_${crypto.randomUUID().replace(/-/g, "")}`;
+        const tenantId = body.tenant_id || "founder";
+        const name = body.name || "Default Mission";
+        const goal = body.goal || "Find high-converting customers";
+        const status = body.status || "active";
+        const markets = JSON.stringify(body.markets || []);
+        const icp = JSON.stringify(body.icp || {});
+        const budget = JSON.stringify(body.budget || {});
+        const targetQualified = body.target_qualified || 5;
+        const targetOutreach = body.target_outreach || 5;
+        const nowIso = new Date().toISOString();
+
+        try {
+          await env.RADAR_DB.prepare(`
+            INSERT INTO missions (id, tenant_id, name, goal, status, markets_json, icp_json, budget_json, target_qualified, target_outreach, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+              name = excluded.name,
+              goal = excluded.goal,
+              status = excluded.status,
+              markets_json = excluded.markets_json,
+              icp_json = excluded.icp_json,
+              budget_json = excluded.budget_json,
+              target_qualified = excluded.target_qualified,
+              target_outreach = excluded.target_outreach,
+              updated_at = excluded.updated_at
+          `).bind(id, tenantId, name, goal, status, markets, icp, budget, targetQualified, targetOutreach, nowIso, nowIso).run();
+
+          return Response.json({ success: true, id, message: "Mission saved" }, { headers: corsHeaders });
+        } catch (e: any) {
+          return Response.json({ error: e.message }, { status: 500, headers: corsHeaders });
+        }
+      }
+
+      // 8d. Radar Settings Endpoints
+      if ((path === "/api/settings" || path === "/radar_settings" || path === "/api/radar-settings") && method === "GET") {
+        const tenantId = url.searchParams.get("tenant_id") || "founder";
+        try {
+          const settings = await env.RADAR_DB.prepare("SELECT * FROM radar_settings WHERE tenant_id = ?").bind(tenantId).all();
+          return Response.json(settings.results || [], { headers: corsHeaders });
+        } catch (e) {
+          return Response.json([], { headers: corsHeaders });
+        }
+      }
+
+      if ((path === "/api/settings" || path === "/radar_settings" || path === "/api/radar-settings") && method === "POST") {
+        const body: any = await request.json().catch(() => ({}));
+        const tenantId = body.tenant_id || "founder";
+        const key = body.key || body.setting_key;
+        const value = body.value !== undefined ? body.value : body.setting_value;
+        if (!key) {
+          return Response.json({ error: "Missing setting key" }, { status: 400, headers: corsHeaders });
+        }
+        const id = `set_${tenantId}_${key}`;
+        const nowIso = new Date().toISOString();
+        try {
+          await env.RADAR_DB.prepare(`
+            INSERT INTO radar_settings (id, tenant_id, setting_key, setting_value_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+              setting_value_json = excluded.setting_value_json,
+              updated_at = excluded.updated_at
+          `).bind(id, tenantId, key, JSON.stringify(value), nowIso, nowIso).run();
+
+          return Response.json({ success: true, key }, { headers: corsHeaders });
+        } catch (e: any) {
+          return Response.json({ error: e.message }, { status: 500, headers: corsHeaders });
+        }
+      }
+
       // 9. Suppression Fetching Endpoint
       if ((path === "/api/suppression" || path === "/suppression") && method === "GET") {
         const results = await env.RADAR_DB.prepare("SELECT * FROM suppression ORDER BY created_at DESC").all();
@@ -2043,8 +2203,8 @@ export async function startProspectingRun(
 
   // Register run record in D1
   await db.prepare(
-    "INSERT INTO runs (id, day, mode, discovered, finalized, ai_calls, hunter_calls, errors_json, created_at) VALUES (?, ?, ?, 0, 0, 0, 0, '[]', ?)"
-  ).bind(runId, today, mode, new Date().toISOString()).run();
+    "INSERT INTO runs (id, day, mode, tenant_id, discovered, finalized, ai_calls, hunter_calls, errors_json, created_at) VALUES (?, ?, ?, ?, 0, 0, 0, 0, '[]', ?)"
+  ).bind(runId, today, mode, tId, new Date().toISOString()).run();
 
   let jobsEnqueued = 0;
   for (const city of activeCities) {
@@ -2230,13 +2390,14 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
 
     const prospectId = crypto.randomUUID();
     const demoToken = crypto.randomUUID().replace(/-/g, "");
+    const postalCode = candidate.postal_code || candidate.zip || null;
     await env.RADAR_DB.prepare(`
       INSERT INTO prospects (
         id, mode, tenant_id, name, city, trade, website, phone, email, 
         score, signals_json, score_breakdown, variant_id, status, source, 
         created_at, updated_at, bvelt_angle, identity_key, demo_token, 
-        signal_event, signal_area
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '{}', '{}', 'missed_calls', 'discovered', ?, ?, ?, 'missed_calls', ?, ?, ?, ?)
+        signal_event, signal_area, postal_code
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '{}', '{}', 'missed_calls', 'discovered', ?, ?, ?, 'missed_calls', ?, ?, ?, ?, ?)
     `).bind(
       prospectId,
       job.mode,
@@ -2253,7 +2414,8 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
       identityKey,
       demoToken,
       signalEvent,
-      signalArea
+      signalArea,
+      postalCode
     ).run();
 
     if (candidate.seed_id) {
@@ -2526,6 +2688,18 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
     ).bind(prospect_id, "Personalized demo token generated based on structured evidence", new Date().toISOString()).run();
   } catch (e) {}
 
+  const strat = calculateStrategicScores(
+    prospect,
+    prospect.email,
+    isEmailValidated,
+    prospect.phone,
+    isPriorityCity,
+    isPriorityTrade,
+    learningStats,
+    signals,
+    missionConfig
+  );
+
   // Determine commercial value band based on total score
   const valueBand = totalScore >= 80 ? "premium" : totalScore >= 60 ? "high" : totalScore >= 45 ? "medium" : "low";
 
@@ -2533,7 +2707,9 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
   if (totalScore < 45 || !prospect.email) {
     await env.RADAR_DB.prepare(`
       UPDATE prospects
-      SET score = ?, opportunity_score = ?, confidence_score = ?, evidence_json = ?, commercial_value_band = ?, pain_hypothesis_json = ?, signals_json = ?, score_breakdown = ?, variant_id = ?, bvelt_angle = ?, status = 'disqualified', outcome = 'low_score_or_no_email', updated_at = ?
+      SET score = ?, opportunity_score = ?, confidence_score = ?, evidence_json = ?, commercial_value_band = ?, pain_hypothesis_json = ?, signals_json = ?, score_breakdown = ?, variant_id = ?, bvelt_angle = ?,
+          fit_score = ?, intent_score = ?, pain_score = ?, ability_to_pay_score = ?, contactability_score = ?, timing_score = ?, evidence_score = ?, signal_freshness_score = ?, expected_value = ?, decision_state = 'disqualified', why_now_json = ?,
+          status = 'disqualified', outcome = 'low_score_or_no_email', updated_at = ?
       WHERE id = ?
     `).bind(
       totalScore,
@@ -2546,6 +2722,16 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
       JSON.stringify(breakdown),
       variantId,
       bveltAngle,
+      strat.fit_score,
+      strat.intent_score,
+      strat.pain_score,
+      strat.ability_to_pay_score,
+      strat.contactability_score,
+      strat.timing_score,
+      strat.evidence_score,
+      strat.signal_freshness_score,
+      strat.expected_value,
+      strat.why_now_json,
       new Date().toISOString(),
       prospect_id
     ).run();
@@ -2554,7 +2740,9 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
 
   await env.RADAR_DB.prepare(`
     UPDATE prospects
-    SET score = ?, opportunity_score = ?, confidence_score = ?, evidence_json = ?, commercial_value_band = ?, pain_hypothesis_json = ?, signals_json = ?, score_breakdown = ?, variant_id = ?, bvelt_angle = ?, status = 'scored', updated_at = ?
+    SET score = ?, opportunity_score = ?, confidence_score = ?, evidence_json = ?, commercial_value_band = ?, pain_hypothesis_json = ?, signals_json = ?, score_breakdown = ?, variant_id = ?, bvelt_angle = ?,
+        fit_score = ?, intent_score = ?, pain_score = ?, ability_to_pay_score = ?, contactability_score = ?, timing_score = ?, evidence_score = ?, signal_freshness_score = ?, expected_value = ?, decision_state = ?, why_now_json = ?,
+        status = 'scored', updated_at = ?
     WHERE id = ?
   `).bind(
     totalScore,
@@ -2567,14 +2755,93 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
     JSON.stringify(breakdown),
     variantId,
     bveltAngle,
+    strat.fit_score,
+    strat.intent_score,
+    strat.pain_score,
+    strat.ability_to_pay_score,
+    strat.contactability_score,
+    strat.timing_score,
+    strat.evidence_score,
+    strat.signal_freshness_score,
+    strat.expected_value,
+    strat.decision_state,
+    strat.why_now_json,
     new Date().toISOString(),
     prospect_id
   ).run();
 
+  // Opportunity Intelligence registration
+  try {
+    const oppId = `opp_${prospect_id}`;
+    const tenantId = job.tenant_id || "founder";
+    const title = `${prospect.name} — ${prospect.trade} (${prospect.city})`;
+    const nowIso = new Date().toISOString();
+
+    await env.RADAR_DB.prepare(`
+      INSERT INTO opportunities (
+        id, prospect_id, tenant_id, title, strategic_score, fit_score, intent_score,
+        pain_score, ability_to_pay_score, contactability_score, timing_score,
+        evidence_score, signal_freshness_score, expected_value, decision_state,
+        why_now_json, priority_tier, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        title = excluded.title,
+        strategic_score = excluded.strategic_score,
+        fit_score = excluded.fit_score,
+        intent_score = excluded.intent_score,
+        pain_score = excluded.pain_score,
+        ability_to_pay_score = excluded.ability_to_pay_score,
+        contactability_score = excluded.contactability_score,
+        timing_score = excluded.timing_score,
+        evidence_score = excluded.evidence_score,
+        signal_freshness_score = excluded.signal_freshness_score,
+        expected_value = excluded.expected_value,
+        decision_state = excluded.decision_state,
+        why_now_json = excluded.why_now_json,
+        priority_tier = excluded.priority_tier,
+        updated_at = excluded.updated_at
+    `).bind(
+      oppId, prospect_id, tenantId, title, strat.strategic_score, strat.fit_score, strat.intent_score,
+      strat.pain_score, strat.ability_to_pay_score, strat.contactability_score, strat.timing_score,
+      strat.evidence_score, strat.signal_freshness_score, strat.expected_value, strat.decision_state,
+      strat.why_now_json, strat.priority_tier, nowIso, nowIso
+    ).run();
+
+    // Insert signals into opportunity_signals
+    for (const fact of strat.why_now.distinctions.observed_facts) {
+      const sigId = `sig_${crypto.randomUUID().replace(/-/g, "")}`;
+      await env.RADAR_DB.prepare(`
+        INSERT INTO opportunity_signals (
+          id, opportunity_id, signal_type, observed_evidence, inferred_reasoning,
+          confidence, freshness_score, observed_at, created_at
+        ) VALUES (?, ?, 'observed_signal', ?, ?, 0.85, ?, ?, ?)
+      `).bind(
+        sigId, oppId, fact,
+        strat.why_now.distinctions.inferences[0] || null,
+        strat.signal_freshness_score, nowIso, nowIso
+      ).run();
+    }
+
+    // Insert initial proposed action into opportunity_actions
+    const actionId = `act_${crypto.randomUUID().replace(/-/g, "")}`;
+    await env.RADAR_DB.prepare(`
+      INSERT INTO opportunity_actions (
+        id, opportunity_id, action_type, status, details_json, proposed_at, executed_at
+      ) VALUES (?, ?, 'outreach_draft', 'proposed', ?, ?, NULL)
+    `).bind(
+      actionId, oppId,
+      JSON.stringify({ recommended: strat.why_now.recommended_action, angle: bveltAngle }),
+      nowIso
+    ).run();
+  } catch (e) {
+    console.warn("[Opportunity Intelligence] Error registering opportunity:", e);
+  }
+
   // Increment qualified_count for today's daily mission
   try {
     const todayStr = new Date().toISOString().split('T')[0];
-    await env.RADAR_DB.prepare("UPDATE daily_missions SET qualified_count = qualified_count + 1 WHERE day = ?").bind(todayStr).run();
+    const tenantKey = (job.mode === "tenant" && job.tenant_id) ? job.tenant_id : "founder";
+    await env.RADAR_DB.prepare("UPDATE daily_missions SET qualified_count = qualified_count + 1 WHERE tenant_id = ? AND day = ?").bind(tenantKey, todayStr).run();
   } catch (e) {}
 
   // --- HOT LEAD INTERRUPT TRIGGERS ---
@@ -3492,6 +3759,7 @@ export async function getPriorityTargets(
   if (env.RADAR_DB && typeof env.RADAR_DB.prepare === "function") {
     try {
       const today = new Date().toISOString().split('T')[0];
+      const targetTenant = (mode === "tenant" && tenantId) ? tenantId : "founder";
       const goal = mode === "tenant" ? "Find high-value B2B customers for the tenant." : "Find the highest-probability Bvelt customers today.";
       const marketsJson = JSON.stringify(config.geographies);
       const icpJson = JSON.stringify(config.icp);
@@ -3504,10 +3772,16 @@ export async function getPriorityTargets(
         finalize_units: 10
       });
 
-      await env.RADAR_DB.prepare(`
-        INSERT OR IGNORE INTO daily_missions (day, goal, markets, icp, budget, target_qualified, target_outreach, status, qualified_count, outreach_count)
-        VALUES (?, ?, ?, ?, ?, 3, 3, 'active', 0, 0)
-      `).bind(today, goal, marketsJson, icpJson, budgetJson).run();
+      const prep = env.RADAR_DB.prepare(`
+        INSERT OR IGNORE INTO daily_missions (tenant_id, day, goal, markets, icp, budget, target_qualified, target_outreach, status, qualified_count, outreach_count)
+        VALUES (?, ?, ?, ?, ?, ?, 3, 3, 'active', 0, 0)
+      `);
+      if (prep && typeof prep.bind === "function") {
+        const bound = prep.bind(targetTenant, today, goal, marketsJson, icpJson, budgetJson);
+        if (bound && typeof bound.run === "function") {
+          await bound.run();
+        }
+      }
     } catch (e) {
       console.warn("[Daily Mission] Failed to seed daily mission:", e);
     }
@@ -3648,6 +3922,314 @@ export const PREFERRED_TRADES = new Set([
   "hvac", "plumbing", "electrical", "electrician", "roofing", "lawn_care", "landscaping", "pool", "pool_cleaning", "cleaning", "house_cleaning", "handyman"
 ]);
 
+export interface StrategicScoreBreakdown {
+  fit_score: number;
+  intent_score: number;
+  pain_score: number;
+  ability_to_pay_score: number;
+  contactability_score: number;
+  timing_score: number;
+  evidence_score: number;
+  signal_freshness_score: number;
+  strategic_score: number;
+  expected_value: number;
+  decision_state: string;
+  priority_tier: 'critical' | 'high' | 'medium' | 'low';
+  why_now_json: string;
+  why_now: {
+    what_is_happening: string;
+    what_evidence_exists: string[];
+    why_it_matters: string;
+    why_now: string;
+    recommended_action: string;
+    potential_economic_result: string;
+    distinctions: {
+      observed_facts: string[];
+      inferences: string[];
+      estimations: string[];
+    };
+  };
+}
+
+export function calculateStrategicScores(
+  item: any,
+  email: string | null,
+  isEmailValidated: boolean,
+  phone: string | null,
+  isPriorityCity: boolean,
+  isPriorityTrade: boolean,
+  learningStats: Record<string, number>,
+  signals: Record<string, boolean>,
+  missionConfig?: MissionConfig
+): StrategicScoreBreakdown {
+  if (isHardRejectedChain(item.name)) {
+    return {
+      fit_score: 0,
+      intent_score: 0,
+      pain_score: 0,
+      ability_to_pay_score: 0,
+      contactability_score: 0,
+      timing_score: 0,
+      evidence_score: 0,
+      signal_freshness_score: 0,
+      strategic_score: 0,
+      expected_value: 0,
+      decision_state: 'rejected',
+      priority_tier: 'low',
+      why_now_json: JSON.stringify({ reason: "Hard-rejected retail chain" }),
+      why_now: {
+        what_is_happening: "Retail chain detected",
+        what_evidence_exists: ["Name matches prohibited retail chain dictionary"],
+        why_it_matters: "Banned from Bvelt ICP",
+        why_now: "Immediate disqualification",
+        recommended_action: "Do not contact",
+        potential_economic_result: "$0",
+        distinctions: { observed_facts: ["Chain name detected"], inferences: [], estimations: [] }
+      }
+    };
+  }
+
+  const tradeLower = (item.trade || "").toLowerCase();
+  const nameLower = (item.name || "").toLowerCase();
+  const isPreferredTrade = PREFERRED_TRADES.has(tradeLower) ||
+    /hvac|plumb|electr|roof|lawn|landscap|pool|clean|handyman/i.test(tradeLower);
+  const targetNiches = missionConfig?.niches || [];
+  const matchesTargetNiches = targetNiches.some(n => 
+    tradeLower.includes(n.toLowerCase()) || nameLower.includes(n.toLowerCase())
+  );
+
+  // 1. FIT SCORE (0 - 100)
+  let fit_score = 0;
+  if (matchesTargetNiches || isPriorityTrade) fit_score += 45;
+  else if (isPreferredTrade) fit_score += 35;
+  else fit_score += 20;
+
+  const isIndependent = /brothers|sons|family|llc|services|pro|tech|contracting|group|co\b/i.test(nameLower);
+  if (isIndependent) fit_score += 25;
+  if (isPriorityCity) fit_score += 15;
+  if (item.website && isRealWebsite(item.website)) fit_score += 15;
+  fit_score = Math.min(100, Math.max(0, fit_score));
+
+  // 2. INTENT SCORE (0 - 100)
+  let intent_score = 0;
+  const hasPermit = item.source === 'permits' || !!item.signal_event;
+  if (hasPermit) intent_score += 40;
+  if (signals.quote_request || signals.estimate_language) intent_score += 30;
+  if (signals.multiple_areas || signals.specific_landing_pages) intent_score += 20;
+  if (signals.contact_form || signals.lead_capture) intent_score += 10;
+  intent_score = Math.min(100, Math.max(0, intent_score));
+
+  // 3. PAIN SCORE (0 - 100)
+  let pain_score = 0;
+  if (signals.sms_gap) pain_score += 40;
+  if (!signals.booking) pain_score += 25;
+  if (signals.emergency) pain_score += 20;
+  if (!signals.quote_request && !signals.estimate_language) pain_score += 15;
+  pain_score = Math.min(100, Math.max(0, pain_score));
+
+  // 4. ABILITY TO PAY SCORE (0 - 100)
+  let ability_to_pay_score = 0;
+  const isHighTicketTrade = /hvac|roof|electr|plumb|builder|contractor|commercial/i.test(tradeLower);
+  if (isHighTicketTrade) ability_to_pay_score += 40;
+  else ability_to_pay_score += 25;
+
+  if (item.website && isRealWebsite(item.website)) {
+    ability_to_pay_score += 25;
+    if (email && !/@(gmail|yahoo|hotmail|outlook)\.com$/i.test(email)) {
+      ability_to_pay_score += 20;
+    }
+  }
+  if (signals.multiple_areas) ability_to_pay_score += 15;
+  ability_to_pay_score = Math.min(100, Math.max(0, ability_to_pay_score));
+
+  // 5. CONTACTABILITY SCORE (0 - 100)
+  let contactability_score = 0;
+  if (email) {
+    contactability_score += isEmailValidated ? 50 : 35;
+    if (!/@(gmail|yahoo|hotmail|outlook)\.com$/i.test(email)) {
+      contactability_score += 15;
+    }
+  }
+  if (phone) contactability_score += 25;
+  if (item.website && isRealWebsite(item.website)) contactability_score += 10;
+  contactability_score = Math.min(100, Math.max(0, contactability_score));
+
+  // 6. TIMING SCORE (0 - 100)
+  let timing_score = 0;
+  if (item.signal_event) timing_score += 45;
+  if (item.source === 'permits') timing_score += 35;
+  if (isPreferredTrade) timing_score += 20;
+  timing_score = Math.min(100, Math.max(0, timing_score));
+
+  // 7. EVIDENCE SCORE (0 - 100)
+  const observedSignalsCount = [
+    signals.emergency,
+    signals.sms_gap,
+    signals.quote_request || signals.estimate_language,
+    signals.booking,
+    signals.multiple_areas,
+    signals.contact_form,
+    signals.lead_capture
+  ].filter(Boolean).length;
+
+  let evidence_score = 30 + (observedSignalsCount * 12);
+  if (item.website && isRealWebsite(item.website)) evidence_score += 10;
+  if (email && isEmailValidated) evidence_score += 10;
+  evidence_score = Math.min(100, Math.max(0, evidence_score));
+
+  // 8. SIGNAL FRESHNESS SCORE (0 - 100)
+  let signal_freshness_score = 100;
+  if (item.created_at) {
+    const ageDays = (Date.now() - new Date(item.created_at).getTime()) / (1000 * 60 * 60 * 24);
+    if (ageDays > 30) signal_freshness_score = 50;
+    else if (ageDays > 14) signal_freshness_score = 70;
+    else if (ageDays > 7) signal_freshness_score = 85;
+    else signal_freshness_score = 100;
+  }
+
+  // COMPOSITE STRATEGIC SCORE (0 - 100)
+  const freshnessMultiplier = signal_freshness_score / 100;
+  let strategic_score = Math.round(
+    (fit_score * 0.20) +
+    (pain_score * 0.20) +
+    (intent_score * 0.15) +
+    (timing_score * 0.15) +
+    (contactability_score * 0.15) +
+    (ability_to_pay_score * 0.10) +
+    (evidence_score * freshnessMultiplier * 0.05)
+  );
+  strategic_score = Math.min(100, Math.max(0, strategic_score));
+
+  // DECISION STATE & PRIORITY TIER
+  let priority_tier: 'critical' | 'high' | 'medium' | 'low' = 'medium';
+  if (strategic_score >= 80 && contactability_score >= 60 && timing_score >= 40) {
+    priority_tier = 'critical';
+  } else if (strategic_score >= 65 && contactability_score >= 45) {
+    priority_tier = 'high';
+  } else if (strategic_score >= 45) {
+    priority_tier = 'medium';
+  } else {
+    priority_tier = 'low';
+  }
+
+  let decision_state = 'identified';
+  if (priority_tier === 'critical' || priority_tier === 'high') {
+    decision_state = 'actionable';
+  } else if (priority_tier === 'medium') {
+    decision_state = 'analyzing';
+  } else {
+    decision_state = 'closed';
+  }
+
+  // EXPECTED VALUE CALCULATION (Separating observed, inference, estimation)
+  const avgJobValue = isHighTicketTrade ? 2800 : isPreferredTrade ? 1800 : 1200;
+  const estimatedMonthlyRecoveredValue = Math.round(avgJobValue * (pain_score / 100) * 2);
+  const conversionProb = (strategic_score / 100) * (contactability_score / 100) * 0.30;
+  const expected_value = Math.round(estimatedMonthlyRecoveredValue * conversionProb);
+
+  // WHY NOW STRUCTURED REASONING
+  const observed_facts: string[] = [];
+  if (phone) observed_facts.push(`Observed phone line: ${phone}`);
+  if (email) observed_facts.push(`Observed direct email: ${email} (verified: ${isEmailValidated})`);
+  if (item.website) observed_facts.push(`Observed domain: ${item.website}`);
+  if (signals.sms_gap) observed_facts.push("Observed phone CTA with absence of SMS/text-back capability");
+  if (signals.emergency) observed_facts.push("Observed 24/7 or emergency service promise on website");
+  if (item.signal_event) observed_facts.push(`Active weather event signal: ${item.signal_event} (${item.signal_area || item.city})`);
+  if (item.source === 'permits') observed_facts.push(`Building permit activity recorded in ${item.city}`);
+
+  const inferences: string[] = [];
+  if (signals.sms_gap) {
+    inferences.push("High probability of dropping mobile visitors who prefer asynchronous messaging over voice calls");
+  }
+  if (signals.emergency && !signals.booking) {
+    inferences.push("Technicians engaged in field jobs leave incoming calls to voicemail during surge hours");
+  }
+  if (item.signal_event) {
+    inferences.push("Elevated local call volume creates immediate backlog and customer leakage");
+  }
+
+  const estimations: string[] = [
+    `Estimated average contractor ticket for ${item.trade}: $${avgJobValue}`,
+    `Estimated monthly revenue at risk from dropped leads: $${estimatedMonthlyRecoveredValue}`,
+    `Calculated expected value under current timing window: $${expected_value}`
+  ];
+
+  const why_now = {
+    what_is_happening: item.signal_event 
+      ? `Active demand surge in ${item.city} driven by ${item.signal_event} with high contractor need`
+      : `${item.name} is actively advertising ${item.trade} in ${item.city} with evident lead response gaps`,
+    what_evidence_exists: observed_facts,
+    why_it_matters: "Every missed call or slow estimate follow-up redirects high-margin jobs to prompt competitors.",
+    why_now: item.signal_event 
+      ? `Event window is live right now; immediate automated outreach produces peak response rates.`
+      : `High contactability and verifiable pain signal create an optimal window for high-relevance outreach.`,
+    recommended_action: "Dispatch personalized outreach with interactive demo illustrating automated instant-response recovery.",
+    potential_economic_result: `$${estimatedMonthlyRecoveredValue} estimated monthly recovered jobs (${expected_value} EV)`,
+    distinctions: {
+      observed_facts,
+      inferences,
+      estimations
+    }
+  };
+
+  return {
+    fit_score,
+    intent_score,
+    pain_score,
+    ability_to_pay_score,
+    contactability_score,
+    timing_score,
+    evidence_score,
+    signal_freshness_score,
+    strategic_score,
+    expected_value,
+    decision_state,
+    priority_tier,
+    why_now_json: JSON.stringify(why_now),
+    why_now
+  };
+}
+
+export async function syncOpportunityDecision(
+  db: D1Database,
+  prospectId: string,
+  action: string,
+  notes?: string
+): Promise<void> {
+  try {
+    const opp = await db.prepare("SELECT id FROM opportunities WHERE prospect_id = ?").bind(prospectId).first() as any;
+    if (opp) {
+      const nowIso = new Date().toISOString();
+      let state = 'analyzing';
+      if (action === 'sent' || action === 'approve') state = 'dispatched';
+      else if (action === 'won' || action === 'converted') state = 'closed_won';
+      else if (action === 'replied' || action === 'positive') state = 'actionable_replied';
+      else if (action === 'discard') state = 'closed_discarded';
+      else if (action === 'demo') state = 'in_demo';
+
+      await db.prepare("UPDATE opportunities SET decision_state = ?, updated_at = ? WHERE id = ?")
+        .bind(state, nowIso, opp.id).run();
+
+      const actId = `act_${crypto.randomUUID().replace(/-/g, "")}`;
+      await db.prepare(`
+        INSERT INTO opportunity_actions (id, opportunity_id, action_type, status, details_json, proposed_at, executed_at)
+        VALUES (?, ?, ?, 'executed', ?, ?, ?)
+      `).bind(actId, opp.id, action, JSON.stringify({ notes: notes || action }), nowIso, nowIso).run();
+
+      if (['won', 'converted', 'replied', 'positive', 'demo'].includes(action)) {
+        const outId = `out_${crypto.randomUUID().replace(/-/g, "")}`;
+        const val = (action === 'won' || action === 'converted') ? 1800 : action === 'demo' ? 450 : 0;
+        await db.prepare(`
+          INSERT INTO opportunity_outcomes (id, opportunity_id, action_id, outcome_type, value_realized, notes, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `).bind(outId, opp.id, actId, action, val, notes || "", nowIso).run();
+      }
+    }
+  } catch (e) {
+    console.warn("[Opportunity Sync Error]", e);
+  }
+}
+
 /**
  * Multi-Factor Scoring Algorithm (0-100)
  * Evaluates 5 core dimensions:
@@ -3674,6 +4256,8 @@ export function calculateMultiFactorScore(
   evidenceSummary: string;
   evidenceItems?: any[];
   painHypothesis?: any;
+  strategicScore?: number;
+  strategicScores?: any;
 } {
   // Hard Quality Gate: immediate 0 score for retail chains
   if (isHardRejectedChain(item.name)) {
@@ -3870,13 +4454,19 @@ export function calculateMultiFactorScore(
     painHypothesis.quote_gap = "Requires manual back-and-forth for estimates. 50% of consumers choose the speediest contractor; manual followups risk losing leads to instant-responders.";
   }
 
+  const strat = calculateStrategicScores(
+    item, email, isEmailValidated, phone, isPriorityCity, isPriorityTrade, learningStats, signals, missionConfig
+  );
+
   return { 
     totalScore, 
     breakdown, 
     confidence: confidenceScore, 
     evidenceSummary,
     evidenceItems,
-    painHypothesis
+    painHypothesis,
+    strategicScore: strat.strategic_score,
+    strategicScores: strat
   };
 }
 
