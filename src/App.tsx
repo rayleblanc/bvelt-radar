@@ -222,11 +222,21 @@ export default function App() {
   const [isScrubbing, setIsScrubbing] = useState(false);
   const [runState, setRunState] = useState<'idle' | 'queued' | 'running' | 'completed' | 'failed'>('idle');
   const [lastRunError, setLastRunError] = useState<string | null>(null);
+  const [tenantRunFeedback, setTenantRunFeedback] = useState<{ run_id: string; jobs_enqueued: number } | null>(null);
   const [isTestingTelegram, setIsTestingTelegram] = useState(false);
   const [telegramToast, setTelegramToast] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [isTestingEmail, setIsTestingEmail] = useState(false);
   const [emailTestAddress, setEmailTestAddress] = useState('');
   const [emailToast, setEmailToast] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null);
+
+  const parseCityAndState = (rawCity: string) => {
+    if (!rawCity) return { city: 'Desconocida', state: '-' };
+    if (rawCity.includes(',')) {
+      const parts = rawCity.split(',').map(s => s.trim());
+      return { city: parts[0] || 'Desconocida', state: parts[1] || '-' };
+    }
+    return { city: rawCity, state: '-' };
+  };
 
   // App UI states
   const [showConfig, setShowConfig] = useState(false);
@@ -257,9 +267,14 @@ export default function App() {
         }
       }
 
-      // 2. GET /stats (protected by Worker HttpOnly cookie)
+      // Auth header for Bearer session token (supports iframe and header-based auth)
+      const token = localStorage.getItem('BVELT_FOUNDER_KEY') || 'FOUNDER_SERVICE_KEY_LOCAL';
+      const authHeaders: Record<string, string> = token ? { 'Authorization': `Bearer ${token}` } : {};
+
+      // 2. GET /stats (protected by Worker HttpOnly cookie or Bearer token)
       const statsRes = await fetch(`${apiUrl}/stats`, {
-        credentials: 'include'
+        credentials: 'include',
+        headers: authHeaders
       }).catch(() => null);
       
       if (statsRes && statsRes.ok) {
@@ -272,14 +287,39 @@ export default function App() {
         return;
       }
 
-      // 3. GET /prospects (SINGLE REAL PRODUCTION ROUTE)
-      let prospectsRes = await fetch(`${apiUrl}/prospects`, {
-        credentials: 'include'
+      // Fetch Tenant Configs first so tenants are known
+      try {
+        const tenRes = await fetch(`${apiUrl}/api/tenants/config`, { credentials: 'include' });
+        if (tenRes && tenRes.ok) {
+          const tenList = await tenRes.json();
+          if (Array.isArray(tenList)) setTenants(tenList);
+        }
+      } catch (e) {}
+
+      // In Tenant mode: /prospects and /opportunities must ALWAYS send tenant_id=selectedTenantId.
+      // If no tenant is selected, do not request data!
+      const isTenantMode = currentMode === 'tenant';
+      const hasTenantSelected = isTenantMode && !!selectedTenantId && selectedTenantId !== 'founder';
+
+      if (isTenantMode && !hasTenantSelected) {
+        setProspects([]);
+        setOpportunities([]);
+        setLoading(false);
+        return;
+      }
+
+      const queryParam = isTenantMode ? `?tenant_id=${encodeURIComponent(selectedTenantId)}` : '';
+
+      // 3. GET /prospects
+      let prospectsRes = await fetch(`${apiUrl}/prospects${queryParam}`, {
+        credentials: 'include',
+        headers: authHeaders
       }).catch(() => null);
 
       if (!prospectsRes || !prospectsRes.ok) {
-        prospectsRes = await fetch(`${apiUrl}/api/prospects`, {
-          credentials: 'include'
+        prospectsRes = await fetch(`${apiUrl}/api/prospects${queryParam}`, {
+          credentials: 'include',
+          headers: authHeaders
         }).catch(() => null);
       }
       
@@ -312,7 +352,7 @@ export default function App() {
 
         // Fetch Opportunity Intelligence data
         try {
-          const oppUrl = `${apiUrl}/opportunities${selectedTenantId && selectedTenantId !== 'founder' ? `?tenant_id=${encodeURIComponent(selectedTenantId)}` : ''}`;
+          const oppUrl = `${apiUrl}/opportunities${queryParam}`;
           const oppRes = await fetch(oppUrl, { credentials: 'include' });
           if (oppRes && oppRes.ok) {
             const oppList = await oppRes.json();
@@ -322,21 +362,12 @@ export default function App() {
 
         // Fetch Missions data
         try {
-          const misUrl = `${apiUrl}/missions${selectedTenantId && selectedTenantId !== 'founder' ? `?tenant_id=${encodeURIComponent(selectedTenantId)}` : ''}`;
+          const misUrl = `${apiUrl}/missions${queryParam}`;
           const misRes = await fetch(misUrl, { credentials: 'include' });
           if (misRes && misRes.ok) {
             const misData = await misRes.json();
             if (Array.isArray(misData.missions)) setMissions(misData.missions);
             if (Array.isArray(misData.daily_missions)) setDailyMissions(misData.daily_missions);
-          }
-        } catch (e) {}
-
-        // Fetch Tenant Configs
-        try {
-          const tenRes = await fetch(`${apiUrl}/api/tenants/config`, { credentials: 'include' });
-          if (tenRes && tenRes.ok) {
-            const tenList = await tenRes.json();
-            if (Array.isArray(tenList)) setTenants(tenList);
           }
         } catch (e) {}
       } else if (prospectsRes?.status === 401) {
@@ -373,6 +404,7 @@ export default function App() {
       }).catch(() => null);
 
       if (res && res.ok) {
+        localStorage.setItem('BVELT_FOUNDER_KEY', candidate);
         setIsAuthenticated(true);
         setLoginError(null);
         setIsVerifying(false);
@@ -390,6 +422,7 @@ export default function App() {
 
   const handleLogout = async () => {
     await fetch(`${apiUrl}/logout`, { method: 'POST', credentials: 'include' }).catch(() => null);
+    localStorage.removeItem('BVELT_FOUNDER_KEY');
     setIsAuthenticated(false);
     setProspects([]);
     setStats(null);
@@ -416,6 +449,11 @@ export default function App() {
     window.addEventListener('beforeinstallprompt', handleInstallPrompt);
     return () => window.removeEventListener('beforeinstallprompt', handleInstallPrompt);
   }, [apiUrl]);
+
+  // Refetch telemetry on mode or tenant change
+  useEffect(() => {
+    fetchTelemetry();
+  }, [currentMode, selectedTenantId]);
 
   // Handle manual API config updates
   const saveApiSettings = (urlVal: string) => {
@@ -464,7 +502,7 @@ export default function App() {
     try {
       // 1. Send POST /run - returns IMMEDIATELY without waiting
       const runParam = currentMode === 'tenant' && selectedTenantId
-        ? `mode=tenant&tenant_id=${encodeURIComponent(selectedTenantId)}`
+        ? `mode=tenant&tenant_id=${encodeURIComponent(selectedTenantId)}&force=true`
         : `mode=founder`;
       const startRes = await fetch(`${apiUrl}/run?${runParam}`, {
         method: 'POST',
@@ -474,6 +512,14 @@ export default function App() {
       if (!startRes.ok) {
         const errJson = await startRes.json().catch(() => ({ error: 'Fallo al iniciar el run.' }));
         throw new Error(errJson.error || 'Fallo al iniciar el run.');
+      }
+
+      const runData = await startRes.json().catch(() => null);
+      if (currentMode === 'tenant' && runData) {
+        setTenantRunFeedback({
+          run_id: runData.run_id || runData.id || 'N/A',
+          jobs_enqueued: typeof runData.jobs_enqueued === 'number' ? runData.jobs_enqueued : 0
+        });
       }
 
       setRunState('running');
@@ -699,8 +745,15 @@ export default function App() {
   const parseSignals = (prospect: Prospect): string[] => {
     try {
       const parsedMeta = JSON.parse(prospect.signals_json);
+      if (Array.isArray(parsedMeta.signal_tags) && parsedMeta.signal_tags.length > 0) {
+        return parsedMeta.signal_tags.slice(0, 4);
+      }
       const activeSignals: string[] = [];
+      if (parsedMeta.permits_tag) {
+        activeSignals.push(parsedMeta.permits_tag);
+      }
       if (parsedMeta.signals) {
+        if (parsedMeta.signals.permits_label) activeSignals.push(parsedMeta.signals.permits_label);
         if (parsedMeta.signals.emergency) activeSignals.push("24/7 / Urgencias");
         if (parsedMeta.signals.sms_gap) activeSignals.push("SMS Gap");
         if (parsedMeta.signals.quote_request) activeSignals.push("Presupuesto");
@@ -921,6 +974,16 @@ export default function App() {
                   'Entrar'
                 )}
               </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setLoginInputKey('FOUNDER_SERVICE_KEY_LOCAL');
+                }}
+                className="text-[11px] text-slate-400 hover:text-blue-400 text-center w-full transition-colors font-mono"
+              >
+                💡 Usar clave por defecto: <span className="text-blue-400 underline">FOUNDER_SERVICE_KEY_LOCAL</span>
+              </button>
             </form>
           </div>
         </div>
@@ -1022,6 +1085,25 @@ export default function App() {
                 <RefreshCw className={`w-4 h-4 ${isScrubbing ? 'animate-spin' : ''}`} />
                 {isScrubbing ? 'CORRIENDO EN CLOUDFLARE...' : '▶ CORRER RADAR AHORA'}
               </button>
+
+              {/* Feedback tras correr en modo tenant: run_id y jobs_enqueued */}
+              {currentMode === 'tenant' && tenantRunFeedback && (
+                <div className="p-3 bg-indigo-950/40 border border-indigo-800/60 rounded-xl text-xs font-mono text-indigo-200 flex items-center justify-between">
+                  <div className="space-y-0.5">
+                    <div className="font-bold text-white flex items-center gap-1.5">
+                      <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
+                      Radar ejecutado para tenant
+                    </div>
+                    <div className="text-[11px] text-slate-300">
+                      run_id: <span className="text-indigo-300 font-semibold">{tenantRunFeedback.run_id}</span>
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    <div className="text-[10px] text-slate-400 uppercase">jobs_enqueued</div>
+                    <div className="text-sm font-bold text-emerald-400">{tenantRunFeedback.jobs_enqueued}</div>
+                  </div>
+                </div>
+              )}
               
               <div className="flex items-center justify-between px-2 text-[11px] font-mono text-slate-400">
                 <span className="flex items-center gap-1.5">
@@ -1146,6 +1228,35 @@ export default function App() {
                 )}
               </div>
 
+              {/* Banner bajo el selector: "Buscando para: {tenant_name} · {ciudades} · {niche}" */}
+              {currentMode === 'tenant' && (() => {
+                const curTenant = tenants.find(t => t.tenant_id === selectedTenantId) || (tenants.length > 0 ? tenants[0] : null);
+                const tName = curTenant?.tenant_name || curTenant?.tenant_id || selectedTenantId || 'Tenant';
+                let tCities = 'Sin ciudades';
+                if (curTenant?.cities_json) {
+                  try {
+                    const parsed = JSON.parse(curTenant.cities_json);
+                    if (Array.isArray(parsed) && parsed.length > 0) {
+                      tCities = parsed.join(', ');
+                    } else if (typeof parsed === 'string') {
+                      tCities = parsed;
+                    }
+                  } catch {
+                    tCities = curTenant.cities_json;
+                  }
+                }
+                const tNiche = curTenant?.niche || 'General';
+
+                return (
+                  <div className="px-3.5 py-2.5 bg-indigo-950/40 border border-indigo-800/50 rounded-xl text-xs font-mono text-indigo-300 flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-indigo-400 animate-pulse shrink-0" />
+                    <span className="truncate">
+                      Buscando para: <span className="font-semibold text-white">{tName}</span> · <span className="text-indigo-200">{tCities}</span> · <span className="text-indigo-200">{tNiche}</span>
+                    </span>
+                  </div>
+                );
+              })()}
+
               {/* 4 Main View Tabs */}
               <div className="grid grid-cols-4 gap-1 bg-slate-900/40 p-1 rounded-xl border border-slate-900 font-mono text-[11px] font-bold">
                 <button
@@ -1225,7 +1336,9 @@ export default function App() {
                   <div className="text-center py-10 bg-slate-900/10 rounded-2xl border border-slate-900 p-5">
                     <Sparkles className="w-6 h-6 text-slate-600 mx-auto mb-2" />
                     <p className="text-xs text-slate-500 leading-normal">
-                      No hay oportunidades identificadas en este filtro. Ejecuta el Radar para activar el Opportunity Intelligence engine.
+                      {currentMode === 'tenant'
+                        ? 'Aún no hay prospectos para este tenant. Pulsa CORRER RADAR AHORA.'
+                        : 'No hay oportunidades identificadas en este filtro. Ejecuta el Radar para activar el Opportunity Intelligence engine.'}
                     </p>
                   </div>
                 ) : (
@@ -1251,13 +1364,40 @@ export default function App() {
                                     {pBadge.label}
                                   </span>
                                 </div>
-                                <div className="flex items-center gap-2 text-[10px] text-slate-500 font-mono">
-                                  <span className="uppercase text-blue-400 font-semibold">{opp.prospect_trade || 'General'}</span>
-                                  <span>·</span>
-                                  <span>{opp.prospect_city}</span>
-                                  <span>·</span>
-                                  <span className="px-1.5 py-0.2 rounded bg-slate-800 text-slate-300 uppercase">{opp.decision_state || 'identificada'}</span>
-                                </div>
+                                {currentMode === 'tenant' ? (
+                                  <div className="space-y-1">
+                                    <div className="flex flex-wrap items-center gap-1.5 text-[10px] text-slate-400 font-mono">
+                                      <span className="text-slate-200 font-semibold">{parseCityAndState(opp.prospect_city || '').city}</span>
+                                      <span>·</span>
+                                      <span className="text-slate-200 font-semibold">{parseCityAndState(opp.prospect_city || '').state}</span>
+                                      <span>·</span>
+                                      <span className="px-1.5 py-0.5 rounded bg-indigo-950/60 text-indigo-300 border border-indigo-800/40 font-semibold uppercase">
+                                        {opp.prospect_trade || (tenants.find(t => t.tenant_id === selectedTenantId)?.niche) || 'General'}
+                                      </span>
+                                    </div>
+                                    <div className="flex flex-wrap items-center gap-1 pt-0.5">
+                                      {whyNow.signals && Array.isArray(whyNow.signals) && whyNow.signals.length > 0 ? (
+                                        whyNow.signals.map((sig: string, sIdx: number) => (
+                                          <span key={sIdx} className="px-1.5 py-0.5 rounded bg-amber-950/30 text-[9px] text-amber-300 font-mono border border-amber-600/30 font-bold">
+                                            ⚡ {sig}
+                                          </span>
+                                        ))
+                                      ) : (
+                                        <span className="px-1.5 py-0.5 rounded bg-blue-950/30 text-[9px] text-blue-300 font-mono border border-blue-800/30">
+                                          ⚡ Oportunidad Estratégica
+                                        </span>
+                                      )}
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <div className="flex items-center gap-2 text-[10px] text-slate-500 font-mono">
+                                    <span className="uppercase text-blue-400 font-semibold">{opp.prospect_trade || 'General'}</span>
+                                    <span>·</span>
+                                    <span>{opp.prospect_city}</span>
+                                    <span>·</span>
+                                    <span className="px-1.5 py-0.2 rounded bg-slate-800 text-slate-300 uppercase">{opp.decision_state || 'identificada'}</span>
+                                  </div>
+                                )}
                               </div>
                               <div className="text-right shrink-0">
                                 <div className="text-xs font-mono font-bold text-emerald-400">
@@ -1413,7 +1553,9 @@ export default function App() {
                   <div className="text-center py-10 bg-slate-900/10 rounded-2xl border border-slate-900 p-5">
                     <Info className="w-6 h-6 text-slate-600 mx-auto mb-2" />
                     <p className="text-xs text-slate-500 leading-normal">
-                      No se encontraron prospectos en la categoría '{activeFilter}'. Ejecuta el radar para prospectar.
+                      {currentMode === 'tenant'
+                        ? 'Aún no hay prospectos para este tenant. Pulsa CORRER RADAR AHORA.'
+                        : `No se encontraron prospectos en la categoría '${activeFilter}'. Ejecuta el radar para prospectar.`}
                     </p>
                   </div>
                 ) : (
@@ -1437,11 +1579,25 @@ export default function App() {
                                   {badge.label}
                                 </span>
                               </div>
-                              <div className="flex items-center gap-1.5 text-[10px] text-slate-500 font-mono">
-                                <span className="uppercase text-blue-400 font-semibold">{p.trade}</span>
-                                <span>·</span>
-                                <span>{p.city}</span>
-                              </div>
+                              {currentMode === 'tenant' ? (
+                                <div className="space-y-1">
+                                  <div className="flex flex-wrap items-center gap-1.5 text-[10px] text-slate-400 font-mono">
+                                    <span className="text-slate-200 font-semibold">{parseCityAndState(p.city).city}</span>
+                                    <span>·</span>
+                                    <span className="text-slate-200 font-semibold">{parseCityAndState(p.city).state}</span>
+                                    <span>·</span>
+                                    <span className="px-1.5 py-0.5 rounded bg-indigo-950/60 text-indigo-300 border border-indigo-800/40 font-semibold uppercase">
+                                      {p.trade || (tenants.find(t => t.tenant_id === selectedTenantId)?.niche) || 'General'}
+                                    </span>
+                                  </div>
+                                </div>
+                              ) : (
+                                <div className="flex items-center gap-1.5 text-[10px] text-slate-500 font-mono">
+                                  <span className="uppercase text-blue-400 font-semibold">{p.trade}</span>
+                                  <span>·</span>
+                                  <span>{p.city}</span>
+                                </div>
+                              )}
                             </div>
                             <span className="text-xs font-mono font-bold text-emerald-400 shrink-0">
                               {p.score}/100
@@ -1449,19 +1605,42 @@ export default function App() {
                           </div>
 
                           <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
-                            {p.signal_event && p.signal_area && (
-                              <span className="px-2 py-0.5 rounded bg-amber-950/40 text-[9px] text-amber-300 font-mono border border-amber-800/40 font-bold">
-                                ⚡ Clima: {p.signal_event} ({p.signal_area})
-                              </span>
+                            {currentMode === 'tenant' ? (
+                              <>
+                                {signalsList.length > 0 ? (
+                                  signalsList.map((sig, sIdx) => (
+                                    <span key={sIdx} className="px-1.5 py-0.5 rounded bg-amber-950/30 text-[9px] text-amber-300 font-mono border border-amber-600/30 font-bold">
+                                      ⚡ {sig}
+                                    </span>
+                                  ))
+                                ) : (
+                                  <span className="px-1.5 py-0.5 rounded bg-slate-800/60 text-[9px] text-slate-400 font-mono">
+                                    Señal base
+                                  </span>
+                                )}
+                                {p.signal_event && (
+                                  <span className="px-1.5 py-0.5 rounded bg-sky-950/40 text-[9px] text-sky-300 font-mono border border-sky-800/40">
+                                    {p.signal_event}
+                                  </span>
+                                )}
+                              </>
+                            ) : (
+                              <>
+                                {p.signal_event && p.signal_area && (
+                                  <span className="px-2 py-0.5 rounded bg-amber-950/40 text-[9px] text-amber-300 font-mono border border-amber-800/40 font-bold">
+                                    ⚡ Clima: {p.signal_event} ({p.signal_area})
+                                  </span>
+                                )}
+                                <span className="px-2 py-0.5 rounded bg-blue-900/30 text-[9px] text-blue-400 font-mono border border-blue-500/10">
+                                  Ángulo: {getAngleLabel(p.bvelt_angle)}
+                                </span>
+                                {signalsList.map((sig, sIdx) => (
+                                  <span key={sIdx} className="px-1.5 py-0.5 rounded bg-rose-950/20 text-[9px] text-rose-300 font-mono border border-rose-500/10">
+                                    • {sig}
+                                  </span>
+                                ))}
+                              </>
                             )}
-                            <span className="px-2 py-0.5 rounded bg-blue-900/30 text-[9px] text-blue-400 font-mono border border-blue-500/10">
-                              Ángulo: {getAngleLabel(p.bvelt_angle)}
-                            </span>
-                            {signalsList.map((sig, sIdx) => (
-                              <span key={sIdx} className="px-1.5 py-0.5 rounded bg-rose-950/20 text-[9px] text-rose-300 font-mono border border-rose-500/10">
-                                • {sig}
-                              </span>
-                            ))}
                           </div>
 
                           <div className="flex flex-wrap items-center gap-2 pt-1 font-mono text-[11px]">

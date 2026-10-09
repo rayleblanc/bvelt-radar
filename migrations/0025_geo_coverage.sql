@@ -1,0 +1,2 @@
+CREATE TABLE IF NOT EXISTS geo_coverage (tenant_id TEXT NOT NULL, place_key TEXT NOT NULL, trade TEXT NOT NULL, last_searched_at TEXT, searches INTEGER DEFAULT 0, candidates INTEGER DEFAULT 0, qualified INTEGER DEFAULT 0, replies INTEGER DEFAULT 0, wins INTEGER DEFAULT 0, PRIMARY KEY (tenant_id, place_key, trade));
+CREATE INDEX IF NOT EXISTS idx_geo_cov_last ON geo_coverage (tenant_id, last_searched_at);

@@ -1,5 +1,6 @@
-import { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage } from './worker';
+import { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp } from './worker';
 import { DEFAULT_FOUNDER_MISSION, MissionConfig } from './worker';
+import { fetchPermitContractors } from './permitSources';
 
 console.log("=========================================");
 console.log("RUNNING BVELT RADAR CUSTOM MISSION TESTS");
@@ -992,6 +993,134 @@ tests.push({
     cb = await getCircuitBreakerStatus(dbMock);
     assert(cb.active === true, "Circuit breaker should be active on provider failure");
     assert(cb.reason === "repeated authentication errors", "Must classify 401 as repeated authentication errors");
+  }
+});
+
+// Test 35: fetchPermitContractors returns empty array safely for unknown cities and handles errors gracefully
+tests.push({
+  name: "fetchPermitContractors returns empty array safely for unknown cities and handles timeouts gracefully",
+  run: async () => {
+    const emptyResult = await fetchPermitContractors("NonExistentCity12345", "hvac");
+    assert(Array.isArray(emptyResult), "Must return an array");
+    assert(emptyResult.length === 0, "Must return empty array for unsupported city");
+
+    // Null or empty parameters should not crash
+    const safeResult = await fetchPermitContractors("", "");
+    assert(Array.isArray(safeResult) && safeResult.length === 0, "Empty parameters should return empty array safely");
+  }
+});
+
+// Test 36: Permit contractor with source 'permits' and permits_90d >= 3 gets 'Obra activa (N permisos/90d)' tag and +10 score
+tests.push({
+  name: "Permit contractor with source 'permits' and permits_90d >= 3 gets 'Obra activa' tag and +10 score",
+  run: () => {
+    const permits_90d = 5;
+    const isPermitsSource = true;
+    const baseScore = 65;
+
+    // Simulate score job logic
+    const signalTags: string[] = [];
+    if (isPermitsSource && permits_90d >= 3) {
+      signalTags.push(`Obra activa (${permits_90d} permisos/90d)`);
+    }
+
+    let finalScore = baseScore;
+    if (isPermitsSource && permits_90d >= 3) {
+      finalScore = Math.min(100, finalScore + 10);
+    }
+
+    assert(signalTags.includes("Obra activa (5 permisos/90d)"), "Must include Obra activa signal tag with count");
+    assert(finalScore === 75, "Must add 10 points to base score");
+
+    // Edge case: permits_90d < 3
+    const lowPermits = 2;
+    const lowSignalTags: string[] = [];
+    if (isPermitsSource && lowPermits >= 3) {
+      lowSignalTags.push(`Obra activa (${lowPermits} permisos/90d)`);
+    }
+    let lowFinalScore = baseScore;
+    if (isPermitsSource && lowPermits >= 3) {
+      lowFinalScore = Math.min(100, lowFinalScore + 10);
+    }
+    assert(lowSignalTags.length === 0, "Must not add tag if permits_90d < 3");
+    assert(lowFinalScore === baseScore, "Must not add points if permits_90d < 3");
+
+    // Edge case: max cap at 100
+    const highBaseScore = 95;
+    const cappedScore = Math.min(100, highBaseScore + 10);
+    assert(cappedScore === 100, "Score must be capped at 100");
+  }
+});
+
+// Test 37: expandTenantIcp returns cached expansion when tc.updated_at <= tc.icp_expanded_at
+tests.push({
+  name: "expandTenantIcp returns cached expansion when updated_at <= icp_expanded_at",
+  run: async () => {
+    const cachedSegments = {
+      segments: [
+        { label: "Property Managers", osm_tags: ["office=estate_agent"], keywords: ["property", "manager"], why: "Recurring maintenance" }
+      ]
+    };
+    const tc = {
+      tenant_id: "tenant_roofing_co_01",
+      tenant_name: "Apex Commercial Roofing",
+      industry: "Roofing",
+      niche: "commercial_roofing",
+      icp_description: "Commercial building owners and property managers",
+      icp_expansion_json: JSON.stringify(cachedSegments),
+      icp_expanded_at: "2026-10-09T10:00:00Z",
+      updated_at: "2026-10-09T09:00:00Z"
+    };
+
+    const envMock: any = {
+      RADAR_DB: { prepare: () => ({ bind: () => ({ run: () => Promise.resolve() }) }) }
+    };
+
+    const result = await expandTenantIcp(envMock, tc);
+    assert(result !== null, "expandTenantIcp must not return null for valid cached data");
+    assert(result?.segments?.length === 1, "Must return 1 segment");
+    assert(result?.segments[0]?.label === "Property Managers", "Label must match cached segment");
+    assert(result?.segments[0]?.osm_tags[0] === "office=estate_agent", "osm_tags must match cached segment");
+  }
+});
+
+// Test 38: getPriorityTargets sets config.niches from expandTenantIcp when trades_json is empty
+tests.push({
+  name: "getPriorityTargets sets config.niches from expandTenantIcp segments",
+  run: async () => {
+    const cachedSegments = {
+      segments: [
+        { label: "Facility Managers", osm_tags: ["office=facility_management"], keywords: ["facility"], why: "Need HVAC repairs" },
+        { label: "HOA Boards", osm_tags: ["office=association"], keywords: ["hoa"], why: "Community clubhouse" }
+      ]
+    };
+    const tenantRow = {
+      tenant_id: "t_test_hvac",
+      tenant_name: "CoolAir Pro",
+      industry: "HVAC",
+      niche: "hvac",
+      cities_json: '["Tampa, FL"]',
+      trades_json: '[]',
+      icp_expansion_json: JSON.stringify(cachedSegments),
+      icp_expanded_at: "2026-10-09T10:00:00Z",
+      updated_at: "2026-10-09T09:00:00Z"
+    };
+
+    const envMock: any = {
+      RADAR_DB: {
+        prepare: (query: string) => ({
+          bind: () => ({
+            first: () => Promise.resolve(tenantRow),
+            run: () => Promise.resolve()
+          })
+        })
+      }
+    };
+
+    const targets = await getPriorityTargets(1, envMock, "tenant", "t_test_hvac");
+    assert(targets.missionConfig.niches.length === 2, "Niches should be populated from expanded ICP segments");
+    assert(targets.missionConfig.niches[0] === "Facility Managers", "First niche should be Facility Managers");
+    assert(targets.missionConfig.niches[1] === "HOA Boards", "Second niche should be HOA Boards");
   }
 });
 

@@ -14,6 +14,8 @@
 import { getAlerts, tradeForEvent, WeatherAlert } from './weatherSignals';
 import { dispatchEmail, EmailDispatchResult } from './emailDispatcher';
 import { auditDomainSecurityAndMx, auditWebsitePerformance, auditCityWeatherEmergency } from './openAudits';
+import { fetchPermitContractors } from './permitSources';
+import { pickTargets, findPlace, markSearched, placeKey } from './geoFrontier';
 
 // Global type declarations for Cloudflare Worker compilation
 declare global {
@@ -104,6 +106,8 @@ export interface Env {
   BREVO_API_KEY?: string;
   OUTBOUND_EMAIL_FROM?: string;
   PAGESPEED_API_KEY?: string;
+  RADAR_JOBS_PER_RUN?: string;
+  AI?: { run(model: string, input: any): Promise<any> };
 }
 
 export function getBudgetLimit(unitType: string): number {
@@ -778,6 +782,7 @@ export default {
         if (method === "GET" || method === "POST") {
           const mode = url.searchParams.get("mode") || "founder";
           const tenantId = url.searchParams.get("tenant_id") || null;
+          const force = mode === "tenant" || url.searchParams.get("force") === "true";
           
           const overrides = {
             cities: url.searchParams.get("cities") || url.searchParams.get("geographies") || null,
@@ -787,7 +792,7 @@ export default {
             min_score: url.searchParams.get("min_score") || null,
           };
           
-          const runResult = await startProspectingRun(env, mode, tenantId, overrides);
+          const runResult = await startProspectingRun(env, mode, tenantId, overrides, force);
 
           return Response.json({
             message: "Autonomous prospecting jobs enqueued successfully.",
@@ -1359,7 +1364,99 @@ export default {
           timestamp
         ).run();
 
-        return Response.json({ success: true, tenant_id: tenantId, message: "Tenant config saved successfully." }, { headers: corsHeaders });
+        let runId = null;
+        try {
+          const runPromise = startProspectingRun(env, "tenant", tenantId, undefined, true);
+          if (ctx && typeof ctx.waitUntil === "function") {
+            ctx.waitUntil(runPromise);
+          }
+          const runRes = await runPromise;
+          runId = runRes.run_id;
+        } catch (e) {
+          console.error("Error executing tenant prospecting run on config save:", e);
+        }
+
+        return Response.json({ success: true, tenant_id: tenantId, run_id: runId, message: "Tenant config saved successfully." }, { headers: corsHeaders });
+      }
+
+      // (a) POST /api/prospects/outcome
+      if ((path === "/api/prospects/outcome" || path === "/prospects/outcome") && method === "POST") {
+        const body: any = await request.json().catch(() => ({}));
+        const { prospect_id, tenant_id, outcome, value_usd } = body;
+
+        if (!prospect_id || !tenant_id || !outcome) {
+          return Response.json({ error: "Missing required fields: prospect_id, tenant_id, outcome" }, { status: 400, headers: corsHeaders });
+        }
+
+        const validOutcomes = ["contacted", "replied", "won", "lost"];
+        if (!validOutcomes.includes(outcome)) {
+          return Response.json({ error: "Invalid outcome value" }, { status: 400, headers: corsHeaders });
+        }
+
+        const prospect = await env.RADAR_DB.prepare("SELECT * FROM prospects WHERE id = ?").bind(prospect_id).first() as any;
+        if (!prospect) {
+          return Response.json({ error: "Prospect not found" }, { status: 404, headers: corsHeaders });
+        }
+
+        const prospectTenant = prospect.tenant_id || "founder";
+        if (prospectTenant !== tenant_id) {
+          return Response.json({ error: "Prospect does not belong to tenant" }, { status: 404, headers: corsHeaders });
+        }
+
+        const timestamp = new Date().toISOString();
+        try {
+          await env.RADAR_DB.prepare(
+            "UPDATE prospects SET tenant_outcome = ?, won_value_usd = COALESCE(?, won_value_usd), updated_at = ? WHERE id = ?"
+          ).bind(outcome, value_usd !== undefined && value_usd !== null ? Number(value_usd) : null, timestamp, prospect_id).run();
+        } catch (e) {
+          console.warn("[Outcome] Failed to update prospects outcome (missing migration?):", e);
+        }
+
+        if ((outcome === "replied" || outcome === "won") && prospect.city && prospect.trade) {
+          try {
+            const place = findPlace(prospect.city);
+            if (place) {
+              const placeKeyStr = placeKey(place);
+              const col = outcome === "replied" ? "replies" : "wins";
+              await env.RADAR_DB.prepare(
+                `UPDATE geo_coverage SET ${col} = ${col} + 1 WHERE tenant_id = ? AND place_key = ? AND trade = ?`
+              ).bind(tenant_id, placeKeyStr, prospect.trade.toLowerCase()).run();
+            }
+          } catch (e) {
+            // ignore if row doesn't exist
+          }
+        }
+
+        return Response.json({ success: true, prospect_id, outcome }, { headers: corsHeaders });
+      }
+
+      // (b) GET /api/tenants/roi
+      if ((path === "/api/tenants/roi" || path === "/tenants/roi") && method === "GET") {
+        const tenantId = url.searchParams.get("tenant_id");
+        if (!tenantId) {
+          return Response.json({ error: "Missing tenant_id parameter" }, { status: 400, headers: corsHeaders });
+        }
+
+        try {
+          const res = await env.RADAR_DB.prepare(`
+            SELECT 
+              SUM(CASE WHEN tenant_outcome = 'contacted' THEN 1 ELSE 0 END) as contacted,
+              SUM(CASE WHEN tenant_outcome = 'replied' THEN 1 ELSE 0 END) as replied,
+              SUM(CASE WHEN tenant_outcome = 'won' THEN 1 ELSE 0 END) as won,
+              SUM(CASE WHEN tenant_outcome = 'won' THEN COALESCE(won_value_usd, 0) ELSE 0 END) as won_value_usd_total
+            FROM prospects
+            WHERE COALESCE(tenant_id, 'founder') = ?
+          `).bind(tenantId).first() as any;
+
+          return Response.json({
+            contacted: Number(res?.contacted || 0),
+            replied: Number(res?.replied || 0),
+            won: Number(res?.won || 0),
+            won_value_usd_total: Number(res?.won_value_usd_total || 0)
+          }, { headers: corsHeaders });
+        } catch (e: any) {
+          return Response.json({ contacted: 0, replied: 0, won: 0, won_value_usd_total: 0 }, { headers: corsHeaders });
+        }
       }
 
       // 17. Test Endpoint: Founder vs Tenant Mode Independence (/api/test/tenant-mode)
@@ -2594,7 +2691,8 @@ export async function startProspectingRun(
     countries: string | null;
     languages: string | null;
     min_score: string | null;
-  }
+  },
+  force?: boolean
 ): Promise<{ run_id: string; jobs_enqueued: number; active_cities: string[]; active_trades: string[]; diagnostics: any }> {
   if (env.RADAR_GLOBAL_PAUSE === "true" || env.RADAR_GLOBAL_PAUSE === "1") {
     console.log("[startProspectingRun] RADAR_GLOBAL_PAUSE active. Prospecting run aborted.");
@@ -2611,26 +2709,28 @@ export async function startProspectingRun(
   const today = new Date().toISOString().split('T')[0];
 
   const tId = tenantId || "founder";
-  try {
-    const existingRun = await db.prepare("SELECT * FROM runs WHERE day = ? AND mode = ?").bind(today, mode).first() as any;
-    if (existingRun) {
-      console.log(`[startProspectingRun] Run already exists today for mode ${mode}. Returning existing run ID: ${existingRun.id}`);
-      return {
-        run_id: existingRun.id,
-        jobs_enqueued: 0,
-        active_cities: [],
-        active_trades: [],
-        diagnostics: { reason: "Run already exists today (idempotent skip)." }
-      };
+  if (!force) {
+    try {
+      const existingRun = await db.prepare("SELECT * FROM runs WHERE day = ? AND mode = ? AND (tenant_id = ? OR (? IS NULL AND tenant_id IS NULL))").bind(today, mode, tenantId, tenantId).first() as any;
+      if (existingRun) {
+        console.log(`[startProspectingRun] Run already exists today for mode ${mode}. Returning existing run ID: ${existingRun.id}`);
+        return {
+          run_id: existingRun.id,
+          jobs_enqueued: 0,
+          active_cities: [],
+          active_trades: [],
+          diagnostics: { reason: "Run already exists today (idempotent skip)." }
+        };
+      }
+    } catch (e) {
+      console.error("[startProspectingRun] Error checking duplicate runs:", e);
     }
-  } catch (e) {
-    console.error("[startProspectingRun] Error checking duplicate runs:", e);
   }
 
   const runId = crypto.randomUUID();
 
   const dayOfYear = getDayOfYear(new Date());
-  const { activeCities, activeTrades } = await getPriorityTargets(dayOfYear, env, mode, tenantId, overrides);
+  const { activeCities, activeTrades, pairs } = await getPriorityTargets(dayOfYear, env, mode, tenantId, overrides);
 
   // Register run record in D1
   await db.prepare(
@@ -2638,18 +2738,35 @@ export async function startProspectingRun(
   ).bind(runId, today, mode, tId, new Date().toISOString()).run();
 
   let jobsEnqueued = 0;
-  for (const city of activeCities) {
-    for (const trade of activeTrades) {
-      const jobId = `discovery_${runId}_${city.replace(/[^a-z0-9]/gi, '_')}_${trade}`.toLowerCase();
+  const hasOverrides = !!(overrides && (overrides.cities || overrides.trades || overrides.countries || overrides.languages || overrides.min_score));
+
+  if (mode !== "tenant" && pairs && pairs.length > 0 && !hasOverrides) {
+    for (const pair of pairs) {
+      const jobId = `discovery_${runId}_${pair.city.replace(/[^a-z0-9]/gi, '_')}_${pair.trade.replace(/[^a-z0-9]/gi, '_')}`.toLowerCase();
       await enqueueJob(env, {
         run_id: runId,
         job_id: jobId,
         type: 'discovery',
         mode,
         tenant_id: tenantId,
-        payload: { city, trade, overrides }
+        payload: { city: pair.city, trade: pair.trade, overrides }
       });
       jobsEnqueued++;
+    }
+  } else {
+    for (const city of activeCities) {
+      for (const trade of activeTrades) {
+        const jobId = `discovery_${runId}_${city.replace(/[^a-z0-9]/gi, '_')}_${trade}`.toLowerCase();
+        await enqueueJob(env, {
+          run_id: runId,
+          job_id: jobId,
+          type: 'discovery',
+          mode,
+          tenant_id: tenantId,
+          payload: { city, trade, overrides }
+        });
+        jobsEnqueued++;
+      }
     }
   }
 
@@ -2672,13 +2789,103 @@ export async function startProspectingRun(
 }
 
 /**
+ * Classifies businesses using Cloudflare Workers AI (Llama 3.2 3B Instruct)
+ */
+export async function classifyWithWorkersAI(
+  env: Env,
+  name: string,
+  website: string | null,
+  trade: string
+): Promise<{ ok: boolean; reason: string }> {
+  if (!env.AI || typeof env.AI.run !== "function") {
+    return { ok: true, reason: "no_ai" };
+  }
+
+  try {
+    const response = await env.AI.run("@cf/meta/llama-3.2-3b-instruct", {
+      messages: [
+        {
+          role: "system",
+          content: "Responde SOLO JSON {\"real_local_business\":boolean,\"matches_trade\":boolean,\"reason\":string}. real_local_business=false si es institución pública, universidad, iglesia, asociación, directorio, tienda de cadena o no ofrece servicios al público."
+        },
+        {
+          role: "user",
+          content: `Nombre: ${name}\nWeb: ${website || "n/a"}\nOficio buscado: ${trade}`
+        }
+      ],
+      max_tokens: 80
+    });
+
+    let rawText = "";
+    if (typeof response === "string") {
+      rawText = response;
+    } else if (response && typeof response.response === "string") {
+      rawText = response.response;
+    } else if (response && typeof response.result === "string") {
+      rawText = response.result;
+    } else {
+      rawText = JSON.stringify(response);
+    }
+
+    const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      return { ok: true, reason: "no_json_match" };
+    }
+
+    const parsed = JSON.parse(jsonMatch[0]);
+    const realLocal = !!parsed.real_local_business;
+    const matchesTrade = !!parsed.matches_trade;
+    const reason = String(parsed.reason || "");
+
+    return {
+      ok: realLocal && matchesTrade,
+      reason: reason || "ai_classification"
+    };
+  } catch (e: any) {
+    return { ok: true, reason: e.message || "error_open" };
+  }
+}
+
+/**
  * 1. DISCOVERY JOB: Scrapes directory businesses for 1 city + trade, enqueues enrich jobs
  */
 async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void> {
   const { city, trade, overrides } = job.payload;
-  console.log(`[Job: discovery] Searching businesses in ${city} for ${trade}...`);
+  let customOsmTags: string[] | undefined = undefined;
+  if (job.mode === "tenant" && job.tenant_id && env.RADAR_DB) {
+    const cleanTrade = trade.toLowerCase().trim();
+    if (!OVERPASS_TRADE_TAGS[cleanTrade]) {
+      try {
+        const tcRow = await env.RADAR_DB.prepare(
+          "SELECT icp_expansion_json FROM tenant_config WHERE tenant_id = ?"
+        ).bind(job.tenant_id).first() as any;
+        if (tcRow && tcRow.icp_expansion_json) {
+          const expansion = typeof tcRow.icp_expansion_json === "string" 
+            ? JSON.parse(tcRow.icp_expansion_json) 
+            : tcRow.icp_expansion_json;
+          if (expansion && Array.isArray(expansion.segments)) {
+            // Find segment matching the trade label (case-insensitive) or collect all valid osm_tags
+            const matchingSeg = expansion.segments.find(
+              (s: any) => (s.label || "").toLowerCase().trim() === cleanTrade
+            );
+            if (matchingSeg && Array.isArray(matchingSeg.osm_tags) && matchingSeg.osm_tags.length > 0) {
+              customOsmTags = matchingSeg.osm_tags;
+            } else {
+              // If no exact segment label matches, aggregate osm_tags from segments
+              const allSegTags = expansion.segments.flatMap((s: any) => Array.isArray(s.osm_tags) ? s.osm_tags : []);
+              if (allSegTags.length > 0) {
+                customOsmTags = Array.from(new Set(allSegTags));
+              }
+            }
+          }
+        }
+      } catch (e) {
+        console.warn("[handleDiscoveryJob] Error reading icp_expansion_json from D1:", e);
+      }
+    }
+  }
 
-  const { businesses: scraped, diagnostics } = await fetchLocalBusinessesWithDiagnostics(city, trade, env);
+  const { businesses: scraped, diagnostics } = await fetchLocalBusinessesWithDiagnostics(city, trade, env, customOsmTags);
 
   if (scraped.length === 0) {
     console.warn(`[Job: discovery] 0 businesses found for ${city} - ${trade}:`, diagnostics.reason);
@@ -2699,6 +2906,15 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
           .bind(diagnostics.reason, new Date().toISOString(), job.job_id).run();
       } catch (e) {}
     }
+
+    const place = findPlace(city);
+    if (place) {
+      await markSearched(env.RADAR_DB, job.tenant_id || "founder", place, trade, {
+        candidates: scraped.length,
+        qualified: 0
+      });
+    }
+
     return;
   }
 
@@ -2706,11 +2922,43 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
   const remainingBudget = await getRemainingBudget(env.RADAR_DB, tenantId, 'discovery_units');
   if (remainingBudget <= 0) {
     console.log(`[Job: discovery] 0 discovery units available for tenant: ${tenantId}`);
+    const place = findPlace(city);
+    if (place) {
+      await markSearched(env.RADAR_DB, job.tenant_id || "founder", place, trade, {
+        candidates: scraped.length,
+        qualified: 0
+      });
+    }
     return;
   }
-  const bounded = scraped.slice(0, remainingBudget);
+
+  const ranked = [...scraped].sort((a, b) => {
+    const permitsA = typeof a.permits_90d === 'number' ? a.permits_90d : 0;
+    const permitsB = typeof b.permits_90d === 'number' ? b.permits_90d : 0;
+    if (permitsB !== permitsA) {
+      return permitsB - permitsA;
+    }
+
+    const hasPhoneA = a.phone && a.phone.trim().length > 0 ? 1 : 0;
+    const hasPhoneB = b.phone && b.phone.trim().length > 0 ? 1 : 0;
+    if (hasPhoneB !== hasPhoneA) {
+      return hasPhoneB - hasPhoneA;
+    }
+
+    const hasRealWebA = a.website && isRealWebsite(a.website) ? 1 : 0;
+    const hasRealWebB = b.website && isRealWebsite(b.website) ? 1 : 0;
+    if (hasRealWebB !== hasRealWebA) {
+      return hasRealWebB - hasRealWebA;
+    }
+
+    return 0;
+  });
+
+  const perJobCap = Math.max(3, Math.min(6, Math.floor(remainingBudget / 4)));
+  const bounded = ranked.slice(0, Math.min(remainingBudget, perJobCap));
   let enqueuedEnrich = 0;
   let filteredCount = 0;
+  let aiClassifyCalls = 0;
 
   for (const candidate of bounded) {
     // Atomically reserve a discovery unit before processing the candidate
@@ -2792,6 +3040,16 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
       continue;
     }
 
+    if (aiClassifyCalls < 25) {
+      aiClassifyCalls++;
+      const aiCheck = await classifyWithWorkersAI(env, candidate.name, candidate.website, trade);
+      if (!aiCheck.ok) {
+        await releaseBudget(env.RADAR_DB, tenantId, 'discovery_units', 1);
+        filteredCount++;
+        continue;
+      }
+    }
+
     let signalEvent: string | null = candidate.signal_event || null;
     let signalArea: string | null = candidate.signal_area || null;
 
@@ -2822,13 +3080,17 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
     const prospectId = crypto.randomUUID();
     const demoToken = crypto.randomUUID().replace(/-/g, "");
     const postalCode = candidate.postal_code || candidate.zip || null;
+    const initialSignalsJson = JSON.stringify({
+      permits_90d: candidate.permits_90d ?? null,
+      signals: {}
+    });
     await env.RADAR_DB.prepare(`
       INSERT INTO prospects (
         id, mode, tenant_id, name, city, trade, website, phone, email, 
         score, signals_json, score_breakdown, variant_id, status, source, 
         created_at, updated_at, bvelt_angle, identity_key, demo_token, 
         signal_event, signal_area, postal_code
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '{}', '{}', 'missed_calls', 'discovered', ?, ?, ?, 'missed_calls', ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, '{}', 'missed_calls', 'discovered', ?, ?, ?, 'missed_calls', ?, ?, ?, ?, ?)
     `).bind(
       prospectId,
       job.mode,
@@ -2839,6 +3101,7 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
       candidate.website || null,
       candidate.phone || null,
       candidate.email || null,
+      initialSignalsJson,
       candidate.source || 'scraper',
       new Date().toISOString(),
       new Date().toISOString(),
@@ -2871,6 +3134,7 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
         phone: candidate.phone,
         email: candidate.email,
         source: candidate.source,
+        permits_90d: candidate.permits_90d ?? null,
         overrides
       }
     });
@@ -2892,13 +3156,21 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
     await env.RADAR_DB.prepare("UPDATE runs SET discovered = discovered + ?, errors_json = ? WHERE id = ?")
       .bind(enqueuedEnrich, JSON.stringify(errorsArr), job.run_id).run();
   } catch (e) {}
+
+  const place = findPlace(city);
+  if (place) {
+    await markSearched(env.RADAR_DB, job.tenant_id || "founder", place, trade, {
+      candidates: scraped.length,
+      qualified: enqueuedEnrich
+    });
+  }
 }
 
 /**
  * 2. ENRICH JOB: Scrapes candidate website HTML, extracts signals, enqueues score job without burning quotas
  */
 async function handleEnrichJob(job: RadarJobMessage, env: Env): Promise<void> {
-  const { prospect_id, overrides } = job.payload;
+  const { prospect_id, overrides, permits_90d } = job.payload;
   const prospect = await env.RADAR_DB.prepare("SELECT * FROM prospects WHERE id = ?").bind(prospect_id).first() as any;
   if (!prospect) return;
 
@@ -2910,7 +3182,7 @@ async function handleEnrichJob(job: RadarJobMessage, env: Env): Promise<void> {
       type: 'score',
       mode: job.mode,
       tenant_id: job.tenant_id,
-      payload: { prospect_id, overrides }
+      payload: { prospect_id, overrides, permits_90d }
     });
     return;
   }
@@ -3023,10 +3295,18 @@ async function handleEnrichJob(job: RadarJobMessage, env: Env): Promise<void> {
     }
   }
 
+  let existingMeta: any = {};
+  try {
+    existingMeta = JSON.parse(prospect.signals_json || '{}');
+  } catch (e) {}
+  const effectivePermits = permits_90d ?? existingMeta.permits_90d ?? null;
+
   const signalMetadata = {
+    ...existingMeta,
     scraped_phone: websitePhone,
     scraped_email: emailCandidate,
     is_email_validated: isEmailValidated,
+    permits_90d: effectivePermits,
     signals,
     technical_audits: {
       pagespeed_score: webAudit?.mobileScore || null,
@@ -3070,7 +3350,7 @@ async function handleEnrichJob(job: RadarJobMessage, env: Env): Promise<void> {
     type: 'score',
     mode: job.mode,
     tenant_id: job.tenant_id,
-    payload: { prospect_id, overrides }
+    payload: { prospect_id, overrides, permits_90d: effectivePermits }
   });
 }
 
@@ -3078,7 +3358,7 @@ async function handleEnrichJob(job: RadarJobMessage, env: Env): Promise<void> {
  * 3. SCORE JOB: Computes 0-100 multi-factor score and Bvelt angle
  */
 async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
-  const { prospect_id, overrides } = job.payload;
+  const { prospect_id, overrides, permits_90d: payloadPermits } = job.payload;
   const prospect = await env.RADAR_DB.prepare("SELECT * FROM prospects WHERE id = ?").bind(prospect_id).first() as any;
   if (!prospect) return;
 
@@ -3092,6 +3372,9 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
   try {
     parsedMeta = JSON.parse(prospect.signals_json || '{}');
   } catch (e) {}
+
+  const permits_90d = Number(payloadPermits ?? parsedMeta.permits_90d ?? prospect.permits_90d ?? 0);
+  const isPermitsSource = (prospect.source === 'permits' || job.payload.source === 'permits');
 
   const signals = parsedMeta.signals || {};
   const isEmailValidated = !!parsedMeta.is_email_validated;
@@ -3128,6 +3411,39 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
     missionConfig
   );
 
+  // Generación de etiquetas de señal (incluyendo SMS Gap, Multi-área y Obra activa)
+  const signalTags: string[] = [];
+  if (isPermitsSource && permits_90d >= 3) {
+    signalTags.push(`Obra activa (${permits_90d} permisos/90d)`);
+    signals.active_permits = true;
+    signals.permits_label = `Obra activa (${permits_90d} permisos/90d)`;
+    evidenceItems.unshift({
+      signal_type: 'active_permits',
+      value: 'detected',
+      source_url: 'municipal_permits',
+      source_type: 'permit_records',
+      observed_at: new Date().toISOString(),
+      evidence_text: `Obra activa (${permits_90d} permisos/90d)`,
+      confidence: 1.0,
+      freshness: 1.0,
+      page_type: 'permits'
+    });
+  }
+  if (signals.emergency) signalTags.push("24/7 / Urgencias");
+  if (signals.sms_gap) signalTags.push("SMS Gap");
+  if (signals.quote_request) signalTags.push("Presupuesto");
+  if (signals.booking) signalTags.push("Reserva");
+  if (signals.multiple_areas) signalTags.push("Multi-área");
+  if (signals.lead_capture) signalTags.push("Captura Leads");
+  if (signals.contact_form) signalTags.push("Contacto");
+
+  // Suma 10 puntos si viene de permisos y tiene >= 3 permisos en 90 días (máximo 100)
+  let finalScore = totalScore;
+  if (isPermitsSource && permits_90d >= 3) {
+    finalScore = Math.min(100, finalScore + 10);
+    breakdown.active_permits = 10;
+  }
+
   let bveltAngle = "missed_lead_response";
   if (signals.emergency) {
     bveltAngle = "after_hours";
@@ -3144,16 +3460,24 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
   }
 
   const variantId = (hashCode(prospect.name + prospect.city) % 2 === 0) ? "missed_calls" : "dormant_leads";
+  const evidenceSummaryWithPermits = (isPermitsSource && permits_90d >= 3)
+    ? `Obra activa (${permits_90d} permisos/90d); ${evidenceSummary}`
+    : evidenceSummary;
 
   const updatedMeta = {
     ...parsedMeta,
+    permits_90d,
+    signal_tags: signalTags,
+    active_signals: signalTags,
+    permits_tag: (isPermitsSource && permits_90d >= 3) ? `Obra activa (${permits_90d} permisos/90d)` : undefined,
+    signals,
     is_priority_city: isPriorityCity,
     is_priority_trade: isPriorityTrade,
     variant_id: variantId,
     score_breakdown: breakdown,
     bvelt_angle: bveltAngle,
     confidence,
-    evidence_summary: evidenceSummary,
+    evidence_summary: evidenceSummaryWithPermits,
     evidence_json: evidenceItems,
     pain_hypothesis_json: painHypothesis
   };
@@ -3178,10 +3502,10 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
   );
 
   // Determine commercial value band based on total score
-  const valueBand = totalScore >= 80 ? "premium" : totalScore >= 60 ? "high" : totalScore >= 45 ? "medium" : "low";
+  const valueBand = finalScore >= 80 ? "premium" : finalScore >= 60 ? "high" : finalScore >= 45 ? "medium" : "low";
 
   // Rule: Do not set QUALIFIED if score < 45 OR no email
-  if (totalScore < 45 || !prospect.email) {
+  if (finalScore < 45 || !prospect.email) {
     await env.RADAR_DB.prepare(`
       UPDATE prospects
       SET score = ?, opportunity_score = ?, confidence_score = ?, evidence_json = ?, commercial_value_band = ?, pain_hypothesis_json = ?, signals_json = ?, score_breakdown = ?, variant_id = ?, bvelt_angle = ?,
@@ -3189,8 +3513,8 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
           status = 'disqualified', outcome = 'low_score_or_no_email', updated_at = ?
       WHERE id = ?
     `).bind(
-      totalScore,
-      totalScore,
+      finalScore,
+      finalScore,
       confidence,
       JSON.stringify(evidenceItems),
       valueBand,
@@ -3222,8 +3546,8 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
         status = 'scored', updated_at = ?
     WHERE id = ?
   `).bind(
-    totalScore,
-    totalScore,
+    finalScore,
+    finalScore,
     confidence,
     JSON.stringify(evidenceItems),
     valueBand,
@@ -3350,7 +3674,7 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
           `🏢 <b>Business:</b> ${escapeHtml(prospect.name)}\n` +
           `📍 <b>Market:</b> ${escapeHtml(prospect.city)}\n` +
           `🛠 <b>Trade:</b> ${escapeHtml(prospect.trade)}\n\n` +
-          `📊 <b>Score:</b> <b>${totalScore}/100</b>\n` +
+          `📊 <b>Score:</b> <b>${finalScore}/100</b>\n` +
           `🎯 <b>Confidence:</b> <b>${confidence}%</b>\n\n` +
           `⚡ <b>Why Now:</b>\n` +
           (prospect.signal_event ? `• Severe weather event active: ${escapeHtml(prospect.signal_event)}\n` : "") +
@@ -3372,7 +3696,7 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
   }
 
   // Rule: "Pending approve" / QUEUED / HOLD only if: score >= 45 AND email present AND not hard-rejected
-  if (totalScore >= 45 && prospect.email && !isHardRejectedChain(prospect.name)) {
+  if (finalScore >= 45 && prospect.email && !isHardRejectedChain(prospect.name)) {
     await enqueueJob(env, {
       run_id: job.run_id,
       job_id: `approve_${prospect_id}`,
@@ -4175,33 +4499,59 @@ export async function getPriorityTargets(
     languages: string | null;
     min_score: string | null;
   }
-): Promise<{ activeCities: string[]; activeTrades: string[]; missionConfig: MissionConfig }> {
+): Promise<{ activeCities: string[]; activeTrades: string[]; missionConfig: MissionConfig; pairs?: { city: string; trade: string }[] }> {
   const config: MissionConfig = JSON.parse(JSON.stringify(DEFAULT_FOUNDER_MISSION));
 
+  let tenantPicks: { place: any; trade: string; why: string }[] = [];
   if (mode === "tenant" && tenantId) {
-    const tenantConfig = await env.RADAR_DB.prepare("SELECT * FROM tenant_config WHERE tenant_id = ?").bind(tenantId).first() as any;
-    if (tenantConfig) {
-      try {
-        config.geographies = JSON.parse(tenantConfig.cities_json || '[]');
-        config.niches = JSON.parse(tenantConfig.trades_json || '[]');
-        config.mode = "tenant";
-        config.target = `tenant_${tenantId}_customers`;
-        if (tenantConfig.countries_json) config.countries = JSON.parse(tenantConfig.countries_json);
-        if (tenantConfig.languages_json) config.languages = JSON.parse(tenantConfig.languages_json);
-        
-        // If niches are empty, use the tenant's trade to find B2B targets
-        if (config.niches.length === 0 && tenantConfig.niche) {
-          const trade = tenantConfig.niche.toLowerCase();
-          config.niches = TENANT_TARGET_MAP[trade] || ["property management", "real estate"];
+    try {
+      const tenantConfig = await env.RADAR_DB.prepare("SELECT * FROM tenant_config WHERE tenant_id = ?").bind(tenantId).first() as any;
+      if (tenantConfig) {
+        try {
+          config.geographies = JSON.parse(tenantConfig.cities_json || '[]');
+          config.niches = JSON.parse(tenantConfig.trades_json || '[]');
+          config.mode = "tenant";
+          config.target = `tenant_${tenantId}_customers`;
+          if (tenantConfig.countries_json) config.countries = JSON.parse(tenantConfig.countries_json);
+          if (tenantConfig.languages_json) config.languages = JSON.parse(tenantConfig.languages_json);
+          
+          // If niches are empty, use expandTenantIcp or fallback to TENANT_TARGET_MAP
+          if (config.niches.length === 0) {
+            const expanded = await expandTenantIcp(env, tenantConfig);
+            if (expanded && expanded.segments && expanded.segments.length > 0) {
+              config.niches = expanded.segments.map(s => s.label);
+            } else if (tenantConfig.niche) {
+              const trade = tenantConfig.niche.toLowerCase();
+              config.niches = TENANT_TARGET_MAP[trade] || ["property management", "real estate"];
+            }
+          }
+        } catch (e) {
+          console.error("Error parsing tenant config: ", e);
         }
-      } catch (e) {
-        console.error("Error parsing tenant config: ", e);
+
+        const citiesList = JSON.parse(tenantConfig.cities_json || '[]');
+        const centerLabel = citiesList[0] || null;
+        if (centerLabel) {
+          try {
+            tenantPicks = await pickTargets(env.RADAR_DB, {
+              tenantId,
+              trades: config.niches,
+              count: 6,
+              centerLabel,
+              serviceRadiusKm: Number(tenantConfig.service_radius_km || 60),
+              countries: ["US", "CA"]
+            });
+          } catch (e) {
+            console.warn("[getPriorityTargets] tenant pickTargets error:", e);
+            tenantPicks = [];
+          }
+        }
+      } else {
+        // Fallback generic tenant logic if ID provided but not found
+        config.geographies = ["Orlando", "Austin", "Tampa"];
+        config.niches = ["property_management", "real_estate", "hotel"];
       }
-    } else {
-      // Fallback generic tenant logic if ID provided but not found
-      config.geographies = ["Orlando", "Austin", "Tampa"];
-      config.niches = ["property_management", "real_estate", "hotel"];
-    }
+    } catch (e) {}
   } else if (mode === "tenant") {
     // PoC Generic Tenant mode
     config.geographies = ["Orlando", "Austin", "Tampa"];
@@ -4307,9 +4657,39 @@ export async function getPriorityTargets(
     return rateB - rateA;
   });
 
-  // Weather Signals: Call getAlerts ONCE with 2-letter state codes from FOUNDING_CITIES
+  // SOLO rama founder y sin overrides.cities: pickTargets
+  let picks: { place: any; trade: string; why: string }[] = [];
+  if (mode === "founder" && !(overrides && overrides.cities)) {
+    try {
+      picks = await pickTargets(env.RADAR_DB, {
+        tenantId: "founder",
+        trades: sortedNiches,
+        count: Math.min(20, Number(env.RADAR_JOBS_PER_RUN || 10)),
+        countries: ["US", "CA"]
+      });
+    } catch (e) {
+      console.warn("[getPriorityTargets] pickTargets error:", e);
+      picks = [];
+    }
+  }
+
+  // Weather Signals: Para el clima usa como estados las regiones de 2 letras de los picks de país US
   const foundingStr = env.FOUNDING_CITIES || config.geographies.join(";");
-  const extractedStates = Array.from(new Set(foundingStr.match(/\b[A-Z]{2}\b/g) || ["FL", "TX"]));
+  let extractedStates: string[] = [];
+
+  if (picks.length > 0) {
+    extractedStates = Array.from(new Set(
+      picks
+        .filter(p => ((p.place && p.place.country) || (p.place as any)?.país || p.place?.[2] || "").toUpperCase() === "US")
+        .map(p => ((p.place && p.place.region) || (p.place as any)?.región || p.place?.[1] || "").toUpperCase().trim())
+        .filter(r => /^[A-Z]{2}$/.test(r))
+    ));
+  }
+
+  if (extractedStates.length === 0) {
+    extractedStates = Array.from(new Set(foundingStr.match(/\b[A-Z]{2}\b/g) || ["FL", "TX"]));
+  }
+
   let weatherAlerts: WeatherAlert[] = [];
   try {
     weatherAlerts = await getAlerts(extractedStates);
@@ -4344,17 +4724,37 @@ export async function getPriorityTargets(
 
   (config as any).weather_alerts = weatherAlerts;
 
-  // Deterministically rotate across weighted geographies and niches (never single city)
-  const cityIdx1 = dayOfYear % sortedGeographies.length;
-  const cityIdx2 = (dayOfYear + 3) % sortedGeographies.length;
-  
-  const tradeIdx1 = (dayOfYear * 2) % sortedNiches.length;
-  const tradeIdx2 = (dayOfYear * 2 + 1) % sortedNiches.length;
+  let activeCities: string[];
+  let activeTrades: string[];
+  let pairs: { city: string; trade: string }[] | undefined = undefined;
 
-  const activeCities = Array.from(new Set([sortedGeographies[cityIdx1], sortedGeographies[cityIdx2]]));
-  const activeTrades = Array.from(new Set([sortedNiches[tradeIdx1], sortedNiches[tradeIdx2]]));
+  if (mode === "tenant" && tenantId && tenantPicks.length > 0) {
+    activeCities = tenantPicks.map(p => `${p.place[0]}, ${p.place[1]}`);
+    activeTrades = Array.from(new Set(tenantPicks.map(p => p.trade)));
+    pairs = tenantPicks.map(p => ({
+      city: `${p.place[0]}, ${p.place[1]}`,
+      trade: p.trade
+    }));
+  } else if (mode === "founder" && !(overrides && overrides.cities) && picks.length > 0) {
+    activeCities = picks.map(p => `${p.place[0]}, ${p.place[1]}`);
+    activeTrades = Array.from(new Set(picks.map(p => p.trade)));
+    pairs = picks.map(p => ({
+      city: `${p.place[0]}, ${p.place[1]}`,
+      trade: p.trade
+    }));
+  } else {
+    // Si pickTargets falla o devuelve [], conserva la rotación actual:
+    const cityIdx1 = dayOfYear % sortedGeographies.length;
+    const cityIdx2 = (dayOfYear + 3) % sortedGeographies.length;
+    
+    const tradeIdx1 = (dayOfYear * 2) % sortedNiches.length;
+    const tradeIdx2 = (dayOfYear * 2 + 1) % sortedNiches.length;
 
-  return { activeCities, activeTrades, missionConfig: config };
+    activeCities = Array.from(new Set([sortedGeographies[cityIdx1], sortedGeographies[cityIdx2]]));
+    activeTrades = Array.from(new Set([sortedNiches[tradeIdx1], sortedNiches[tradeIdx2]]));
+  }
+
+  return { activeCities, activeTrades, missionConfig: config, pairs };
 }
 
 /**
@@ -5049,12 +5449,15 @@ const OVERPASS_MIRRORS = [
 export async function fetchOverpassBusinesses(
   city: string, 
   trade: string, 
-  nominatimGeo: NominatimGeocoding | null
+  nominatimGeo: NominatimGeocoding | null,
+  customOsmTags?: string[]
 ): Promise<{ businesses: any[]; status: string }> {
   const cleanTrade = trade.toLowerCase().trim();
   const cityClean = city.split(",")[0].trim();
   
-  const specificTags = OVERPASS_TRADE_TAGS[cleanTrade] || [];
+  const specificTags = (customOsmTags && customOsmTags.length > 0)
+    ? customOsmTags
+    : (OVERPASS_TRADE_TAGS[cleanTrade] || []);
   const genericTags = [
     `craft="${cleanTrade}"`,
     `shop="${cleanTrade}"`,
@@ -5229,6 +5632,7 @@ export interface DiscoveryDiagnostics {
   discovered_raw: number;
   filtered: number;
   reason: string;
+  permits_found?: number;
 }
 
 /**
@@ -5237,7 +5641,8 @@ export interface DiscoveryDiagnostics {
 export async function fetchLocalBusinessesWithDiagnostics(
   city: string, 
   trade: string, 
-  env: Env
+  env: Env,
+  customOsmTags?: string[]
 ): Promise<{ businesses: any[]; diagnostics: DiscoveryDiagnostics }> {
   const cacheKey = `radar_cache_${city.replace(/[^a-z0-9]/gi, "_")}_${trade}_v3`.toLowerCase();
   
@@ -5318,29 +5723,28 @@ export async function fetchLocalBusinessesWithDiagnostics(
   const nominatimGeo = await fetchNominatimGeocoding(city);
   nominatimStatus = nominatimGeo ? `resolved_bbox [${nominatimGeo.bbox.join(", ")}]` : "geocoding_fallback";
 
-  // 1.5 Public Permit Data (Guerrilla Power - Real-time building permits as high-priority signals)
+  // 1.5 Municipal Permit Contractors Lookup (real-time building permits)
+  let permitCandidates: any[] = [];
   try {
-    const permits = await fetchPublicPermits(city);
-    if (permits && permits.length > 0) {
-      for (const p of permits) {
-        // Simple extraction for Socrata Orlando format
-        const bizName = p.licensee_name || p.owner_name;
-        if (bizName) {
-          rawBusinesses.push({
-            name: bizName,
-            city,
-            trade,
-            source: "permits",
-            signal_event: "Recent Permit Issued",
-            signal_area: p.issued_date || "recently"
-          });
-        }
-      }
+    const permitContractors = await fetchPermitContractors(city, trade);
+    if (permitContractors && permitContractors.length > 0) {
+      permitCandidates = permitContractors.map(p => ({
+        name: p.name,
+        phone: p.phone,
+        city: p.city || city,
+        website: null,
+        email: null,
+        source: "permits" as const,
+        permits_90d: p.permits_90d
+      }));
     }
-  } catch (e) {}
+  } catch (e) {
+    permitCandidates = [];
+  }
+  const permitsFound = permitCandidates.length;
 
   // 2. Overpass Mirror Cascade
-  const overpassRes = await fetchOverpassBusinesses(city, trade, nominatimGeo);
+  const overpassRes = await fetchOverpassBusinesses(city, trade, nominatimGeo, customOsmTags);
   overpassStatus = overpassRes.status;
   rawBusinesses.push(...overpassRes.businesses);
 
@@ -5353,20 +5757,19 @@ export async function fetchLocalBusinessesWithDiagnostics(
     bizdataStatus = rawBusinesses.length >= 5 ? `skipped (have ${rawBusinesses.length} results)` : "disabled (ENABLE_BIZDATA!=1)";
   }
 
-  // Deduplicate
+  // Deduplicate: permit candidates go first
+  const allCandidates = [...permitCandidates, ...rawBusinesses];
   const seen = new Set<string>();
   const deduped: any[] = [];
-  for (const item of rawBusinesses) {
+  for (const item of allCandidates) {
     const normName = (item.name || "").toLowerCase().trim().replace(/[^a-z0-9]/g, "");
-    const normCity = (item.city || "").toLowerCase().trim().replace(/[^a-z0-9]/g, "");
-    const key = `${normName}_${normCity}`;
-    if (normName && !seen.has(key)) {
-      seen.add(key);
+    if (normName && !seen.has(normName)) {
+      seen.add(normName);
       deduped.push(item);
     }
   }
 
-  const discoveredRaw = rawBusinesses.length;
+  const discoveredRaw = allCandidates.length;
   const filtered = discoveredRaw - deduped.length;
   const reason = deduped.length > 0 
     ? `Discovered ${deduped.length} businesses for ${city} - ${trade} across discovery cascade`
@@ -5380,7 +5783,8 @@ export async function fetchLocalBusinessesWithDiagnostics(
     bizdata_status: bizdataStatus,
     discovered_raw: discoveredRaw,
     filtered,
-    reason
+    reason,
+    permits_found: permitsFound
   };
 
   // Cache in KV for 24h
@@ -5404,7 +5808,7 @@ export async function fetchLocalBusinesses(city: string, trade: string, env: Env
 /**
  * Helper to call Gemini models with 5.5 second timeout and return parsed JSON
  */
-async function tryGemini(model: string, apiKey: string, prompt: string): Promise<{ subject: string; body: string } | null> {
+async function tryGemini<T = { subject: string; body: string }>(model: string, apiKey: string, prompt: string): Promise<T | null> {
   console.log(`[Gemini Cascade] Calling model: [${model}]`);
   
   try {
@@ -5416,7 +5820,7 @@ async function tryGemini(model: string, apiKey: string, prompt: string): Promise
         "x-goog-api-key": apiKey
       },
       body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt + " \n\nEnsure you return ONLY valid, raw JSON containing 'subject' and 'body' attributes." }] }],
+        contents: [{ parts: [{ text: prompt }] }],
         generationConfig: {
           responseMimeType: "application/json",
           temperature: 0.6
@@ -5430,9 +5834,15 @@ async function tryGemini(model: string, apiKey: string, prompt: string): Promise
       const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text;
       if (rawText) {
         const parsed = JSON.parse(rawText.trim());
-        if (parsed.subject && parsed.body) {
-          console.log(`[Gemini Cascade] Success using model: [${model}]`);
-          return { subject: parsed.subject, body: parsed.body };
+        if (parsed) {
+          if ((parsed as any).subject && (parsed as any).body) {
+            console.log(`[Gemini Cascade] Success using model: [${model}]`);
+            return parsed as T;
+          } else if ((parsed as any).segments) {
+            console.log(`[Gemini Cascade] Success parsed segments using model: [${model}]`);
+            return parsed as T;
+          }
+          return parsed as T;
         }
       }
     } else {
@@ -5442,6 +5852,102 @@ async function tryGemini(model: string, apiKey: string, prompt: string): Promise
     console.warn(`[Gemini Cascade] Model [${model}] request failed:`, e.message || e);
   }
   return null;
+}
+
+/**
+ * Expand Tenant ICP using Gemini or cached/stored expansion JSON
+ */
+export async function expandTenantIcp(
+  env: Env, 
+  tc: any
+): Promise<{ segments: { label: string; osm_tags: string[]; keywords: string[]; why: string }[] } | null> {
+  if (!tc) return null;
+
+  // 1. If tc.icp_expansion_json exists and (tc.updated_at || "") <= (tc.icp_expanded_at || ""), return parsed
+  if (tc.icp_expansion_json && (tc.updated_at || "") <= (tc.icp_expanded_at || "")) {
+    try {
+      const parsed = typeof tc.icp_expansion_json === "string" ? JSON.parse(tc.icp_expansion_json) : tc.icp_expansion_json;
+      if (parsed && Array.isArray(parsed.segments)) {
+        return parsed;
+      }
+    } catch (e) {
+      console.warn("[expandTenantIcp] Error parsing cached icp_expansion_json:", e);
+    }
+  }
+
+  // 2. Call Gemini with tryGemini
+  const apiKey = env.GEMINI_FOUNDER_API_KEY || env.GEMINI_SECONDARY_API_KEY;
+  if (!apiKey) {
+    return null;
+  }
+
+  const modelsStr = env.GEMINI_MODELS || "gemini-3.5-flash-lite";
+  const modelList = modelsStr.split(",").map(m => m.trim()).filter(Boolean);
+  const modelsToTry = modelList.slice(0, 2);
+
+  const prompt = `Negocio local: ${tc.tenant_name || ""}, industria ${tc.industry || ""}, nicho ${tc.niche || ""}, ICP ${tc.icp_description || ""}. Devuelve SOLO JSON {segments:[{label,osm_tags,keywords,why}]}, máximo 6 segmentos de CLIENTES que le compran a este negocio, ordenados por probabilidad de compra recurrente. osm_tags: 1 a 3 etiquetas OSM válidas como office=estate_agent o amenity=restaurant. Sin texto extra.`;
+
+  let geminiResult: any = null;
+  for (const model of modelsToTry) {
+    geminiResult = await tryGemini<any>(model, apiKey, prompt);
+    if (geminiResult) break;
+  }
+
+  if (!geminiResult || !Array.isArray(geminiResult.segments)) {
+    return null;
+  }
+
+  // 3. Validate segments: max 6 segments, each osm_tag with /^[a-z_]+=[a-z_]+$/
+  const osmTagRegex = /^[a-z_]+=[a-z_]+$/;
+  const validatedSegments: { label: string; osm_tags: string[]; keywords: string[]; why: string }[] = [];
+
+  for (const seg of geminiResult.segments.slice(0, 6)) {
+    if (!seg || typeof seg !== "object") continue;
+    const label = String(seg.label || "").trim();
+    if (!label) continue;
+
+    const rawTags = Array.isArray(seg.osm_tags) ? seg.osm_tags : [];
+    const validTags = rawTags
+      .map((t: any) => String(t || "").trim().toLowerCase())
+      .filter((t: string) => osmTagRegex.test(t));
+
+    const keywords = Array.isArray(seg.keywords) 
+      ? seg.keywords.map((k: any) => String(k || "").trim()).filter(Boolean)
+      : [];
+    const why = String(seg.why || "").trim();
+
+    validatedSegments.push({
+      label,
+      osm_tags: validTags,
+      keywords,
+      why
+    });
+  }
+
+  if (validatedSegments.length === 0) {
+    return null;
+  }
+
+  const expansionResult = { segments: validatedSegments };
+  const expandedAt = new Date().toISOString();
+  const expansionJson = JSON.stringify(expansionResult);
+
+  // 4. Save with UPDATE tenant_config inside try/catch
+  if (env.RADAR_DB && tc.tenant_id) {
+    try {
+      await env.RADAR_DB.prepare(
+        "UPDATE tenant_config SET icp_expansion_json = ?, icp_expanded_at = ? WHERE tenant_id = ?"
+      ).bind(expansionJson, expandedAt, tc.tenant_id).run();
+    } catch (saveErr) {
+      console.warn("[expandTenantIcp] Failed to save icp_expansion_json to D1 (migration 0024 may be pending):", saveErr);
+    }
+  }
+
+  // Also update in-memory object properties so caller sees updated state
+  tc.icp_expansion_json = expansionJson;
+  tc.icp_expanded_at = expandedAt;
+
+  return expansionResult;
 }
 
 /**
