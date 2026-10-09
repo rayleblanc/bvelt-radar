@@ -648,11 +648,74 @@ app.post('/api/reply', handleEventRequest);
 app.post('/webhook/events', handleEventRequest);
 
 // Telegram Webhook endpoint (POST updates and GET status)
-app.all(['/telegram-webhook', '/telegram/webhook', '/api/telegram-webhook', '/api/telegram/webhook'], (req, res) => {
+app.all(['/telegram-webhook', '/telegram/webhook', '/api/telegram-webhook', '/api/telegram/webhook', '/webhook/telegram', '/webhook', '/telegram'], async (req, res) => {
+  const botToken = process.env.TELEGRAM_BOT_TOKEN;
+  const configuredChatId = process.env.TELEGRAM_CHAT_ID ? String(process.env.TELEGRAM_CHAT_ID).replace(/['"]/g, '').trim() : '';
+
   if (req.method === 'GET') {
-    return res.status(200).json({ ok: true, status: 'active', message: 'Telegram webhook endpoint active (POST updates expected)' });
+    let webhookInfo: any = null;
+    if (botToken) {
+      try {
+        const infoRes = await fetch(`https://api.telegram.org/bot${botToken}/getWebhookInfo`);
+        webhookInfo = await infoRes.json().catch(() => null);
+      } catch (e) {}
+    }
+    return res.status(200).json({
+      ok: true,
+      status: 'active',
+      message: 'Telegram webhook endpoint active (POST updates expected)',
+      bot_token_configured: !!botToken,
+      chat_id_configured: !!configuredChatId,
+      current_telegram_webhook_info: webhookInfo?.result || webhookInfo
+    });
   }
-  res.status(200).send("OK");
+
+  // Handle Telegram POST update
+  if (req.method === 'POST') {
+    const update = req.body || {};
+    const chatId = update.message?.chat?.id || update.callback_query?.message?.chat?.id || update.callback_query?.from?.id;
+
+    if (botToken && chatId) {
+      // 1. Callback query
+      if (update.callback_query) {
+        const query = update.callback_query;
+        const callbackData = (query.data || "").trim();
+        await fetch(`https://api.telegram.org/bot${botToken}/answerCallbackQuery`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ callback_query_id: query.id, text: `Acción recibida: ${callbackData}` })
+        }).catch(() => {});
+
+        await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            chat_id: chatId,
+            text: `✅ <b>Botón interactivo recibido:</b> <code>${callbackData}</code>\n<i>Bvelt Radar dev server operativo.</i>`,
+            parse_mode: "HTML"
+          })
+        }).catch(() => {});
+      }
+
+      // 2. Text message
+      if (update.message?.text) {
+        const msgText = (update.message.text || "").trim();
+        await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            chat_id: chatId,
+            text: `🤖 <b>Bvelt Radar Dev Server</b>\n\nRecibí tu mensaje: <i>"${msgText}"</i>\n\nBot conectado y respondiendo correctamente.`,
+            parse_mode: "HTML"
+          })
+        }).catch(() => {});
+      }
+    }
+
+    return res.status(200).json({ ok: true });
+  }
+
+  res.status(405).send("Method Not Allowed");
 });
 
 // Telegram Test endpoint (supports GET and POST)

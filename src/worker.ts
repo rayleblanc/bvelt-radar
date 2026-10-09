@@ -596,58 +596,76 @@ export default {
 
       // 2. Telegram Webhook Callback Endpoint (handles interactive inline buttons and bot updates)
       const cleanTelegramPath = path.replace(/\/$/, "");
-      if (cleanTelegramPath === "/telegram/webhook" || cleanTelegramPath === "/telegram-webhook" || cleanTelegramPath === "/api/telegram-webhook" || cleanTelegramPath === "/api/telegram/webhook") {
+      const isTelegramWebhookRoute = (
+        cleanTelegramPath === "/telegram/webhook" ||
+        cleanTelegramPath === "/telegram-webhook" ||
+        cleanTelegramPath === "/api/telegram-webhook" ||
+        cleanTelegramPath === "/api/telegram/webhook" ||
+        cleanTelegramPath === "/webhook/telegram" ||
+        cleanTelegramPath === "/webhook" ||
+        cleanTelegramPath === "/telegram"
+      );
+
+      if (isTelegramWebhookRoute) {
         if (request.method === "GET") {
+          const botToken = env.TELEGRAM_BOT_TOKEN;
+          const chatId = env.TELEGRAM_CHAT_ID;
+          const action = url.searchParams.get("action") || "";
+          const shouldSetWebhook = url.searchParams.get("set_webhook") === "true" || action === "set_webhook";
+
+          let webhookSetupResult: any = null;
+          let webhookInfo: any = null;
+
+          if (botToken) {
+            if (shouldSetWebhook) {
+              const webhookUrl = `${url.origin}/telegram-webhook`;
+              const setupPayload: any = { url: webhookUrl };
+              if (env.TELEGRAM_WEBHOOK_SECRET && env.TELEGRAM_WEBHOOK_SECRET.trim()) {
+                setupPayload.secret_token = env.TELEGRAM_WEBHOOK_SECRET.trim();
+              }
+              try {
+                const setRes = await fetch(`https://api.telegram.org/bot${botToken}/setWebhook`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify(setupPayload),
+                  signal: AbortSignal.timeout(6000)
+                });
+                webhookSetupResult = await setRes.json().catch(() => ({ ok: false }));
+              } catch (e: any) {
+                webhookSetupResult = { ok: false, error: e.message };
+              }
+            }
+
+            try {
+              const infoRes = await fetch(`https://api.telegram.org/bot${botToken}/getWebhookInfo`, {
+                signal: AbortSignal.timeout(4000)
+              });
+              webhookInfo = await infoRes.json().catch(() => null);
+            } catch (e: any) {
+              webhookInfo = { ok: false, error: e.message };
+            }
+          }
+
           return Response.json({
             ok: true,
             service: "Bvelt Telegram Webhook",
             status: "active",
-            message: "Telegram webhook endpoint is operational. Telegram updates are received via POST."
+            message: "Telegram webhook endpoint is operational. Telegram updates are received via POST.",
+            bot_token_configured: !!botToken,
+            chat_id_configured: !!chatId,
+            current_telegram_webhook_info: webhookInfo?.result || webhookInfo,
+            webhook_registered_now: webhookSetupResult,
+            setup_tip: shouldSetWebhook
+              ? "Webhook registered successfully."
+              : "To register/update this webhook URL in Telegram, visit this URL with ?set_webhook=true"
           }, { headers: corsHeaders });
         }
+
         if (request.method === "POST") {
           return await handleTelegramWebhook(request, env, corsHeaders);
         }
+
         return new Response("Method Not Allowed", { status: 405, headers: corsHeaders });
-      }
-
-      // 2b. Telegram Test Endpoint (Supports GET and POST, checks token/chat_id, returns 400 if missing)
-      if ((path === "/api/telegram-test" || path === "/telegram-test") && (method === "GET" || method === "POST")) {
-        if (!isAuthorized(request, env, serviceKey, validSessionHash)) {
-          return Response.json({ error: "unauthorized" }, { status: 401, headers: corsHeaders });
-        }
-        const botToken = env.TELEGRAM_BOT_TOKEN;
-        const chatId = env.TELEGRAM_CHAT_ID;
-
-        if (!botToken || !chatId) {
-          return Response.json({
-            success: false,
-            ok: false,
-            bot_token_configured: !!botToken,
-            chat_id: chatId ? String(chatId).trim() : null,
-            error: "Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID"
-          }, { status: 400, headers: corsHeaders });
-        }
-
-        try {
-          const testRes = await notifyFounder(
-            env,
-            "<b>📡 Bvelt Radar LIVE test OK</b> — Bot conectado y operativo a Telegram.\n\nNotificaciones outbound configuradas correctamente."
-          );
-          return Response.json({
-            success: testRes.ok,
-            ok: testRes.ok,
-            bot_token_configured: true,
-            chat_id: String(chatId).trim(),
-            telegram_response: testRes
-          }, { headers: corsHeaders, status: testRes.ok ? 200 : 502 });
-        } catch (err: any) {
-          return Response.json({
-            success: false,
-            ok: false,
-            error: err.message
-          }, { status: 502, headers: corsHeaders });
-        }
       }
 
       // 2c. Outbound Email Connectivity Test Endpoint
@@ -1847,13 +1865,25 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
     // Verify Chat ID matches configured Chat ID
     if (!chatId || String(chatId).trim() !== configuredChatId) {
       console.warn(`[Telegram Webhook] Chat ID mismatch: got ${chatId}, expected ${configuredChatId}`);
+      if (chatId && env.TELEGRAM_BOT_TOKEN) {
+        await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            chat_id: chatId,
+            text: `⚠️ <b>Chat ID no autorizado</b>\n\nTu Telegram Chat ID actual es: <code>${chatId}</code>\nPero en Cloudflare está configurado: <code>${configuredChatId ? configuredChatId.substring(0, 4) + '...' : 'Ninguno'}</code>\n\nSi este es tu chat personal, actualiza en Cloudflare Dashboard:\n<code>TELEGRAM_CHAT_ID = ${chatId}</code>`,
+            parse_mode: "HTML"
+          }),
+          signal: AbortSignal.timeout(4000)
+        }).catch(() => {});
+      }
       return Response.json({ ok: true, ignored: "Unauthorized Chat ID" }, { headers });
     }
 
     // Handle Inline Button Clicks (callback_query)
     if (update.callback_query) {
       const query = update.callback_query;
-      const callbackData: string = query.data || "";
+      const callbackData: string = (query.data || "").trim();
       const callbackId = query.id;
 
       const [action, prospectId] = callbackData.split(":");
@@ -1905,6 +1935,63 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
             }),
             signal: AbortSignal.timeout(4000)
           }).catch(e => console.warn("sendMessage confirmation warning: ", e));
+        }
+      } else {
+        // Handle standalone buttons without prospectId (e.g., 'status', 'ver_estado', 'digest', 'radar')
+        if (env.TELEGRAM_BOT_TOKEN) {
+          const lowerAction = (action || callbackData).toLowerCase();
+
+          if (lowerAction === "status" || lowerAction === "ver_estado" || lowerAction === "estado") {
+            await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/answerCallbackQuery`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ callback_query_id: callbackId, text: "📊 Consultando estado...", show_alert: false }),
+              signal: AbortSignal.timeout(4000)
+            }).catch(() => {});
+
+            const provStatus = env.RESEND_API_KEY ? "✅ Resend (3,000/mes gratis)" : env.BREVO_API_KEY ? "✅ Brevo (300/día gratis)" : "⚠️ Simulado (Falta RESEND_API_KEY)";
+            const webhookStatus = env.TELEGRAM_WEBHOOK_SECRET ? "🔒 Protegido con Secret Token" : "⚡ Activo (validación por Chat ID)";
+            const statusMsg = `<b>📊 Bvelt Radar Status</b>\n\n<b>Email Outbound:</b> ${provStatus}\n<b>Bot Telegram:</b> ✅ Conectado (${webhookStatus})\n<b>Chat ID:</b> <code>${chatId}</code>\n<b>Plataforma:</b> <a href="https://bvelt.app">https://bvelt.app</a>\n\n<i>Escribe /digest para ver las 3 mejores oportunidades o /testmail tu@correo.com para probar el envío.</i>`;
+
+            await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ chat_id: chatId, text: statusMsg, parse_mode: "HTML" }),
+              signal: AbortSignal.timeout(4000)
+            }).catch(() => {});
+
+          } else if (lowerAction === "digest" || lowerAction === "resumen" || lowerAction === "oportunidades") {
+            await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/answerCallbackQuery`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ callback_query_id: callbackId, text: "🔍 Cargando oportunidades...", show_alert: false }),
+              signal: AbortSignal.timeout(4000)
+            }).catch(() => {});
+
+            const topOpps = await env.RADAR_DB.prepare(
+              "SELECT * FROM prospects WHERE email IS NOT NULL AND status IN ('queued', 'enriched', 'drafted') ORDER BY score DESC LIMIT 3"
+            ).all() as any;
+
+            if (topOpps.results && topOpps.results.length > 0) {
+              await dispatchInteractiveTelegramAlert(topOpps.results, [], [], env);
+            } else {
+              await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ chat_id: chatId, text: "🔍 No hay prospectos pendientes en cola en este momento.", parse_mode: "HTML" }),
+                signal: AbortSignal.timeout(4000)
+              }).catch(() => {});
+            }
+
+          } else {
+            // Stop button spinner for any arbitrary callback
+            await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/answerCallbackQuery`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ callback_query_id: callbackId, text: `Acción recibida: ${callbackData}` }),
+              signal: AbortSignal.timeout(4000)
+            }).catch(() => {});
+          }
         }
       }
     }
