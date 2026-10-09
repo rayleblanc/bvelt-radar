@@ -457,31 +457,53 @@ export default {
             success: false,
             ok: false,
             bot_token_configured: !!botToken,
-            chat_id: chatId || null,
+            chat_id: chatId ? String(chatId).trim() : null,
             error: "Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID"
           }, { status: 400, headers: corsHeaders });
         }
 
         try {
-          const tgRes = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              chat_id: String(chatId).trim(),
-              text: "Bvelt Radar test OK",
-              parse_mode: "HTML",
-              disable_web_page_preview: true
-            })
-          });
-          const tgData = await tgRes.json().catch(() => ({ ok: false }));
-          const success = tgRes.ok && (tgData as any).ok;
+          const action = url.searchParams.get("action") || "";
+          const setWebhook = url.searchParams.get("set_webhook") === "true" || action === "set_webhook";
+
+          let webhookSetupResult: any = null;
+          if (setWebhook) {
+            const webhookUrl = `${url.origin}/telegram-webhook`;
+            const setupPayload: any = { url: webhookUrl };
+            if (env.TELEGRAM_WEBHOOK_SECRET && env.TELEGRAM_WEBHOOK_SECRET.trim()) {
+              setupPayload.secret_token = env.TELEGRAM_WEBHOOK_SECRET.trim();
+            }
+            const setRes = await fetch(`https://api.telegram.org/bot${botToken}/setWebhook`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(setupPayload),
+              signal: AbortSignal.timeout(6000)
+            });
+            webhookSetupResult = await setRes.json().catch(() => ({ ok: false }));
+          }
+
+          let webhookInfo: any = null;
+          try {
+            const infoRes = await fetch(`https://api.telegram.org/bot${botToken}/getWebhookInfo`, {
+              signal: AbortSignal.timeout(4000)
+            });
+            webhookInfo = await infoRes.json().catch(() => null);
+          } catch (e) {}
+
+          const testRes = await notifyFounder(
+            env,
+            "<b>📡 Bvelt Radar LIVE test OK</b> — Bot conectado y operativo a Telegram.\n\nNotificaciones outbound y botones interactivos configurados correctamente."
+          );
+
           return Response.json({
-            success,
-            ok: success,
+            success: testRes.ok,
+            ok: testRes.ok,
             bot_token_configured: true,
             chat_id: String(chatId).trim(),
-            telegram_response: tgData
-          }, { status: success ? 200 : 502, headers: corsHeaders });
+            telegram_response: testRes,
+            telegram_webhook_info: webhookInfo?.result || webhookInfo,
+            webhook_registered: webhookSetupResult
+          }, { status: testRes.ok ? 200 : 502, headers: corsHeaders });
         } catch (err: any) {
           return Response.json({
             success: false,
@@ -572,10 +594,21 @@ export default {
         return Response.redirect("https://bvelt.app", 302);
       }
 
-      // 2. Telegram Webhook Callback Endpoint (handles interactive inline buttons)
+      // 2. Telegram Webhook Callback Endpoint (handles interactive inline buttons and bot updates)
       const cleanTelegramPath = path.replace(/\/$/, "");
-      if ((cleanTelegramPath === "/telegram/webhook" || cleanTelegramPath === "/telegram-webhook" || cleanTelegramPath === "/api/telegram-webhook" || cleanTelegramPath === "/api/telegram/webhook") && request.method === "POST") {
-        return await handleTelegramWebhook(request, env, corsHeaders);
+      if (cleanTelegramPath === "/telegram/webhook" || cleanTelegramPath === "/telegram-webhook" || cleanTelegramPath === "/api/telegram-webhook" || cleanTelegramPath === "/api/telegram/webhook") {
+        if (request.method === "GET") {
+          return Response.json({
+            ok: true,
+            service: "Bvelt Telegram Webhook",
+            status: "active",
+            message: "Telegram webhook endpoint is operational. Telegram updates are received via POST."
+          }, { headers: corsHeaders });
+        }
+        if (request.method === "POST") {
+          return await handleTelegramWebhook(request, env, corsHeaders);
+        }
+        return new Response("Method Not Allowed", { status: 405, headers: corsHeaders });
       }
 
       // 2b. Telegram Test Endpoint (Supports GET and POST, checks token/chat_id, returns 400 if missing)
@@ -1765,36 +1798,59 @@ async function handleHealth(env: Env, headers: Record<string, string>): Promise<
  * Handle Telegram Webhook for Interactive Inline Button Clicks
  */
 async function handleTelegramWebhook(request: Request, env: Env, headers: Record<string, string>): Promise<Response> {
-  if (!env.TELEGRAM_WEBHOOK_SECRET) {
-    return new Response("Unauthorized: webhook secret not configured", { status: 401, headers });
-  }
+  // 1. Webhook Secret Token Verification
+  // Only verify secret token if TELEGRAM_WEBHOOK_SECRET is configured in env
+  if (env.TELEGRAM_WEBHOOK_SECRET && env.TELEGRAM_WEBHOOK_SECRET.trim().length > 0) {
+    const secretToken = request.headers.get("X-Telegram-Bot-Api-Secret-Token") || "";
+    const configuredSecret = env.TELEGRAM_WEBHOOK_SECRET.trim();
 
-  const secretToken = request.headers.get("X-Telegram-Bot-Api-Secret-Token") || "";
-  const configuredSecret = env.TELEGRAM_WEBHOOK_SECRET;
-
-  let isMatch = secretToken.length === configuredSecret.length;
-  if (secretToken.length === configuredSecret.length) {
-    let result = 0;
-    for (let i = 0; i < secretToken.length; i++) {
-      result |= secretToken.charCodeAt(i) ^ configuredSecret.charCodeAt(i);
+    let isMatch = secretToken.length === configuredSecret.length;
+    if (secretToken.length === configuredSecret.length) {
+      let result = 0;
+      for (let i = 0; i < secretToken.length; i++) {
+        result |= secretToken.charCodeAt(i) ^ configuredSecret.charCodeAt(i);
+      }
+      isMatch = result === 0;
+    } else {
+      isMatch = false;
     }
-    isMatch = result === 0;
-  } else {
-    isMatch = false;
-  }
 
-  if (!isMatch) {
-    return new Response("Unauthorized webhook secret token", { status: 401, headers });
+    if (!isMatch) {
+      console.warn("[Telegram Webhook] Unauthorized: X-Telegram-Bot-Api-Secret-Token mismatch");
+      return Response.json({ ok: false, error: "Unauthorized webhook secret token" }, { status: 200, headers });
+    }
   }
 
   try {
     const update: any = await request.json();
 
-    const chatId = update.message?.chat?.id || update.callback_query?.message?.chat?.id;
-    if (!chatId || String(chatId).trim() !== String(env.TELEGRAM_CHAT_ID).trim()) {
-      return new Response("Unauthorized Chat ID", { status: 401, headers });
+    const chatId = update.message?.chat?.id || update.callback_query?.message?.chat?.id || update.callback_query?.from?.id;
+    const configuredChatId = env.TELEGRAM_CHAT_ID ? String(env.TELEGRAM_CHAT_ID).trim() : "";
+
+    // If TELEGRAM_CHAT_ID is not configured in env yet, help the user on first contact
+    if (!configuredChatId) {
+      if (chatId && update.message && env.TELEGRAM_BOT_TOKEN) {
+        await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            chat_id: chatId,
+            text: `👋 <b>¡Hola desde Bvelt Radar!</b>\n\nTu <b>Telegram Chat ID</b> es:\n<code>${chatId}</code>\n\nPara activar el bot y recibir alertas, agrega esta variable en tus Secretos de Cloudflare:\n<code>TELEGRAM_CHAT_ID = ${chatId}</code>`,
+            parse_mode: "HTML"
+          }),
+          signal: AbortSignal.timeout(4000)
+        }).catch(e => console.warn("Error sending setup message:", e));
+      }
+      return Response.json({ ok: true, notice: "TELEGRAM_CHAT_ID not configured" }, { headers });
     }
 
+    // Verify Chat ID matches configured Chat ID
+    if (!chatId || String(chatId).trim() !== configuredChatId) {
+      console.warn(`[Telegram Webhook] Chat ID mismatch: got ${chatId}, expected ${configuredChatId}`);
+      return Response.json({ ok: true, ignored: "Unauthorized Chat ID" }, { headers });
+    }
+
+    // Handle Inline Button Clicks (callback_query)
     if (update.callback_query) {
       const query = update.callback_query;
       const callbackData: string = query.data || "";
@@ -1853,10 +1909,15 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
       }
     }
 
-    // Handle Telegram Text Commands (/testmail, /status, /digest, /help)
+    // Handle Telegram Text Messages and Commands
     if (update.message?.text && env.TELEGRAM_BOT_TOKEN) {
       const msgText = (update.message.text || "").trim();
-      if (msgText.startsWith("/testmail")) {
+      const lower = msgText.toLowerCase();
+      // Remove @bot_username in case Telegram appended it (e.g., /status@MyBot)
+      const rawCommand = lower.split(/\s+/)[0] || "";
+      const command = rawCommand.replace(/@[a-zA-Z0-9_]+$/, "");
+
+      if (command === "/testmail" || command === "testmail" || command === "/test" || command === "test") {
         const parts = msgText.split(/\s+/);
         const targetEmail = parts[1] || (env.OUTBOUND_EMAIL_FROM || "").replace(/.*<([^>]+)>.*/, "$1") || "test@example.com";
 
@@ -1887,9 +1948,10 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
           signal: AbortSignal.timeout(4000)
         }).catch(() => {});
 
-      } else if (msgText.startsWith("/status")) {
+      } else if (command === "/status" || command === "status" || command === "/estado" || command === "estado") {
         const provStatus = env.RESEND_API_KEY ? "✅ Resend (3,000/mes gratis)" : env.BREVO_API_KEY ? "✅ Brevo (300/día gratis)" : "⚠️ Simulado (Falta RESEND_API_KEY)";
-        const statusMsg = `<b>📊 Bvelt Radar Status</b>\n\n<b>Email Outbound:</b> ${provStatus}\n<b>Bot Telegram:</b> ✅ Conectado\n<b>Plataforma:</b> <a href="https://bvelt.app">https://bvelt.app</a>\n\n<i>Escribe /digest para ver las 3 mejores oportunidades o /testmail tu@correo.com para probar el envío.</i>`;
+        const webhookStatus = env.TELEGRAM_WEBHOOK_SECRET ? "🔒 Protegido con Secret Token" : "⚡ Activo (validación por Chat ID)";
+        const statusMsg = `<b>📊 Bvelt Radar Status</b>\n\n<b>Email Outbound:</b> ${provStatus}\n<b>Bot Telegram:</b> ✅ Conectado (${webhookStatus})\n<b>Chat ID:</b> <code>${chatId}</code>\n<b>Plataforma:</b> <a href="https://bvelt.app">https://bvelt.app</a>\n\n<i>Escribe /digest para ver las 3 mejores oportunidades o /testmail tu@correo.com para probar el envío.</i>`;
         await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -1897,7 +1959,7 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
           signal: AbortSignal.timeout(4000)
         }).catch(() => {});
 
-      } else if (msgText.startsWith("/digest")) {
+      } else if (command === "/digest" || command === "digest" || command === "/resumen" || command === "resumen") {
         const topOpps = await env.RADAR_DB.prepare(
           "SELECT * FROM prospects WHERE email IS NOT NULL AND status IN ('queued', 'enriched', 'drafted') ORDER BY score DESC LIMIT 3"
         ).all() as any;
@@ -1913,13 +1975,33 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
           }).catch(() => {});
         }
 
-      } else if (msgText.startsWith("/start") || msgText.startsWith("/help")) {
+      } else if (command === "/id" || command === "id" || command === "/chatid" || command === "chatid") {
+        const idMsg = `🆔 <b>Tu Telegram Chat ID:</b>\n<code>${chatId}</code>`;
+        await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ chat_id: chatId, text: idMsg, parse_mode: "HTML" }),
+          signal: AbortSignal.timeout(4000)
+        }).catch(() => {});
+
+      } else if (command === "/start" || command === "start" || command === "/help" || command === "help" || command === "/ayuda" || command === "ayuda" || command === "hola" || command === "hi" || command === "hey") {
         const provStatus = env.RESEND_API_KEY ? "✅ Resend Activo" : env.BREVO_API_KEY ? "✅ Brevo Activo" : "⚠️ Simulado (Configura RESEND_API_KEY)";
-        const helpMsg = `🤖 <b>Bvelt Radar Founder Bot</b>\n\n<b>Comandos disponibles:</b>\n• /status - Ver cuotas y estado de proveedores\n• /digest - Enviar las 3 mejores oportunidades con botones para aprobar\n• /testmail &lt;correo&gt; - Enviar email de prueba inmediato\n\n<b>Email Outbound:</b> ${provStatus}`;
+        const helpMsg = `🤖 <b>Bvelt Radar Founder Bot</b>\n\n¡Bot conectado y listo para interactuar!\n\n<b>Comandos disponibles:</b>\n• /status - Ver cuotas y estado de proveedores\n• /digest - Enviar las 3 mejores oportunidades con botones para aprobar\n• /testmail &lt;correo&gt; - Enviar email de prueba inmediato\n• /id - Ver tu Telegram Chat ID\n• /help - Mostrar este menú\n\n<b>Email Outbound:</b> ${provStatus}`;
         await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ chat_id: chatId, text: helpMsg, parse_mode: "HTML" }),
+          signal: AbortSignal.timeout(4000)
+        }).catch(() => {});
+
+      } else {
+        // Fallback for ANY OTHER free text message so the bot NEVER stays silent
+        const snippet = msgText.length > 60 ? msgText.substring(0, 60) + "..." : msgText;
+        const fallbackMsg = `🤖 <b>Bvelt Radar Founder Bot</b>\n\nRecibí tu mensaje: <i>"${escapeHtml(snippet)}"</i>\n\n<b>Comandos disponibles:</b>\n• /status - Ver estado del sistema\n• /digest - Ver oportunidades pendientes de aprobación\n• /testmail &lt;correo&gt; - Probar envío de email\n• /help - Ayuda y comandos\n• /id - Ver tu Telegram Chat ID`;
+        await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ chat_id: chatId, text: fallbackMsg, parse_mode: "HTML" }),
           signal: AbortSignal.timeout(4000)
         }).catch(() => {});
       }

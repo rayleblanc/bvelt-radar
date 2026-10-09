@@ -647,8 +647,11 @@ app.post('/events', handleEventRequest);
 app.post('/api/reply', handleEventRequest);
 app.post('/webhook/events', handleEventRequest);
 
-// Telegram Webhook endpoint (POST updates)
-app.post(['/telegram-webhook', '/telegram/webhook', '/api/telegram-webhook', '/api/telegram/webhook'], (req, res) => {
+// Telegram Webhook endpoint (POST updates and GET status)
+app.all(['/telegram-webhook', '/telegram/webhook', '/api/telegram-webhook', '/api/telegram/webhook'], (req, res) => {
+  if (req.method === 'GET') {
+    return res.status(200).json({ ok: true, status: 'active', message: 'Telegram webhook endpoint active (POST updates expected)' });
+  }
   res.status(200).send("OK");
 });
 
