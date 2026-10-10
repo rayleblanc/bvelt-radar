@@ -15,7 +15,7 @@ import { getAlerts, tradeForEvent, WeatherAlert } from './weatherSignals';
 import { dispatchEmail, EmailDispatchResult } from './emailDispatcher';
 import { auditDomainSecurityAndMx, auditWebsitePerformance, auditCityWeatherEmergency } from './openAudits';
 import { fetchPermitContractors } from './permitSources';
-import { pickTargets, findPlace, markSearched, placeKey } from './geoFrontier';
+import { pickTargets, findPlace, markSearched, placeKey, haversineKm } from './geoFrontier';
 
 // Global type declarations for Cloudflare Worker compilation
 declare global {
@@ -445,7 +445,8 @@ export default {
 
       // 1. Enhanced Health Check (public)
       if (path === "/health" && method === "GET") {
-        return await handleHealth(env, corsHeaders);
+        const tenantId = url.searchParams.get("tenant_id") || "founder";
+        return await handleHealth(env, corsHeaders, tenantId);
       }
 
       // 1ab. Telegram Test Endpoint (Supports GET and POST)
@@ -825,7 +826,8 @@ export default {
 
       // 4. Stats Endpoint (Includes learning performance)
       if (path === "/stats" && method === "GET") {
-        return await handleStats(env, corsHeaders);
+        const tenantId = url.searchParams.get("tenant_id") || "founder";
+        return await handleStats(env, corsHeaders, tenantId);
       }
 
       // 6. Decision API Endpoint (sent / discard / suppress / replied / demo / won)
@@ -879,7 +881,7 @@ export default {
       // 8b. Opportunity Intelligence Endpoints
       if ((path === "/opportunities" || path === "/api/opportunities") && method === "GET") {
         const limit = parseInt(url.searchParams.get("limit") || "100", 10);
-        const tenantId = url.searchParams.get("tenant_id");
+        const tenantId = url.searchParams.get("tenant_id") || "founder";
         const priority = url.searchParams.get("priority");
         const decisionState = url.searchParams.get("decision_state");
         const minScore = parseInt(url.searchParams.get("min_score") || "0", 10);
@@ -890,14 +892,9 @@ export default {
                  p.status as prospect_status, p.draft_subject, p.draft_body
           FROM opportunities o
           LEFT JOIN prospects p ON o.prospect_id = p.id
-          WHERE o.strategic_score >= ?
+          WHERE o.strategic_score >= ? AND COALESCE(o.tenant_id,'founder') = ?
         `;
-        const params: any[] = [minScore];
-
-        if (tenantId) {
-          query += " AND o.tenant_id = ?";
-          params.push(tenantId);
-        }
+        const params: any[] = [minScore, tenantId];
         if (priority) {
           query += " AND o.priority_tier = ?";
           params.push(priority);
@@ -1737,7 +1734,7 @@ export default {
 /**
  * Enhanced Health Check with usage metrics & Cloudflare Queues observability
  */
-async function handleHealth(env: Env, headers: Record<string, string>): Promise<Response> {
+async function handleHealth(env: Env, headers: Record<string, string>, tenantId: string = "founder"): Promise<Response> {
   const db = env.RADAR_DB;
   const today = new Date().toISOString().split('T')[0];
 
@@ -1809,8 +1806,8 @@ async function handleHealth(env: Env, headers: Record<string, string>): Promise<
   // Check latest prospect notification timestamp if available
   try {
     const notifiedProspect = await db.prepare(
-      "SELECT updated_at FROM prospects WHERE status IN ('notified', 'sent', 'approved') ORDER BY updated_at DESC LIMIT 1"
-    ).first() as any;
+      "SELECT updated_at FROM prospects WHERE status IN ('notified', 'sent', 'approved') AND COALESCE(tenant_id,'founder') = ? ORDER BY updated_at DESC LIMIT 1"
+    ).bind(tenantId).first() as any;
     if (notifiedProspect && notifiedProspect.updated_at) {
       lastTelegramOk = notifiedProspect.updated_at;
     } else if (lastTelegramOk === null && telegramConfigured) {
@@ -1820,7 +1817,7 @@ async function handleHealth(env: Env, headers: Record<string, string>): Promise<
 
   // Aggregate prospects counts by status
   try {
-    const statusRows = await db.prepare("SELECT status, COUNT(*) as count FROM prospects GROUP BY status").all();
+    const statusRows = await db.prepare("SELECT status, COUNT(*) as count FROM prospects WHERE COALESCE(tenant_id,'founder') = ? GROUP BY status").bind(tenantId).all();
     if (statusRows.results) {
       for (const row of statusRows.results as any[]) {
         if (row.status) {
@@ -1854,12 +1851,12 @@ async function handleHealth(env: Env, headers: Record<string, string>): Promise<
   let suppressedCount = 0;
 
   try {
-    const totalRow = await db.prepare("SELECT COUNT(*) as count FROM prospects").first() as any;
+    const totalRow = await db.prepare("SELECT COUNT(*) as count FROM prospects WHERE COALESCE(tenant_id,'founder') = ?").bind(tenantId).first() as any;
     if (totalRow) prospectsTotal = totalRow.count;
   } catch (e) {}
 
   try {
-    const uniqueRow = await db.prepare("SELECT COUNT(DISTINCT identity_key) as count FROM prospects WHERE created_at >= ?").bind(`${today}T00:00:00.000Z`).first() as any;
+    const uniqueRow = await db.prepare("SELECT COUNT(DISTINCT identity_key) as count FROM prospects WHERE created_at >= ? AND COALESCE(tenant_id,'founder') = ?").bind(`${today}T00:00:00.000Z`, tenantId).first() as any;
     if (uniqueRow) prospectsUniqueToday = uniqueRow.count;
   } catch (e) {}
 
@@ -2226,21 +2223,22 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
 /**
  * Administrative and learning stats
  */
-async function handleStats(env: Env, headers: Record<string, string>): Promise<Response> {
+async function handleStats(env: Env, headers: Record<string, string>, tenantId: string = "founder"): Promise<Response> {
   const db = env.RADAR_DB;
 
   const prospectStats = await db.prepare(`
     SELECT status, COUNT(*) as count 
     FROM prospects 
+    WHERE COALESCE(tenant_id,'founder') = ?
     GROUP BY status
-  `).all();
+  `).bind(tenantId).all();
 
   const outcomeStats = await db.prepare(`
     SELECT outcome, COUNT(*) as count 
     FROM prospects 
-    WHERE outcome IS NOT NULL 
+    WHERE outcome IS NOT NULL AND COALESCE(tenant_id,'founder') = ?
     GROUP BY outcome
-  `).all();
+  `).bind(tenantId).all();
 
   const totalRuns = await db.prepare(`
     SELECT COUNT(*) as count, SUM(discovered) as total_discovered, SUM(finalized) as total_finalized 
@@ -3021,7 +3019,7 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
     const identityKey = generateIdentityKey(candidate.email, candidate.website, candidate.phone, candidate.name, candidate.city);
 
     // 2. Composite suppression check
-    const suppression = await checkSuppressedComposite(env.RADAR_DB, candidate.email, candidate.website, candidate.phone, candidate.name, candidate.city);
+    const suppression = await checkSuppressedComposite(env.RADAR_DB, candidate.email, candidate.website, candidate.phone, candidate.name, candidate.city, job.tenant_id || "founder");
     if (suppression) {
       await releaseBudget(env.RADAR_DB, tenantId, 'discovery_units', 1);
       filteredCount++;
@@ -3029,7 +3027,7 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
     }
 
     // 3. Duplicate & anti-spam lifecycle check
-    const overlap = await findExistingProspectOverlap(env.RADAR_DB, candidate.email, candidate.website, candidate.phone, candidate.name, candidate.city);
+    const overlap = await findExistingProspectOverlap(env.RADAR_DB, candidate.email, candidate.website, candidate.phone, candidate.name, candidate.city, job.tenant_id || "founder");
     if (overlap) {
       const p = overlap.overlap;
       const status = (p.status || '').toLowerCase();
@@ -3426,75 +3424,238 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
     return;
   }
 
-  const { 
-    totalScore, 
-    breakdown, 
-    confidence, 
-    evidenceSummary, 
-    evidenceItems = [], 
-    painHypothesis = {} 
-  } = calculateMultiFactorScore(
-    prospect,
-    prospect.email,
-    isEmailValidated,
-    prospect.phone,
-    isPriorityCity,
-    isPriorityTrade,
-    learningStats,
-    signals,
-    missionConfig
-  );
-
-  // Generación de etiquetas de señal (incluyendo SMS Gap, Multi-área y Obra activa)
+  let totalScore = 0;
+  let finalScore = 0;
+  let breakdown: any = {};
+  let confidence = 0;
+  let evidenceSummary = "";
+  let evidenceItems: any[] = [];
+  let painHypothesis: any = {};
   const signalTags: string[] = [];
-  if (isPermitsSource && permits_90d >= 3) {
-    signalTags.push(`Obra activa (${permits_90d} permisos/90d)`);
-    signals.active_permits = true;
-    signals.permits_label = `Obra activa (${permits_90d} permisos/90d)`;
-    evidenceItems.unshift({
-      signal_type: 'active_permits',
+  let bveltAngle = "";
+
+  if (isTenant) {
+    let tenantConfig: any = null;
+    if (job.tenant_id) {
+      try {
+        tenantConfig = await env.RADAR_DB.prepare("SELECT * FROM tenant_config WHERE tenant_id = ?").bind(job.tenant_id).first();
+      } catch (e) {}
+    }
+
+    // 1. Encaje (0-40): coincidencia del nombre/oficio con segmento o keywords en icp_expansion_json (+25 si coincide segmento, +15 con website real)
+    let encajeScore = 0;
+    let segmentMatched = false;
+    const targetLabels: string[] = [];
+    const targetKeywords: string[] = [];
+
+    if (tenantConfig?.icp_expansion_json) {
+      try {
+        const exp = typeof tenantConfig.icp_expansion_json === "string" 
+          ? JSON.parse(tenantConfig.icp_expansion_json) 
+          : tenantConfig.icp_expansion_json;
+        if (Array.isArray(exp?.segments)) {
+          for (const s of exp.segments) {
+            if (s.label) targetLabels.push(s.label.toLowerCase().trim());
+            if (Array.isArray(s.keywords)) {
+              for (const kw of s.keywords) {
+                if (kw) targetKeywords.push(kw.toLowerCase().trim());
+              }
+            }
+          }
+        }
+      } catch (e) {}
+    }
+
+    if (Array.isArray(missionConfig?.niches)) {
+      for (const n of missionConfig.niches) {
+        if (n) targetLabels.push(n.toLowerCase().trim());
+      }
+    }
+
+    const pTrade = (prospect.trade || "").toLowerCase().trim();
+    const pName = (prospect.name || "").toLowerCase().trim();
+
+    for (const label of targetLabels) {
+      if (!label) continue;
+      if (pTrade && (pTrade === label || pTrade.includes(label) || label.includes(pTrade))) {
+        segmentMatched = true;
+        break;
+      }
+      if (pName && pName.includes(label)) {
+        segmentMatched = true;
+        break;
+      }
+    }
+
+    if (!segmentMatched) {
+      for (const kw of targetKeywords) {
+        if (!kw) continue;
+        if (pTrade && (pTrade === kw || pTrade.includes(kw) || kw.includes(pTrade))) {
+          segmentMatched = true;
+          break;
+        }
+        if (pName && pName.includes(kw)) {
+          segmentMatched = true;
+          break;
+        }
+      }
+    }
+
+    if (segmentMatched) {
+      encajeScore += 25;
+    }
+    const hasRealWebsite = !!(prospect.website && isRealWebsite(prospect.website));
+    if (hasRealWebsite) {
+      encajeScore += 15;
+    }
+
+    // 2. Contacto (0-25): +15 email validado, +10 teléfono (tope 25)
+    let contactoScore = 0;
+    const hasValidatedEmail = !!(prospect.email && (isEmailValidated || parsedMeta.is_email_validated || parsedMeta.email_verified));
+    if (hasValidatedEmail) {
+      contactoScore += 15;
+    }
+    const hasPhone = !!(prospect.phone && prospect.phone.trim().length >= 7);
+    if (hasPhone) {
+      contactoScore += 10;
+      signalTags.push("Teléfono directo");
+    }
+    contactoScore = Math.min(25, contactoScore);
+
+    // 3. Cercanía (0-20): distancia en km entre findPlace(prospect.city) y findPlace(primera ciudad cities_json)
+    let cercaniaScore = 8;
+    let tenantBaseCity: string | null = null;
+    if (tenantConfig?.cities_json) {
+      try {
+        const cities = typeof tenantConfig.cities_json === "string" 
+          ? JSON.parse(tenantConfig.cities_json) 
+          : tenantConfig.cities_json;
+        if (Array.isArray(cities) && cities.length > 0 && typeof cities[0] === "string") {
+          tenantBaseCity = cities[0];
+        }
+      } catch (e) {}
+    }
+    if (!tenantBaseCity && Array.isArray(missionConfig?.geographies) && missionConfig.geographies.length > 0) {
+      tenantBaseCity = missionConfig.geographies[0];
+    }
+
+    const prospectPlace = prospect.city ? findPlace(prospect.city) : null;
+    const tenantPlace = tenantBaseCity ? findPlace(tenantBaseCity) : null;
+
+    if (prospectPlace && tenantPlace && 
+        typeof prospectPlace.lat === 'number' && typeof prospectPlace.lon === 'number' &&
+        typeof tenantPlace.lat === 'number' && typeof tenantPlace.lon === 'number') {
+      const distKm = haversineKm(prospectPlace.lat, prospectPlace.lon, tenantPlace.lat, tenantPlace.lon);
+      if (distKm <= 15) {
+        cercaniaScore = 20;
+      } else if (distKm <= 30) {
+        cercaniaScore = 14;
+      } else if (distKm <= 60) {
+        cercaniaScore = 8;
+      } else {
+        cercaniaScore = 3;
+      }
+      signalTags.push(`A ${Math.round(distKm)} km de tu base`);
+    }
+
+    // 4. Señal (0-15): +15 si permits_90d >= 3 ("Obra activa"), +8 si nombre contiene property management/etc.
+    let senalScore = 0;
+    if (permits_90d >= 3) {
+      senalScore += 15;
+      signalTags.push(`Obra activa (${permits_90d} permisos/90d)`);
+    }
+    const pmRegex = /property management|property manager|facility|hoa|general contractor/i;
+    if (pmRegex.test(prospect.name || "")) {
+      senalScore += 8;
+    }
+    senalScore = Math.min(15, senalScore);
+
+    finalScore = Math.min(100, encajeScore + contactoScore + cercaniaScore + senalScore);
+    totalScore = finalScore;
+    confidence = Math.min(95, Math.max(50, (encajeScore > 0 ? 30 : 0) + (contactoScore > 0 ? 30 : 0) + (cercaniaScore >= 14 ? 20 : 10) + (senalScore > 0 ? 15 : 0)));
+    breakdown = {
+      encaje: encajeScore,
+      contacto: contactoScore,
+      cercania: cercaniaScore,
+      senal: senalScore
+    };
+    evidenceSummary = signalTags.join("; ") || "Tenant ICP criteria matched";
+    evidenceItems = signalTags.map(tag => ({
+      signal_type: 'tenant_signal',
       value: 'detected',
-      source_url: 'municipal_permits',
-      source_type: 'permit_records',
       observed_at: new Date().toISOString(),
-      evidence_text: `Obra activa (${permits_90d} permisos/90d)`,
-      confidence: 1.0,
-      freshness: 1.0,
-      page_type: 'permits'
-    });
-  }
-  if (signals.emergency) signalTags.push("24/7 / Urgencias");
-  if (signals.sms_gap) signalTags.push("SMS Gap");
-  if (signals.quote_request) signalTags.push("Presupuesto");
-  if (signals.booking) signalTags.push("Reserva");
-  if (signals.multiple_areas) signalTags.push("Multi-área");
-  if (signals.lead_capture) signalTags.push("Captura Leads");
-  if (signals.contact_form) signalTags.push("Contacto");
+      evidence_text: tag,
+      confidence: 1.0
+    }));
+  } else {
+    const scoringResult = calculateMultiFactorScore(
+      prospect,
+      prospect.email,
+      isEmailValidated,
+      prospect.phone,
+      isPriorityCity,
+      isPriorityTrade,
+      learningStats,
+      signals,
+      missionConfig
+    );
+    totalScore = scoringResult.totalScore;
+    breakdown = scoringResult.breakdown;
+    confidence = scoringResult.confidence;
+    evidenceSummary = scoringResult.evidenceSummary;
+    evidenceItems = scoringResult.evidenceItems || [];
+    painHypothesis = scoringResult.painHypothesis || {};
 
-  // Suma 10 puntos si viene de permisos y tiene >= 3 permisos en 90 días (máximo 100)
-  let finalScore = totalScore;
-  if (isPermitsSource && permits_90d >= 3) {
-    finalScore = Math.min(100, finalScore + 10);
-    breakdown.active_permits = 10;
-  }
+    // Generación de etiquetas de señal (incluyendo SMS Gap, Multi-área y Obra activa)
+    if (isPermitsSource && permits_90d >= 3) {
+      signalTags.push(`Obra activa (${permits_90d} permisos/90d)`);
+      signals.active_permits = true;
+      signals.permits_label = `Obra activa (${permits_90d} permisos/90d)`;
+      evidenceItems.unshift({
+        signal_type: 'active_permits',
+        value: 'detected',
+        source_url: 'municipal_permits',
+        source_type: 'permit_records',
+        observed_at: new Date().toISOString(),
+        evidence_text: `Obra activa (${permits_90d} permisos/90d)`,
+        confidence: 1.0,
+        freshness: 1.0,
+        page_type: 'permits'
+      });
+    }
+    if (signals.emergency) signalTags.push("24/7 / Urgencias");
+    if (signals.sms_gap) signalTags.push("SMS Gap");
+    if (signals.quote_request) signalTags.push("Presupuesto");
+    if (signals.booking) signalTags.push("Reserva");
+    if (signals.multiple_areas) signalTags.push("Multi-área");
+    if (signals.lead_capture) signalTags.push("Captura Leads");
+    if (signals.contact_form) signalTags.push("Contacto");
 
-  let bveltAngle = "missed_lead_response";
-  if (signals.emergency) {
-    bveltAngle = "after_hours";
-  } else if (signals.sms_gap) {
-    bveltAngle = "contact_gap";
-  } else if (signals.booking) {
-    bveltAngle = "booking_gap";
-  } else if (signals.quote_request || signals.estimate_language) {
-    bveltAngle = "quote_followup";
-  } else if (signals.lead_capture) {
-    bveltAngle = "lead_capture_gap";
-  } else if (signals.multiple_areas) {
-    bveltAngle = "lead_reactivation";
+    // Suma 10 puntos si viene de permisos y tiene >= 3 permisos en 90 días (máximo 100)
+    finalScore = totalScore;
+    if (isPermitsSource && permits_90d >= 3) {
+      finalScore = Math.min(100, finalScore + 10);
+      breakdown.active_permits = 10;
+    }
+
+    bveltAngle = "missed_lead_response";
+    if (signals.emergency) {
+      bveltAngle = "after_hours";
+    } else if (signals.sms_gap) {
+      bveltAngle = "contact_gap";
+    } else if (signals.booking) {
+      bveltAngle = "booking_gap";
+    } else if (signals.quote_request || signals.estimate_language) {
+      bveltAngle = "quote_followup";
+    } else if (signals.lead_capture) {
+      bveltAngle = "lead_capture_gap";
+    } else if (signals.multiple_areas) {
+      bveltAngle = "lead_reactivation";
+    }
   }
 
   const variantId = (hashCode(prospect.name + prospect.city) % 2 === 0) ? "missed_calls" : "dormant_leads";
-  const evidenceSummaryWithPermits = (isPermitsSource && permits_90d >= 3)
+  const evidenceSummaryWithPermits = (!isTenant && isPermitsSource && permits_90d >= 3)
     ? `Obra activa (${permits_90d} permisos/90d); ${evidenceSummary}`
     : evidenceSummary;
 
@@ -3503,13 +3664,13 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
     permits_90d,
     signal_tags: signalTags,
     active_signals: signalTags,
-    permits_tag: (isPermitsSource && permits_90d >= 3) ? `Obra activa (${permits_90d} permisos/90d)` : undefined,
+    permits_tag: (permits_90d >= 3) ? `Obra activa (${permits_90d} permisos/90d)` : undefined,
     signals,
     is_priority_city: isPriorityCity,
     is_priority_trade: isPriorityTrade,
     variant_id: variantId,
     score_breakdown: breakdown,
-    bvelt_angle: bveltAngle,
+    bvelt_angle: isTenant ? undefined : bveltAngle,
     confidence,
     evidence_summary: evidenceSummaryWithPermits,
     evidence_json: evidenceItems,
@@ -3534,6 +3695,11 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
     signals,
     missionConfig
   );
+  if (isTenant) {
+    strat.strategic_score = finalScore;
+    strat.fit_score = breakdown.encaje || 0;
+    strat.contactability_score = breakdown.contacto || 0;
+  }
 
   // Determine commercial value band based on total score
   const valueBand = finalScore >= 80 ? "premium" : finalScore >= 60 ? "high" : finalScore >= 45 ? "medium" : "low";
@@ -4313,7 +4479,8 @@ export async function verifyTrustStackGate(
     prospect.website,
     prospect.phone,
     prospect.name,
-    prospect.city
+    prospect.city,
+    prospect.tenant_id || "founder"
   );
   if (isSuppressed) {
     const decision: TrustGateDecision = {
@@ -6947,7 +7114,8 @@ export async function sendOrQueueOutreach(prospect: any, runId: string, env: Env
     prospect.website,
     prospect.phone,
     prospect.name,
-    prospect.city
+    prospect.city,
+    prospect.tenant_id || "founder"
   );
   if (suppression) {
     await env.RADAR_DB.prepare("UPDATE prospects SET status = 'suppressed', outcome = ?, updated_at = ? WHERE id = ?")
@@ -6962,7 +7130,8 @@ export async function sendOrQueueOutreach(prospect: any, runId: string, env: Env
     prospect.website,
     prospect.phone,
     prospect.name,
-    prospect.city
+    prospect.city,
+    prospect.tenant_id || "founder"
   );
   if (overlap && isCooldownActive(overlap.overlap.cooldown_until)) {
     await env.RADAR_DB.prepare("UPDATE prospects SET status = 'held', outcome = 'cooldown_active', updated_at = ? WHERE id = ?")
@@ -7270,8 +7439,12 @@ export async function checkSuppressedComposite(
   website: string | null,
   phone: string | null,
   name: string,
-  city: string
+  city: string,
+  tenantId: string = "founder"
 ): Promise<{ suppressed: boolean; reason: string } | null> {
+  if (tenantId !== "founder") {
+    return null;
+  }
   const keys: string[] = [];
   if (email) keys.push(email.toLowerCase().trim());
   if (website) {
@@ -7300,7 +7473,8 @@ export async function findExistingProspectOverlap(
   website: string | null,
   phone: string | null,
   name: string,
-  city: string
+  city: string,
+  tenantId: string = "founder"
 ): Promise<{ overlap: any; reason: string } | null> {
   const normEmail = email ? email.toLowerCase().trim() : null;
   const normDomain = website ? getDomain(website) : null;
@@ -7308,25 +7482,25 @@ export async function findExistingProspectOverlap(
   const identityKey = generateIdentityKey(email, website, phone, name, city);
 
   try {
-    const matchIdentity = await db.prepare("SELECT * FROM prospects WHERE identity_key = ?").bind(identityKey).first();
+    const matchIdentity = await db.prepare("SELECT * FROM prospects WHERE identity_key = ? AND COALESCE(tenant_id,'founder') = ?").bind(identityKey, tenantId).first();
     if (matchIdentity) return { overlap: matchIdentity, reason: "Same identity_key: " + identityKey };
 
     if (normEmail) {
-      const match = await db.prepare("SELECT * FROM prospects WHERE email = ?").bind(normEmail).first();
+      const match = await db.prepare("SELECT * FROM prospects WHERE email = ? AND COALESCE(tenant_id,'founder') = ?").bind(normEmail, tenantId).first();
       if (match) return { overlap: match, reason: "Same email match: " + normEmail };
     }
 
     if (normDomain) {
-      const match = await db.prepare("SELECT * FROM prospects WHERE website LIKE ?").bind(`%${normDomain}%`).first();
+      const match = await db.prepare("SELECT * FROM prospects WHERE website LIKE ? AND COALESCE(tenant_id,'founder') = ?").bind(`%${normDomain}%`, tenantId).first();
       if (match) return { overlap: match, reason: "Same website domain match: " + normDomain };
     }
 
     if (normPhone && normPhone.length >= 7) {
-      const match = await db.prepare("SELECT * FROM prospects WHERE phone = ? OR phone LIKE ?").bind(normPhone, `%${normPhone}%`).first();
+      const match = await db.prepare("SELECT * FROM prospects WHERE (phone = ? OR phone LIKE ?) AND COALESCE(tenant_id,'founder') = ?").bind(normPhone, `%${normPhone}%`, tenantId).first();
       if (match) return { overlap: match, reason: "Same phone number match: " + normPhone };
     }
 
-    const matchNameCity = await db.prepare("SELECT * FROM prospects WHERE name = ? AND city = ?").bind(name, city).first();
+    const matchNameCity = await db.prepare("SELECT * FROM prospects WHERE name = ? AND city = ? AND COALESCE(tenant_id,'founder') = ?").bind(name, city, tenantId).first();
     if (matchNameCity) {
       return { overlap: matchNameCity, reason: "Same business name and city match" };
     }
