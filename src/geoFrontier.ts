@@ -74,6 +74,29 @@ for (const p of GEO_PLACES) {
 const POP_DESC = (a: GeoPlace, b: GeoPlace) => (b.population || 0) - (a.population || 0);
 
 /**
+ * Nearest known city to browser geolocation (US/CA). Used by Bvelt free-analysis bootstrap.
+ */
+export function findNearestPlace(lat: number, lon: number, maxKm = 80): GeoPlace | null {
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+  let best: GeoPlace | null = null;
+  let bestD = Infinity;
+  for (const p of GEO_PLACES) {
+    if (Math.abs(p.lat - lat) > 1.2) continue;
+    const d = haversineKm(lat, lon, p.lat, p.lon);
+    if (d < bestD) {
+      bestD = d;
+      best = p;
+    }
+  }
+  if (!best || bestD > maxKm) return null;
+  return best;
+}
+
+export function formatPlaceLabel(p: GeoPlace): string {
+  return `${p.name}, ${p.region}`;
+}
+
+/**
  * Busca un lugar a partir de "Austin, TX", "Austin, Texas" o "Austin".
  * - Con región: solo devuelve coincidencias de esa región (si no hay, null; nunca otro estado).
  * - Sin región: el de mayor población con ese nombre.
@@ -209,7 +232,11 @@ export async function pickTargets(
     }
   }
 
-  // 3) Pool de lugares — NUNCA explorar todo el país cuando hay allowedCities
+  // 3) Pool de lugares
+  // Tenant (centerLabel): radio alrededor de la base.
+  // allowedCities: solo cuando se pasa explícito (p.ej. tenant multi-ciudad).
+  // Founder sin centro: US+CA nacional (top población + muestra aleatoria 15k+).
+  // Sun Belt NO es filtro duro: es boost de score más abajo (x1.25).
   let pool: GeoPlace[];
   if (center) {
     const dLat = maxDist / 111 + 0.05;
@@ -219,9 +246,8 @@ export async function pickTargets(
       if (Math.abs(p.lat - center.lat) > dLat) continue;
       if (haversineKm(center.lat, center.lon, p.lat, p.lon) <= maxDist) pool.push(p);
     }
-  } else if (allowedCenters.length > 0) {
-    // Founder / configured markets: only cities within ~40 km of allowed centers
-    // Prevents drift to NYC, LA, Chicago, etc.
+  } else if (allowedCenters.length > 0 && isTenantArea) {
+    // Solo tenant multi-ciudad: restringe a ciudades configuradas
     const radius = 40;
     const dLat = radius / 111 + 0.05;
     const seen = new Set<string>();
@@ -243,18 +269,25 @@ export async function pickTargets(
       }
     }
   } else {
-    // Fallback: Sun Belt only (never NE corridor / NYC)
-    const SUN_BELT = new Set(["FL", "TX", "GA", "TN", "NC", "SC", "AL", "AZ", "NV", "LA", "MS", "OK", "AR"]);
-    const eligible = GEO_PLACES.filter(
-      (p) => countries.includes(p.country) && SUN_BELT.has((p.region || "").toUpperCase())
-    );
-    const top = eligible.slice(0, 80);
-    const mid = eligible.slice(80).filter((p) => (p.population || 0) >= 20000);
+    // Founder / national: top 150 by population + 150 random places with 15k+ pop (US+CA)
+    const eligible = GEO_PLACES.filter((p) => countries.includes(p.country));
+    const byPop = [...eligible].sort(POP_DESC);
+    const top = byPop.slice(0, 150);
+    const mid = byPop.slice(150).filter((p) => (p.population || 0) >= 15000);
     const extra: GeoPlace[] = [];
-    for (let i = 0; i < 40 && mid.length > 0; i++) {
-      extra.push(mid[Math.floor(Math.random() * mid.length)]);
+    const midCopy = [...mid];
+    for (let i = 0; i < 150 && midCopy.length > 0; i++) {
+      const idx = Math.floor(Math.random() * midCopy.length);
+      extra.push(midCopy.splice(idx, 1)[0]);
     }
-    pool = Array.from(new Set([...top, ...extra]));
+    const seen = new Set<string>();
+    pool = [];
+    for (const p of [...top, ...extra]) {
+      const k = placeKey(p);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      pool.push(p);
+    }
   }
   if (pool.length === 0) return [];
 
@@ -293,6 +326,11 @@ export async function pickTargets(
       const prior = (st.q + 1) / (st.c + 8);
       let score = Math.log(pop) * fresh * (0.5 + prior);
       if (center) score *= 1 / (1 + dist / 30); // más cerca de la base = mejor
+      // Soft priority (not a hard filter): Sun Belt markets Bvelt sells into first
+      const SUN_BELT = new Set(["FL", "TX", "GA", "TN", "NC", "SC", "AL", "AZ", "NV", "LA"]);
+      if (!isTenantArea && SUN_BELT.has((place.region || "").toUpperCase())) {
+        score *= 1.25;
+      }
       cands.push({ place, trade, score, prior, isNew, dist });
     }
   }

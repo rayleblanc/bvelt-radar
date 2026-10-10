@@ -15,7 +15,7 @@ import { getAlerts, tradeForEvent, WeatherAlert } from './weatherSignals';
 import { dispatchEmail, EmailDispatchResult } from './emailDispatcher';
 import { auditDomainSecurityAndMx, auditWebsitePerformance, auditCityWeatherEmergency } from './openAudits';
 import { fetchPermitContractors } from './permitSources';
-import { pickTargets, findPlace, markSearched, placeKey } from './geoFrontier';
+import { pickTargets, findPlace, findNearestPlace, formatPlaceLabel, markSearched, placeKey, radiusKm } from './geoFrontier';
 
 // Global type declarations for Cloudflare Worker compilation
 declare global {
@@ -1486,6 +1486,48 @@ export default {
         return Response.json({ success: true, tenant_id: tenantId, run_id: runId, message: "Tenant config saved successfully." }, { headers: corsHeaders });
       }
 
+      // 16b. Bvelt → Radar bootstrap (free analysis / profile). Autonomous tenant.
+      // Body: { user_id?, tenant_id?, trade|niche, city?, lat?, lon?, tenant_name?, source? }
+      // Returns up to 2 leads fast + starts full background run.
+      if ((path === "/api/bvelt/bootstrap" || path === "/bvelt/bootstrap") && method === "POST") {
+        if (!isAuthorized(request, env, serviceKey, validSessionHash)) {
+          return Response.json({ error: "Unauthorized" }, { status: 401, headers: corsHeaders });
+        }
+        try {
+          const body: any = await request.json().catch(() => ({}));
+          const result = await bootstrapBveltTenant(env, body, ctx);
+          return Response.json(result, { headers: corsHeaders });
+        } catch (e: any) {
+          return Response.json({ error: e.message || String(e) }, { status: 500, headers: corsHeaders });
+        }
+      }
+
+      // 16c. Poll first leads after bootstrap
+      if ((path === "/api/bvelt/leads" || path === "/bvelt/leads") && method === "GET") {
+        const tenantId = url.searchParams.get("tenant_id");
+        const limit = Math.min(10, parseInt(url.searchParams.get("limit") || "2", 10));
+        if (!tenantId) {
+          return Response.json({ error: "tenant_id required" }, { status: 400, headers: corsHeaders });
+        }
+        try {
+          const rows = await env.RADAR_DB.prepare(`
+            SELECT id, name, city, trade, website, phone, email, score, status, bvelt_angle, demo_token, created_at
+            FROM prospects
+            WHERE COALESCE(tenant_id,'founder') = ?
+              AND status NOT IN ('discarded','suppressed','blocked')
+            ORDER BY COALESCE(score, opportunity_score, 0) DESC, created_at DESC
+            LIMIT ?
+          `).bind(tenantId, limit).all();
+          const leads = (rows.results || []).map((p: any) => ({
+            ...p,
+            attack_kit: buildAttackKit(p)
+          }));
+          return Response.json({ tenant_id: tenantId, leads, count: leads.length }, { headers: corsHeaders });
+        } catch (e: any) {
+          return Response.json({ tenant_id: tenantId, leads: [], count: 0, error: e.message }, { headers: corsHeaders });
+        }
+      }
+
       // (a) POST /api/prospects/outcome
       if ((path === "/api/prospects/outcome" || path === "/prospects/outcome") && method === "POST") {
         const body: any = await request.json().catch(() => ({}));
@@ -1537,32 +1579,103 @@ export default {
         return Response.json({ success: true, prospect_id, outcome }, { headers: corsHeaders });
       }
 
-      // (b) GET /api/tenants/roi
+      // (b) GET /api/tenants/roi — full funnel + $ EV for product sales story
       if ((path === "/api/tenants/roi" || path === "/tenants/roi") && method === "GET") {
-        const tenantId = url.searchParams.get("tenant_id");
-        if (!tenantId) {
-          return Response.json({ error: "Missing tenant_id parameter" }, { status: 400, headers: corsHeaders });
-        }
-
+        const tenantId = url.searchParams.get("tenant_id") || "founder";
         try {
           const res = await env.RADAR_DB.prepare(`
             SELECT 
-              SUM(CASE WHEN tenant_outcome = 'contacted' THEN 1 ELSE 0 END) as contacted,
-              SUM(CASE WHEN tenant_outcome = 'replied' THEN 1 ELSE 0 END) as replied,
-              SUM(CASE WHEN tenant_outcome = 'won' THEN 1 ELSE 0 END) as won,
-              SUM(CASE WHEN tenant_outcome = 'won' THEN COALESCE(won_value_usd, 0) ELSE 0 END) as won_value_usd_total
+              COUNT(*) as total,
+              SUM(CASE WHEN status IN ('scouted','qualified','scored','enriched') THEN 1 ELSE 0 END) as pipeline,
+              SUM(CASE WHEN status IN ('sent','queued','approved','notified') THEN 1 ELSE 0 END) as outreach,
+              SUM(CASE WHEN status IN ('replied','won') OR tenant_outcome IN ('replied','won') THEN 1 ELSE 0 END) as replied,
+              SUM(CASE WHEN status = 'won' OR tenant_outcome = 'won' THEN 1 ELSE 0 END) as won,
+              SUM(CASE WHEN COALESCE(tenant_outcome,'') = 'contacted' THEN 1 ELSE 0 END) as contacted,
+              SUM(COALESCE(won_value_usd, 0)) as won_value_usd_total,
+              SUM(COALESCE(expected_value, opportunity_score, score, 0)) as pipeline_ev_raw,
+              AVG(COALESCE(score, opportunity_score, 0)) as avg_score
             FROM prospects
             WHERE COALESCE(tenant_id, 'founder') = ?
+              AND status NOT IN ('discarded','suppressed','blocked')
           `).bind(tenantId).first() as any;
 
+          const total = Number(res?.total || 0);
+          const outreach = Number(res?.outreach || 0);
+          const replied = Number(res?.replied || 0);
+          const won = Number(res?.won || 0);
+          const pipelineEv = Math.round(Number(res?.pipeline_ev_raw || 0));
+          const replyRate = outreach > 0 ? Math.round((replied / outreach) * 1000) / 10 : 0;
+          const winRate = outreach > 0 ? Math.round((won / outreach) * 1000) / 10 : 0;
+
           return Response.json({
+            tenant_id: tenantId,
+            total,
+            pipeline: Number(res?.pipeline || 0),
+            outreach,
             contacted: Number(res?.contacted || 0),
-            replied: Number(res?.replied || 0),
-            won: Number(res?.won || 0),
-            won_value_usd_total: Number(res?.won_value_usd_total || 0)
+            replied,
+            won,
+            won_value_usd_total: Number(res?.won_value_usd_total || 0),
+            pipeline_ev_usd: pipelineEv,
+            avg_score: Math.round(Number(res?.avg_score || 0)),
+            reply_rate_pct: replyRate,
+            win_rate_pct: winRate
           }, { headers: corsHeaders });
         } catch (e: any) {
-          return Response.json({ contacted: 0, replied: 0, won: 0, won_value_usd_total: 0 }, { headers: corsHeaders });
+          return Response.json({
+            tenant_id: tenantId, total: 0, pipeline: 0, outreach: 0, contacted: 0,
+            replied: 0, won: 0, won_value_usd_total: 0, pipeline_ev_usd: 0,
+            avg_score: 0, reply_rate_pct: 0, win_rate_pct: 0
+          }, { headers: corsHeaders });
+        }
+      }
+
+      // (b2) GET /api/prospects/attack-kit?id= — call + SMS + email kit for one lead
+      if ((path === "/api/prospects/attack-kit" || path === "/prospects/attack-kit") && method === "GET") {
+        const prospectId = url.searchParams.get("id");
+        if (!prospectId) {
+          return Response.json({ error: "Missing id" }, { status: 400, headers: corsHeaders });
+        }
+        try {
+          const p = await env.RADAR_DB.prepare("SELECT * FROM prospects WHERE id = ?").bind(prospectId).first() as any;
+          if (!p) return Response.json({ error: "Not found" }, { status: 404, headers: corsHeaders });
+          const kit = buildAttackKit(p);
+          return Response.json(kit, { headers: corsHeaders });
+        } catch (e: any) {
+          return Response.json({ error: e.message }, { status: 500, headers: corsHeaders });
+        }
+      }
+
+      // (b3) GET /api/digest/weekly — founder or tenant weekly summary (productizable)
+      if ((path === "/api/digest/weekly" || path === "/digest/weekly") && method === "GET") {
+        const tenantId = url.searchParams.get("tenant_id") || "founder";
+        try {
+          const top = await env.RADAR_DB.prepare(`
+            SELECT id, name, city, trade, score, status, phone, email, website, bvelt_angle, expected_value
+            FROM prospects
+            WHERE COALESCE(tenant_id,'founder') = ?
+              AND status NOT IN ('discarded','suppressed','blocked')
+            ORDER BY COALESCE(score, opportunity_score, 0) DESC
+            LIMIT 10
+          `).bind(tenantId).all();
+          const stats = await env.RADAR_DB.prepare(`
+            SELECT COUNT(*) as n,
+              SUM(CASE WHEN status IN ('sent','queued') THEN 1 ELSE 0 END) as sent_n
+            FROM prospects WHERE COALESCE(tenant_id,'founder') = ?
+          `).bind(tenantId).first() as any;
+          const leads = (top.results || []).map((p: any) => ({
+            ...p,
+            attack_kit: buildAttackKit(p)
+          }));
+          return Response.json({
+            tenant_id: tenantId,
+            generated_at: new Date().toISOString(),
+            total_prospects: Number(stats?.n || 0),
+            outreach_sent: Number(stats?.sent_n || 0),
+            top_leads: leads
+          }, { headers: corsHeaders });
+        } catch (e: any) {
+          return Response.json({ error: e.message }, { status: 500, headers: corsHeaders });
         }
       }
 
@@ -2788,6 +2901,216 @@ export async function processQueueJob(job: RadarJobMessage, env: Env): Promise<v
 /**
  * Initiates a new autonomous prospecting run and enqueues small discovery jobs
  */
+/**
+ * Bvelt free-analysis / profile → autonomous tenant.
+ * Resolves city from lat/lon or label, maps contractor trade → buyer niches,
+ * upserts tenant_config, runs a FAST sync discovery for up to 2 leads,
+ * and enqueues a full tenant run in the background.
+ */
+async function bootstrapBveltTenant(
+  env: Env,
+  body: any,
+  ctx?: ExecutionContext
+): Promise<{
+  success: boolean;
+  tenant_id: string;
+  city: string;
+  niches: string[];
+  run_id: string | null;
+  leads: any[];
+  message: string;
+  source: string;
+}> {
+  const source = String(body.source || "free_analysis");
+  const userTrade = String(body.trade || body.niche || body.industry || "hvac")
+    .toLowerCase()
+    .trim()
+    .replace(/\s+/g, "_");
+  const tenantId =
+    String(body.tenant_id || body.user_id || `bvelt_${Date.now()}`).replace(/[^a-zA-Z0-9_-]/g, "_") ||
+    `bvelt_${Date.now()}`;
+  const tenantName = String(body.tenant_name || body.business_name || "Bvelt Client");
+
+  // Resolve location: explicit city > lat/lon > fallback
+  let cityLabel = "";
+  if (body.city && String(body.city).trim()) {
+    const p = findPlace(String(body.city).trim());
+    cityLabel = p ? formatPlaceLabel(p) : String(body.city).trim();
+  } else if (body.lat != null && body.lon != null) {
+    const nearest = findNearestPlace(Number(body.lat), Number(body.lon), 100);
+    if (nearest) cityLabel = formatPlaceLabel(nearest);
+  }
+  if (!cityLabel) {
+    cityLabel = "Tampa, FL"; // last-resort so bootstrap never no-ops
+  }
+
+  // Contractor trade → who they sell TO (buyer ICP)
+  const tradeKey = userTrade.replace(/-/g, "_");
+  const niches =
+    TENANT_TARGET_MAP[tradeKey] ||
+    TENANT_TARGET_MAP[tradeKey.replace(/_/g, " ")] ||
+    ["property management", "real estate", "hoa"];
+  const primaryNiche = niches[0]; // e.g. property management
+  const searchTrade = primaryNiche.toLowerCase().includes("property")
+    ? "property management"
+    : primaryNiche.toLowerCase().includes("hotel")
+      ? "hotel"
+      : primaryNiche.toLowerCase().includes("hoa")
+        ? "property management"
+        : "property management";
+
+  const timestamp = new Date().toISOString();
+  await env.RADAR_DB.prepare(`
+    INSERT INTO tenant_config (
+      tenant_id, tenant_name, industry, niche, subniches_json, services_json, service_areas_json,
+      countries_json, regions_json, cities_json, languages_json, icp_description, icp_keywords_json,
+      minimum_score, daily_outreach_limit, allowed_markets_json, campaign_goal, messaging_angle, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(tenant_id) DO UPDATE SET
+      tenant_name = excluded.tenant_name,
+      industry = excluded.industry,
+      niche = excluded.niche,
+      cities_json = excluded.cities_json,
+      icp_description = excluded.icp_description,
+      icp_keywords_json = excluded.icp_keywords_json,
+      allowed_markets_json = excluded.allowed_markets_json,
+      updated_at = excluded.updated_at
+  `).bind(
+    tenantId,
+    tenantName,
+    userTrade,
+    primaryNiche,
+    JSON.stringify(niches.slice(0, 5)),
+    JSON.stringify([userTrade]),
+    JSON.stringify([cityLabel]),
+    JSON.stringify(["US", "CA"]),
+    JSON.stringify([]),
+    JSON.stringify([cityLabel]),
+    JSON.stringify(["en"]),
+    `Buyers near ${cityLabel} for a local ${userTrade} operator (auto from Bvelt ${source}).`,
+    JSON.stringify(niches),
+    45,
+    15,
+    JSON.stringify(niches),
+    "Book jobs from nearby commercial/residential buyers",
+    "fast_response_guarantee",
+    timestamp,
+    timestamp
+  ).run();
+
+  // --- FAST PATH: one Overpass/BizData pull, top 2 leads now ---
+  const leads: any[] = [];
+  try {
+    const { businesses } = await fetchLocalBusinessesWithDiagnostics(cityLabel, searchTrade, env);
+    const ranked = (businesses || [])
+      .filter((b: any) => b && b.name)
+      .map((b: any) => {
+        const name = String(b.name);
+        const isChain = /walmart|home depot|lowes|costco|mcdonald|starbucks|cvs|walgreens/i.test(name);
+        let score = 55;
+        if (b.phone) score += 10;
+        if (b.website && !/facebook|instagram|wixsite/i.test(String(b.website))) score += 8;
+        else score += 12; // no web / social only = pain for THEM as buyers still contactable
+        if (/property|management|hoa|apartment|realty|real estate|facility/i.test(name)) score += 15;
+        if (isChain) score = 15;
+        return { ...b, city: b.city || cityLabel, trade: searchTrade, _score: Math.min(100, score) };
+      })
+      .filter((b: any) => b._score >= 45)
+      .sort((a: any, b: any) => b._score - a._score)
+      .slice(0, 2);
+
+    for (const b of ranked) {
+      const prospectId = crypto.randomUUID();
+      const demoToken = crypto.randomUUID().replace(/-/g, "");
+      const identityKey = `${String(b.name).toLowerCase()}_${cityLabel.toLowerCase()}`.replace(/\s+/g, "_");
+      // Skip if already exists for this tenant
+      const exists = await env.RADAR_DB.prepare(
+        "SELECT id FROM prospects WHERE identity_key = ? AND COALESCE(tenant_id,'founder') = ? LIMIT 1"
+      ).bind(identityKey, tenantId).first();
+      if (exists) {
+        const existing = await env.RADAR_DB.prepare("SELECT * FROM prospects WHERE id = ?").bind((exists as any).id).first();
+        if (existing) {
+          leads.push({ ...existing, attack_kit: buildAttackKit(existing) });
+        }
+        continue;
+      }
+      await env.RADAR_DB.prepare(`
+        INSERT INTO prospects (
+          id, mode, tenant_id, name, city, trade, website, phone, email,
+          score, signals_json, score_breakdown, variant_id, status, source,
+          created_at, updated_at, bvelt_angle, identity_key, demo_token
+        ) VALUES (?, 'tenant', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'missed_calls', 'qualified', 'bvelt_bootstrap', ?, ?, 'missed_calls', ?, ?)
+      `).bind(
+        prospectId,
+        tenantId,
+        b.name,
+        cityLabel,
+        searchTrade,
+        b.website || null,
+        b.phone || null,
+        b.email || null,
+        b._score,
+        JSON.stringify({ bootstrap: true, source }),
+        JSON.stringify({ fast_score: b._score, why: "Near you · buyer segment for your trade" }),
+        timestamp,
+        timestamp,
+        identityKey,
+        demoToken
+      ).run();
+      const row = {
+        id: prospectId,
+        name: b.name,
+        city: cityLabel,
+        trade: searchTrade,
+        website: b.website || null,
+        phone: b.phone || null,
+        email: b.email || null,
+        score: b._score,
+        status: "qualified",
+        demo_token: demoToken
+      };
+      leads.push({ ...row, attack_kit: buildAttackKit(row) });
+    }
+  } catch (e: any) {
+    console.warn("[bootstrapBveltTenant] fast discovery error:", e?.message || e);
+  }
+
+  // Background full tenant run (more leads over next minutes)
+  let runId: string | null = null;
+  const runPromise = startProspectingRun(env, "tenant", tenantId, {
+    cities: cityLabel,
+    trades: searchTrade
+  }, true).then((r) => {
+    runId = r.run_id;
+    return r;
+  }).catch((e) => {
+    console.warn("[bootstrapBveltTenant] background run failed:", e);
+    return null;
+  });
+  if (ctx && typeof ctx.waitUntil === "function") {
+    ctx.waitUntil(runPromise);
+  } else {
+    try {
+      const r = await runPromise;
+      runId = r?.run_id || null;
+    } catch { /* ok */ }
+  }
+
+  return {
+    success: true,
+    tenant_id: tenantId,
+    city: cityLabel,
+    niches,
+    run_id: runId,
+    leads,
+    message:
+      leads.length > 0
+        ? `Listo: ${leads.length} cliente(s) potencial(es) cerca de ${cityLabel}. Más en camino.`
+        : `Tenant listo en ${cityLabel}. Buscando compradores (property/HOA) — revisa /api/bvelt/leads en 1–2 min.`,
+    source
+  };
+}
+
 export async function startProspectingRun(
   env: Env, 
   mode: string, 
@@ -3015,6 +3338,62 @@ async function ensureOpportunitiesSchema(db: D1Database): Promise<void> {
       )
     `).run();
   } catch { /* ok */ }
+}
+
+/**
+ * Clef-flash: typed decision model on Workers AI (free Neurons).
+ * Filters government/university/chain noise without Gemini cost.
+ * On any error → allow through (ok:true) so discovery never stalls.
+ */
+export async function classifyWithClef(
+  env: Env,
+  name: string,
+  website: string | null | undefined,
+  trade: string,
+  city: string,
+  mode: string
+): Promise<{ ok: boolean; reason: string }> {
+  if (!env.AI || typeof env.AI.run !== "function") {
+    return { ok: true, reason: "no_ai_binding" };
+  }
+  try {
+    const response: any = await env.AI.run("@cf/cloudflare/clef-flash", {
+      model: "clef-flash",
+      state: {
+        name: name || "unknown",
+        website: website || "n/a",
+        trade: trade || "service",
+        city: city || "unknown"
+      },
+      questions: {
+        real_local_business: {
+          type: "noul",
+          instructions:
+            "Is `name` a real local business that sells services to the public (not a government office, university, church, association, directory listing, or national chain headquarters)?"
+        },
+        independent: {
+          type: "noul",
+          instructions:
+            "Is `name` an independent local operator and not a national franchise or big-box chain (Walmart, Home Depot, national brands)?"
+        }
+      }
+    });
+    const answers = response?.answers || response;
+    const real = Number(answers?.real_local_business?.noul ?? answers?.real_local_business ?? 1);
+    const indep = Number(answers?.independent?.noul ?? answers?.independent ?? 1);
+    const okReal = real >= 0.35;
+    const okIndep = mode === "tenant" ? true : indep >= 0.25;
+    if (!okReal || !okIndep) {
+      return {
+        ok: false,
+        reason: `clef reject real=${real.toFixed(2)} indep=${indep.toFixed(2)}`
+      };
+    }
+    return { ok: true, reason: `clef ok real=${real.toFixed(2)} indep=${indep.toFixed(2)}` };
+  } catch (e: any) {
+    console.warn("[classifyWithClef] fallback allow:", e?.message || e);
+    return { ok: true, reason: "clef_error_allow" };
+  }
 }
 
 export async function classifyWithWorkersAI(
@@ -3261,7 +3640,17 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
 
     if (aiClassifyCalls < 25) {
       aiClassifyCalls++;
-      const aiCheck = await classifyWithWorkersAI(env, candidate.name, candidate.website, trade);
+      let aiCheck = await classifyWithClef(
+        env,
+        candidate.name,
+        candidate.website,
+        trade,
+        candidate.city || city,
+        job.mode || "founder"
+      );
+      if (aiCheck.reason === "clef_error_allow" || aiCheck.reason === "no_ai_binding") {
+        aiCheck = await classifyWithWorkersAI(env, candidate.name, candidate.website, trade);
+      }
       if (!aiCheck.ok) {
         await releaseBudget(env.RADAR_DB, tenantId, 'discovery_units', 1);
         filteredCount++;
@@ -4923,7 +5312,8 @@ export async function getPriorityTargets(
     return evB - evA;
   });
 
-  // SOLO rama founder y sin overrides.cities: pickTargets restringido a ciudades configuradas
+  // Founder: national US+CA pool (geoFrontier). Sun Belt is soft boost, not a wall.
+  // Tenant keeps allowedCities / centerLabel isolation.
   let picks: { place: any; trade: string; why: string }[] = [];
   if (!skipPicks && mode === "founder" && !(overrides && overrides.cities)) {
     try {
@@ -4931,9 +5321,7 @@ export async function getPriorityTargets(
         tenantId: "founder",
         trades: sortedNiches,
         count: Math.min(12, Number(env.RADAR_JOBS_PER_RUN || 8)),
-        countries: ["US", "CA"],
-        // CRITICAL: only search within configured Sun Belt markets — never national drift
-        allowedCities: sortedGeographies.length > 0 ? sortedGeographies : PRIORITY_CITIES
+        countries: ["US", "CA"]
       });
     } catch (e) {
       console.warn("[getPriorityTargets] pickTargets error:", e);
@@ -5501,12 +5889,15 @@ export function calculateMultiFactorScore(
 
   // --- FOUNDER MODE: 6-COMPONENT FORMULA (contractors who need Bvelt) ---
   
-  // Facebook/Instagram-only "website" = digitally immature operator (high pain / high Bvelt fit)
+  // No real website / only social = high pain for Founder (leads die on voicemail)
   const webLower = String(item.website || "").toLowerCase();
   const isSocialOnlySite = !!webLower && (
-    /facebook\.com|fb\.com|instagram\.com|linktr\.ee|bit\.ly/i.test(webLower)
+    /facebook\.com|fb\.com|instagram\.com|linktr\.ee|bit\.ly|business\.site|wixsite\.com/i.test(webLower)
   );
   const hasNoRealWebsite = !item.website || !isRealWebsite(item.website) || isSocialOnlySite;
+  if (hasNoRealWebsite) {
+    (signals as any).no_own_website = true;
+  }
 
   // 1. Need Evidence (0 - 30 pts)
   let needEvidenceScore = 0;
@@ -5515,8 +5906,8 @@ export function calculateMultiFactorScore(
   if (!signals.quote_request && !signals.estimate_language) needEvidenceScore += 8;
   if (signals.emergency && signals.sms_gap) needEvidenceScore += 4;
   if (phone && !email) needEvidenceScore += 4;
-  if (hasNoRealWebsite && phone) needEvidenceScore += 5; // phone-first businesses bleed leads
-  if (isSocialOnlySite) needEvidenceScore += 3;
+  // +12 "Sin web propia" — do NOT discard; these are high-fit Bvelt leads
+  if (hasNoRealWebsite) needEvidenceScore += 12;
   needEvidenceScore = Math.min(30, Math.max(0, needEvidenceScore));
 
   // 2. Bvelt Fit (0 - 20 pts)
@@ -6071,8 +6462,29 @@ export async function fetchLocalBusinessesWithDiagnostics(
   }
 
   // 1. Nominatim Resolution
-  const nominatimGeo = await fetchNominatimGeocoding(city);
-  nominatimStatus = nominatimGeo ? `resolved_bbox [${nominatimGeo.bbox.join(", ")}]` : "geocoding_fallback";
+  // Prefer tight bbox from our city DB (avoids whole-metro Overpass queries that return 0)
+  let nominatimGeo: NominatimGeocoding | null = null;
+  const knownPlace = findPlace(city);
+  if (knownPlace) {
+    const r = Math.min(radiusKm(knownPlace.population || 50000), 12);
+    const dLat = r / 111;
+    const dLon = r / (111 * Math.cos((knownPlace.lat * Math.PI) / 180));
+    nominatimGeo = {
+      lat: knownPlace.lat,
+      lon: knownPlace.lon,
+      display_name: city,
+      bbox: [
+        knownPlace.lat - dLat,
+        knownPlace.lat + dLat,
+        knownPlace.lon - dLon,
+        knownPlace.lon + dLon
+      ]
+    };
+    nominatimStatus = `local_bbox r=${r.toFixed(1)}km [${nominatimGeo.bbox.map(n => n.toFixed(3)).join(", ")}]`;
+  } else {
+    nominatimGeo = await fetchNominatimGeocoding(city);
+    nominatimStatus = nominatimGeo ? `resolved_bbox [${nominatimGeo.bbox.join(", ")}]` : "geocoding_fallback";
+  }
 
   // 1.5 Municipal Permit Contractors Lookup (real-time building permits)
   let permitCandidates: any[] = [];
@@ -6533,6 +6945,85 @@ async function generateAICopy(
   // 4. Static High-Converting Template Fallback (always works offline)
   console.log(`[Gemini Cascade] All AI pipelines failed or budget exceeded. Reverting to deterministic backup template.`);
   return getTradePsychologyFallback(prospect.name, prospect.trade, prospect.city, bveltAngle, language, prospect.phone, prospect.demo_token, prospect.signal_event, prospect.signal_area, env);
+}
+
+/**
+ * Attack kit: email + SMS + call script tailored to angle/signals.
+ * Turns a scored prospect into an executable outreach package (product surface).
+ */
+export function buildAttackKit(p: any): {
+  prospect_id: string;
+  name: string;
+  why_this_lead: string;
+  email: { subject: string; body: string };
+  sms: string;
+  call_script: string;
+  next_action: string;
+  angle: string;
+} {
+  const name = String(p.name || "there");
+  const city = String(p.city || "");
+  const trade = String(p.trade || "service").replace(/_/g, " ");
+  const angle = String(p.bvelt_angle || p.angle || "missed_calls").toLowerCase();
+  const phone = p.phone ? String(p.phone) : null;
+  const demo = p.demo_token ? `https://bvelt.app/demo?p=${p.demo_token}` : "https://bvelt.app/demo";
+
+  let signals: any = {};
+  try {
+    signals = typeof p.signals_json === "string" ? JSON.parse(p.signals_json || "{}") : (p.signals_json || p.signals || {});
+  } catch { signals = {}; }
+
+  const reasons: string[] = [];
+  if (signals.sms_gap || signals.no_own_website) reasons.push("sin canal digital de respuesta rápida");
+  if (signals.emergency) reasons.push("promete urgencias 24/7");
+  if (!signals.booking) reasons.push("sin reserva online");
+  if (p.signal_event) reasons.push(`señal climática: ${p.signal_event}`);
+  if (reasons.length === 0) reasons.push("negocio local de oficio con hueco de seguimiento");
+
+  const why = `${name} en ${city} (${trade}): ${reasons.join("; ")}.`;
+
+  let subject = `Quick question for ${name}`;
+  let emailBody = "";
+  let sms = "";
+  let call = "";
+
+  if (angle.includes("after") || signals.emergency) {
+    subject = `${name} — after-hours calls`;
+    emailBody = `Hi ${name} team — saw you handle emergency / after-hours work in ${city}. When the phone rings at 9pm and you're already on a job, those callers often go to whoever answers first.\n\nBvelt recovers those missed calls and old quotes automatically. 60-second look: ${demo}\n\nWorth a glance?`;
+    sms = `Hi, it's about ${name} after-hours calls in ${city}. Quick idea to stop losing emergency jobs to voicemail — ${demo}`;
+    call = `Hook: "I noticed ${name} advertises emergency service in ${city}."\nPain: "When you're on a job and the next emergency rings, who catches it?"\nPitch: "Bvelt texts back in under a minute and books or queues the lead."\nClose: "Can I send a 60-second demo link?"`;
+  } else if (angle.includes("sms") || signals.sms_gap || signals.no_own_website) {
+    subject = `${name} — texting gap`;
+    emailBody = `Hi ${name} — a lot of homeowners in ${city} text before they call. If the only option is a phone number, those jobs slip away.\n\nBvelt adds instant SMS follow-up for missed calls and web leads. Demo: ${demo}`;
+    sms = `${name}: many ${trade} leads in ${city} prefer text. Bvelt covers missed calls by SMS — ${demo}`;
+    call = `Hook: "Quick one — do most of your ${city} leads still only call, or do they text?"\nPain: "Phone-only shops lose the texters."\nPitch: "Bvelt answers the gap without another hire."\nClose: "I'll text you the demo — 60 seconds."`;
+  } else if (angle.includes("quote") || signals.quote_request) {
+    subject = `${name} — quote follow-up`;
+    emailBody = `Hi ${name} — estimates that sit without a follow-up are the quietest revenue leak in ${trade}.\n\nBvelt nudges old quotes and missed calls so jobs don't go cold. ${demo}`;
+    sms = `${name}: following up on open quotes in ${city} recovers jobs. See Bvelt: ${demo}`;
+    call = `Hook: "How do you follow up estimates that didn't close last week?"\nPain: "Most shops never touch them again."\nPitch: "Bvelt sequences those automatically."\nClose: "Demo link takes one minute."`;
+  } else {
+    subject = p.draft_subject || `Missed calls at ${name}`;
+    emailBody = p.draft_body || `Hi ${name} team in ${city} — every missed call is a job that may go to the next contractor. Bvelt recovers them: ${demo}`;
+    sms = `Hi ${name} — idea to recover missed ${trade} calls in ${city}: ${demo}`;
+    call = `Hook: "I was looking at ${trade} operators in ${city} and ${name} stood out."\nPain: "Missed calls during busy hours."\nPitch: "Bvelt covers the gap."\nClose: "OK to send a short demo?"`;
+  }
+
+  const next =
+    phone && !p.email ? "Llamar o WhatsApp primero (solo teléfono)." :
+    p.email ? "Enviar correo + registrar decisión Enviar." :
+    "Buscar contacto y luego kit SMS/llamada.";
+
+  return {
+    prospect_id: String(p.id || ""),
+    name,
+    why_this_lead: why,
+    email: { subject, body: emailBody },
+    sms,
+    call_script: call,
+    next_action: next,
+    angle
+  };
 }
 
 /**

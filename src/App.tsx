@@ -328,6 +328,13 @@ export default function App() {
         }).catch(() => null);
       }
       
+      // ROI funnel (founder or selected tenant)
+      try {
+        const roiTenant = isTenantMode && hasTenantSelected ? selectedTenantId : 'founder';
+        const roiRes = await fetch(`${apiUrl}/api/tenants/roi?tenant_id=${encodeURIComponent(roiTenant)}`, { credentials: 'include' }).catch(() => null);
+        if (roiRes && roiRes.ok) setRoiStats(await roiRes.json());
+      } catch { /* non-blocking */ }
+
       if (prospectsRes && prospectsRes.ok) {
         const rawList = await prospectsRes.json();
         const pList: any[] = Array.isArray(rawList) ? rawList : (rawList.prospects || []);
@@ -850,7 +857,7 @@ export default function App() {
     service_areas_json: '["Metro Area"]',
     countries_json: '["US"]',
     regions_json: '["FL"]',
-    cities_json: '["Tampa, FL", "Orlando, FL"]',
+    cities_json: '',
     languages_json: '["en"]',
     icp_description: 'Commercial property managers requiring rapid contractor dispatch',
     minimum_score: 50,
@@ -859,17 +866,34 @@ export default function App() {
     messaging_angle: 'fast_response_guarantee'
   });
   const [tenantSaveStatus, setTenantSaveStatus] = useState<string | null>(null);
+  // Human-friendly cities input (semicolon-separated) → stored as cities_json array
+  const [tenantCitiesText, setTenantCitiesText] = useState('Austin, TX; Round Rock, TX');
+  const [roiStats, setRoiStats] = useState<any>(null);
+  const [attackKits, setAttackKits] = useState<Record<string, any>>({});
 
   const saveTenantConfig = async (e: React.FormEvent) => {
     e.preventDefault();
+    const cities = tenantCitiesText
+      .split(/[;,\n]/)
+      .map(s => s.trim())
+      .filter(Boolean);
+    if (cities.length === 0) {
+      setTenantSaveStatus("Escribe al menos una ciudad (ej: Austin, TX; Round Rock, TX).");
+      return;
+    }
+    const payload = {
+      ...tenantForm,
+      cities_json: JSON.stringify(cities)
+    };
     try {
       const res = await fetch(`${apiUrl}/api/tenants/config`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify(tenantForm)
+        body: JSON.stringify(payload)
       });
       if (res.ok) {
+        setTenantForm(prev => ({ ...prev, cities_json: JSON.stringify(cities) }));
         setTenantSaveStatus("Configuración de tenant guardada exitosamente.");
         fetchTelemetry();
         setTimeout(() => setTenantSaveStatus(null), 4000);
@@ -1345,10 +1369,32 @@ export default function App() {
                   <div className="bg-slate-900/40 p-3 rounded-2xl border border-slate-900">
                     <span className="text-[9px] text-slate-500 block uppercase font-sans font-bold">Pipeline EV</span>
                     <span className="text-lg font-bold tracking-tight text-emerald-400 tabular-nums">
-                      ${opportunities.reduce((acc, o) => acc + (o.expected_value || 0), 0).toLocaleString()}
+                      ${(roiStats?.pipeline_ev_usd ?? opportunities.reduce((acc, o) => acc + (o.expected_value || 0), 0)).toLocaleString()}
                     </span>
                   </div>
                 </div>
+
+                {/* ROI funnel — product metric for founder + tenant */}
+                {roiStats && (
+                  <div className="bg-slate-900/50 border border-slate-800 rounded-2xl p-3 grid grid-cols-4 gap-2 text-center font-mono">
+                    <div>
+                      <div className="text-[9px] text-slate-500 uppercase">Leads</div>
+                      <div className="text-sm font-bold text-white">{roiStats.total ?? 0}</div>
+                    </div>
+                    <div>
+                      <div className="text-[9px] text-slate-500 uppercase">Outreach</div>
+                      <div className="text-sm font-bold text-blue-300">{roiStats.outreach ?? 0}</div>
+                    </div>
+                    <div>
+                      <div className="text-[9px] text-slate-500 uppercase">Reply %</div>
+                      <div className="text-sm font-bold text-amber-300">{roiStats.reply_rate_pct ?? 0}%</div>
+                    </div>
+                    <div>
+                      <div className="text-[9px] text-slate-500 uppercase">Win %</div>
+                      <div className="text-sm font-bold text-emerald-300">{roiStats.win_rate_pct ?? 0}%</div>
+                    </div>
+                  </div>
+                )}
 
                 {/* Priority filter pills */}
                 <div className="flex items-center gap-1.5 overflow-x-auto pb-1 no-scrollbar text-[10px] font-mono font-bold">
@@ -1817,6 +1863,48 @@ export default function App() {
                                   {p.draft_body}
                                 </div>
                               )}
+                              {/* Attack kit: call + SMS + email — product surface */}
+                              <div className="bg-indigo-950/30 border border-indigo-800/40 rounded-xl p-3 space-y-2">
+                                <div className="flex items-center justify-between">
+                                  <span className="text-[10px] font-bold uppercase text-indigo-300">Kit de ataque</span>
+                                  <button
+                                    type="button"
+                                    className="text-[10px] text-indigo-400 font-bold"
+                                    onClick={async () => {
+                                      if (attackKits[p.id]) return;
+                                      try {
+                                        const r = await fetch(`${apiUrl}/api/prospects/attack-kit?id=${encodeURIComponent(p.id)}`, { credentials: 'include' });
+                                        if (r.ok) {
+                                          const kit = await r.json();
+                                          setAttackKits(prev => ({ ...prev, [p.id]: kit }));
+                                        }
+                                      } catch { /* ignore */ }
+                                    }}
+                                  >
+                                    {attackKits[p.id] ? 'Listo' : 'Generar kit'}
+                                  </button>
+                                </div>
+                                {attackKits[p.id] ? (
+                                  <div className="space-y-2 text-[10px] text-slate-300 font-mono">
+                                    <p className="text-amber-200">{attackKits[p.id].why_this_lead}</p>
+                                    <p><span className="text-slate-500">SMS:</span> {attackKits[p.id].sms}</p>
+                                    <p className="whitespace-pre-wrap"><span className="text-slate-500">Llamada:</span>{'\n'}{attackKits[p.id].call_script}</p>
+                                    <p><span className="text-slate-500">Siguiente:</span> {attackKits[p.id].next_action}</p>
+                                    {p.phone && (
+                                      <a
+                                        href={`https://wa.me/1${String(p.phone).replace(/\D/g, '')}?text=${encodeURIComponent(attackKits[p.id].sms || '')}`}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        className="inline-block px-2 py-1 rounded bg-emerald-950/50 border border-emerald-800 text-emerald-300 font-bold"
+                                      >
+                                        WhatsApp con SMS del kit
+                                      </a>
+                                    )}
+                                  </div>
+                                ) : (
+                                  <p className="text-[10px] text-slate-500">Pulsa Generar kit → guion de llamada + SMS + por qué este lead.</p>
+                                )}
+                              </div>
                               <div className="grid grid-cols-2 gap-2 pt-1 font-mono">
                                 <button
                                   onClick={() => submitDecision(p.id, 'sent')}
@@ -1965,15 +2053,15 @@ export default function App() {
                     />
                   </div>
                   <div>
-                    <label className="text-[10px] text-amber-500 block mb-1">Ciudades (JSON obligatorio)</label>
+                    <label className="text-[10px] text-amber-500 block mb-1">Ciudades de servicio (separadas por ;)</label>
                     <input
                       type="text"
-                      value={tenantForm.cities_json || '["Tampa, FL", "Orlando, FL"]'}
-                      onChange={(e) => setTenantForm(prev => ({ ...prev, cities_json: e.target.value }))}
-                      placeholder='["Tampa, FL", "Orlando, FL"]'
+                      value={tenantCitiesText}
+                      onChange={(e) => setTenantCitiesText(e.target.value)}
+                      placeholder="Austin, TX; Round Rock, TX"
                       className="w-full bg-slate-950 border border-amber-800/60 rounded px-2.5 py-1.5 text-amber-100"
                     />
-                    <p className="text-[9px] text-amber-500/80 mt-1">Sin ciudades el Radar Tenant no busca. Ej: ["Tampa, FL","Orlando, FL"]</p>
+                    <p className="text-[9px] text-amber-500/80 mt-1">Obligatorio. Sin ciudades el Radar Tenant no busca.</p>
                   </div>
                   <div className="grid grid-cols-2 gap-2">
                     <div>
@@ -2009,6 +2097,63 @@ export default function App() {
                     Guardar Configuración del Tenant
                   </button>
                 </form>
+
+                <div className="pt-4 border-t border-slate-800 space-y-2">
+                  <p className="text-[10px] text-slate-500 uppercase font-bold">Simular Bvelt → Radar (análisis gratis)</p>
+                  <button
+                    type="button"
+                    className="w-full py-2.5 bg-indigo-600/80 hover:bg-indigo-500 font-bold rounded-xl text-white text-xs"
+                    onClick={async () => {
+                      setTenantSaveStatus("Bootstrap Bvelt…");
+                      try {
+                        let lat: number | undefined;
+                        let lon: number | undefined;
+                        try {
+                          const pos = await new Promise<GeolocationPosition>((resolve, reject) => {
+                            if (!navigator.geolocation) return reject(new Error("no geo"));
+                            navigator.geolocation.getCurrentPosition(resolve, reject, { timeout: 8000 });
+                          });
+                          lat = pos.coords.latitude;
+                          lon = pos.coords.longitude;
+                        } catch { /* optional */ }
+                        const body: any = {
+                          user_id: tenantForm.tenant_id || "tenant_custom_01",
+                          tenant_name: tenantForm.tenant_name || "Mi Empresa Cliente",
+                          trade: (tenantForm.niche === "property_management" ? "hvac" : (tenantForm.niche || "hvac")),
+                          source: "free_analysis_ui"
+                        };
+                        if (lat != null && lon != null) {
+                          body.lat = lat;
+                          body.lon = lon;
+                        } else if (tenantCitiesText) {
+                          body.city = tenantCitiesText.split(/[;,\n]/)[0].trim();
+                        }
+                        const r = await fetch(`${apiUrl}/api/bvelt/bootstrap`, {
+                          method: "POST",
+                          credentials: "include",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify(body)
+                        });
+                        const data = await r.json();
+                        if (r.ok) {
+                          setTenantSaveStatus(`OK ${data.city}: ${data.leads?.length || 0} lead(s). ${data.message || ""}`);
+                          setCurrentMode("tenant");
+                          if (data.tenant_id) setSelectedTenantId(data.tenant_id);
+                          fetchTelemetry();
+                        } else {
+                          setTenantSaveStatus("Error bootstrap: " + (data.error || r.status));
+                        }
+                      } catch (e: any) {
+                        setTenantSaveStatus("Error: " + e.message);
+                      }
+                    }}
+                  >
+                    Análisis gratis: geo + 2 clientes cerca
+                  </button>
+                  <p className="text-[9px] text-slate-600">
+                    Ubicación del navegador o primera ciudad del campo. Mismo API que usará Bvelt.
+                  </p>
+                </div>
               </div>
             )}
           </>
