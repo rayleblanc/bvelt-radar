@@ -1964,6 +1964,17 @@ export default function App() {
                       className="w-full bg-slate-950 border border-slate-800 rounded px-2.5 py-1.5 text-slate-200"
                     />
                   </div>
+                  <div>
+                    <label className="text-[10px] text-amber-500 block mb-1">Ciudades (JSON obligatorio)</label>
+                    <input
+                      type="text"
+                      value={tenantForm.cities_json || '["Tampa, FL", "Orlando, FL"]'}
+                      onChange={(e) => setTenantForm(prev => ({ ...prev, cities_json: e.target.value }))}
+                      placeholder='["Tampa, FL", "Orlando, FL"]'
+                      className="w-full bg-slate-950 border border-amber-800/60 rounded px-2.5 py-1.5 text-amber-100"
+                    />
+                    <p className="text-[9px] text-amber-500/80 mt-1">Sin ciudades el Radar Tenant no busca. Ej: ["Tampa, FL","Orlando, FL"]</p>
+                  </div>
                   <div className="grid grid-cols-2 gap-2">
                     <div>
                       <label className="text-[10px] text-slate-500 block mb-1">Score Mínimo</label>

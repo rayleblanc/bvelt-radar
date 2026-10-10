@@ -983,6 +983,7 @@ export default {
       // 8c-bis. Backfill opportunities from existing scored prospects (one-shot repair)
       if ((path === "/api/opportunities/backfill" || path === "/opportunities/backfill") && method === "POST") {
         try {
+          await ensureOpportunitiesSchema(env.RADAR_DB);
           const tenantFilter = url.searchParams.get("tenant_id");
           let q = `SELECT id, name, city, trade, score, opportunity_score, confidence_score,
                           fit_score, intent_score, pain_score, ability_to_pay_score,
@@ -2956,6 +2957,66 @@ export function isNonBusinessEntity(name: string, website: string | undefined, m
 /**
  * Classifies businesses using Cloudflare Workers AI (Llama 3.2 3B Instruct)
  */
+/**
+ * Production D1 may have an older opportunities table (created before title / score columns).
+ * CREATE TABLE IF NOT EXISTS does not add missing columns — patch them at runtime.
+ */
+async function ensureOpportunitiesSchema(db: D1Database): Promise<void> {
+  const cols = [
+    "title TEXT",
+    "strategic_score INTEGER DEFAULT 0",
+    "fit_score INTEGER DEFAULT 0",
+    "intent_score INTEGER DEFAULT 0",
+    "pain_score INTEGER DEFAULT 0",
+    "ability_to_pay_score INTEGER DEFAULT 0",
+    "contactability_score INTEGER DEFAULT 0",
+    "timing_score INTEGER DEFAULT 0",
+    "evidence_score INTEGER DEFAULT 0",
+    "signal_freshness_score INTEGER DEFAULT 100",
+    "expected_value REAL DEFAULT 0",
+    "decision_state TEXT DEFAULT 'identified'",
+    "why_now_json TEXT DEFAULT '{}'",
+    "priority_tier TEXT DEFAULT 'medium'",
+    "created_at TEXT",
+    "updated_at TEXT",
+    "tenant_id TEXT DEFAULT 'founder'",
+    "prospect_id TEXT",
+  ];
+  for (const col of cols) {
+    try {
+      await db.prepare(`ALTER TABLE opportunities ADD COLUMN ${col}`).run();
+    } catch {
+      // column already exists — ignore
+    }
+  }
+  // Ensure table exists at all (fresh envs)
+  try {
+    await db.prepare(`
+      CREATE TABLE IF NOT EXISTS opportunities (
+        id TEXT PRIMARY KEY,
+        prospect_id TEXT,
+        tenant_id TEXT DEFAULT 'founder',
+        title TEXT,
+        strategic_score INTEGER DEFAULT 0,
+        fit_score INTEGER DEFAULT 0,
+        intent_score INTEGER DEFAULT 0,
+        pain_score INTEGER DEFAULT 0,
+        ability_to_pay_score INTEGER DEFAULT 0,
+        contactability_score INTEGER DEFAULT 0,
+        timing_score INTEGER DEFAULT 0,
+        evidence_score INTEGER DEFAULT 0,
+        signal_freshness_score INTEGER DEFAULT 100,
+        expected_value REAL DEFAULT 0,
+        decision_state TEXT DEFAULT 'identified',
+        why_now_json TEXT DEFAULT '{}',
+        priority_tier TEXT DEFAULT 'medium',
+        created_at TEXT,
+        updated_at TEXT
+      )
+    `).run();
+  } catch { /* ok */ }
+}
+
 export async function classifyWithWorkersAI(
   env: Env,
   name: string,
@@ -3735,6 +3796,7 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
 
   // Opportunity Intelligence registration
   try {
+    await ensureOpportunitiesSchema(env.RADAR_DB);
     const oppId = `opp_${prospect_id}`;
     const tenantId = job.tenant_id || "founder";
     const title = `${prospect.name} — ${prospect.trade} (${prospect.city})`;
