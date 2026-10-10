@@ -138,6 +138,8 @@ export async function pickTargets(
     centerLabel?: string;
     serviceRadiusKm?: number;
     countries?: string[];
+    /** Restrict pool to these city labels (e.g. "Tampa, FL"). Prevents national drift to NYC etc. */
+    allowedCities?: string[];
   }
 ): Promise<{ place: GeoPlace; trade: string; why: string }[]> {
   const count = Math.max(1, Math.min(30, o.count || 5));
@@ -148,13 +150,21 @@ export async function pickTargets(
   const isTenantArea = !!o.centerLabel;
 
   // 1) Centro del tenant: si se pidió y no se puede resolver, NO devolvemos nada
-  //    (el llamador usa su comportamiento anterior en vez de buscar en todo el país).
   let center: GeoPlace | null = null;
   if (isTenantArea) {
     center = findPlace(o.centerLabel as string);
     if (!center) return [];
   }
   const maxDist = o.serviceRadiusKm ?? 60;
+
+  // Resolve allowedCities into GeoPlace centers (strict configured markets only)
+  const allowedCenters: GeoPlace[] = [];
+  if (o.allowedCities && o.allowedCities.length > 0) {
+    for (const label of o.allowedCities) {
+      const pl = findPlace(label);
+      if (pl) allowedCenters.push(pl);
+    }
+  }
 
   // 2) Historial (una sola consulta)
   let rows: CoverageRecord[] = [];
@@ -199,23 +209,49 @@ export async function pickTargets(
     }
   }
 
-  // 3) Pool de lugares
+  // 3) Pool de lugares — NUNCA explorar todo el país cuando hay allowedCities
   let pool: GeoPlace[];
   if (center) {
     const dLat = maxDist / 111 + 0.05;
     pool = [];
     for (const p of GEO_PLACES) {
       if (!countries.includes(p.country)) continue;
-      if (Math.abs(p.lat - center.lat) > dLat) continue; // descarte barato antes de haversine
+      if (Math.abs(p.lat - center.lat) > dLat) continue;
       if (haversineKm(center.lat, center.lon, p.lat, p.lon) <= maxDist) pool.push(p);
     }
+  } else if (allowedCenters.length > 0) {
+    // Founder / configured markets: only cities within ~40 km of allowed centers
+    // Prevents drift to NYC, LA, Chicago, etc.
+    const radius = 40;
+    const dLat = radius / 111 + 0.05;
+    const seen = new Set<string>();
+    pool = [];
+    for (const c of allowedCenters) {
+      const ck = placeKey(c);
+      if (!seen.has(ck)) {
+        seen.add(ck);
+        pool.push(c);
+      }
+      for (const p of GEO_PLACES) {
+        if (!countries.includes(p.country)) continue;
+        if (Math.abs(p.lat - c.lat) > dLat) continue;
+        if (haversineKm(c.lat, c.lon, p.lat, p.lon) > radius) continue;
+        const pk = placeKey(p);
+        if (seen.has(pk)) continue;
+        seen.add(pk);
+        pool.push(p);
+      }
+    }
   } else {
-    // Nacional: top 120 por población + 80 aleatorios de las ciudades de 15.000+ (acota el CPU)
-    const eligible = GEO_PLACES.filter((p) => countries.includes(p.country));
-    const top = eligible.slice(0, 120);
-    const mid = eligible.slice(120).filter((p) => (p.population || 0) >= 15000);
+    // Fallback: Sun Belt only (never NE corridor / NYC)
+    const SUN_BELT = new Set(["FL", "TX", "GA", "TN", "NC", "SC", "AL", "AZ", "NV", "LA", "MS", "OK", "AR"]);
+    const eligible = GEO_PLACES.filter(
+      (p) => countries.includes(p.country) && SUN_BELT.has((p.region || "").toUpperCase())
+    );
+    const top = eligible.slice(0, 80);
+    const mid = eligible.slice(80).filter((p) => (p.population || 0) >= 20000);
     const extra: GeoPlace[] = [];
-    for (let i = 0; i < 80 && mid.length > 0; i++) {
+    for (let i = 0; i < 40 && mid.length > 0; i++) {
       extra.push(mid[Math.floor(Math.random() * mid.length)]);
     }
     pool = Array.from(new Set([...top, ...extra]));

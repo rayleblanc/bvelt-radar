@@ -298,7 +298,7 @@ export default function App() {
       } catch (e) {}
 
       // In Tenant mode: /prospects and /opportunities must ALWAYS send tenant_id=selectedTenantId.
-      // If no tenant is selected, do not request data!
+      // If no real tenant is selected (still 'founder'), show empty — never mix founder data into tenant view.
       const isTenantMode = currentMode === 'tenant';
       const hasTenantSelected = isTenantMode && !!selectedTenantId && selectedTenantId !== 'founder';
 
@@ -309,7 +309,11 @@ export default function App() {
         return;
       }
 
-      const queryParam = isTenantMode ? `?tenant_id=${encodeURIComponent(selectedTenantId)}` : '';
+      // Founder mode never sends tenant_id (backend defaults to founder).
+      // Tenant mode always scopes to the selected tenant — isolation is strict.
+      const queryParam = isTenantMode
+        ? `?tenant_id=${encodeURIComponent(selectedTenantId)}`
+        : '';
 
       // 3. GET /prospects
       let prospectsRes = await fetch(`${apiUrl}/prospects${queryParam}`, {
@@ -514,11 +518,23 @@ export default function App() {
       }
 
       const runData = await startRes.json().catch(() => null);
-      if (currentMode === 'tenant' && runData) {
+
+      // Surface diagnostics when zero jobs (no cities, pause, idempotent skip)
+      if (runData) {
+        const jobs = typeof runData.jobs_enqueued === 'number' ? runData.jobs_enqueued : 0;
         setTenantRunFeedback({
           run_id: runData.run_id || runData.id || 'N/A',
-          jobs_enqueued: typeof runData.jobs_enqueued === 'number' ? runData.jobs_enqueued : 0
+          jobs_enqueued: jobs
         });
+        if (jobs === 0 && runData.diagnostics?.reason) {
+          setLastRunError(runData.diagnostics.reason);
+          setRunState('failed');
+          setIsScrubbing(false);
+          return;
+        }
+        if (runData.active_cities?.length) {
+          // Keep cities visible in feedback
+        }
       }
 
       setRunState('running');
@@ -1083,21 +1099,29 @@ export default function App() {
                 {isScrubbing ? 'CORRIENDO EN CLOUDFLARE...' : '▶ CORRER RADAR AHORA'}
               </button>
 
-              {/* Feedback tras correr en modo tenant: run_id y jobs_enqueued */}
-              {currentMode === 'tenant' && tenantRunFeedback && (
-                <div className="p-3 bg-indigo-950/40 border border-indigo-800/60 rounded-xl text-xs font-mono text-indigo-200 flex items-center justify-between">
+              {/* Feedback tras correr: run_id y jobs_enqueued (ambos modos) */}
+              {tenantRunFeedback && (
+                <div className={`p-3 border rounded-xl text-xs font-mono flex items-center justify-between ${
+                  tenantRunFeedback.jobs_enqueued > 0
+                    ? 'bg-indigo-950/40 border-indigo-800/60 text-indigo-200'
+                    : 'bg-amber-950/40 border-amber-700/50 text-amber-200'
+                }`}>
                   <div className="space-y-0.5">
                     <div className="font-bold text-white flex items-center gap-1.5">
-                      <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
-                      Radar ejecutado para tenant
+                      <span className={`w-2 h-2 rounded-full ${tenantRunFeedback.jobs_enqueued > 0 ? 'bg-emerald-400' : 'bg-amber-400'}`}></span>
+                      {tenantRunFeedback.jobs_enqueued > 0
+                        ? `Radar ejecutado (${currentMode})`
+                        : 'Radar no encoló jobs'}
                     </div>
                     <div className="text-[11px] text-slate-300">
                       run_id: <span className="text-indigo-300 font-semibold">{tenantRunFeedback.run_id}</span>
                     </div>
                   </div>
                   <div className="text-right">
-                    <div className="text-[10px] text-slate-400 uppercase">jobs_enqueued</div>
-                    <div className="text-sm font-bold text-emerald-400">{tenantRunFeedback.jobs_enqueued}</div>
+                    <div className="text-[10px] text-slate-400 uppercase">jobs</div>
+                    <div className={`text-sm font-bold ${tenantRunFeedback.jobs_enqueued > 0 ? 'text-emerald-400' : 'text-amber-400'}`}>
+                      {tenantRunFeedback.jobs_enqueued}
+                    </div>
                   </div>
                 </div>
               )}
@@ -1230,26 +1254,39 @@ export default function App() {
                 const curTenant = tenants.find(t => t.tenant_id === selectedTenantId) || (tenants.length > 0 ? tenants[0] : null);
                 const tName = curTenant?.tenant_name || curTenant?.tenant_id || selectedTenantId || 'Tenant';
                 let tCities = 'Sin ciudades';
+                let hasCities = false;
                 if (curTenant?.cities_json) {
                   try {
                     const parsed = JSON.parse(curTenant.cities_json);
                     if (Array.isArray(parsed) && parsed.length > 0) {
                       tCities = parsed.join(', ');
-                    } else if (typeof parsed === 'string') {
+                      hasCities = true;
+                    } else if (typeof parsed === 'string' && parsed.trim()) {
                       tCities = parsed;
+                      hasCities = true;
                     }
                   } catch {
-                    tCities = curTenant.cities_json;
+                    if (curTenant.cities_json && curTenant.cities_json !== '[]') {
+                      tCities = curTenant.cities_json;
+                      hasCities = true;
+                    }
                   }
                 }
                 const tNiche = curTenant?.niche || 'General';
 
                 return (
-                  <div className="px-3.5 py-2.5 bg-indigo-950/40 border border-indigo-800/50 rounded-xl text-xs font-mono text-indigo-300 flex items-center gap-2">
-                    <span className="w-2 h-2 rounded-full bg-indigo-400 animate-pulse shrink-0" />
-                    <span className="truncate">
-                      Buscando para: <span className="font-semibold text-white">{tName}</span> · <span className="text-indigo-200">{tCities}</span> · <span className="text-indigo-200">{tNiche}</span>
-                    </span>
+                  <div className="space-y-2">
+                    <div className={`px-3.5 py-2.5 border rounded-xl text-xs font-mono flex items-center gap-2 ${hasCities ? 'bg-indigo-950/40 border-indigo-800/50 text-indigo-300' : 'bg-amber-950/40 border-amber-700/50 text-amber-300'}`}>
+                      <span className={`w-2 h-2 rounded-full shrink-0 ${hasCities ? 'bg-indigo-400 animate-pulse' : 'bg-amber-400'}`} />
+                      <span className="truncate">
+                        {hasCities ? 'Buscando para' : '⚠ Configura ciudades'}: <span className="font-semibold text-white">{tName}</span> · <span className={hasCities ? 'text-indigo-200' : 'text-amber-200 font-bold'}>{tCities}</span> · <span className="text-indigo-200">{tNiche}</span>
+                      </span>
+                    </div>
+                    {!hasCities && (
+                      <div className="px-3 py-2 bg-amber-950/30 border border-amber-800/40 rounded-lg text-[11px] text-amber-200/90">
+                        Este tenant no tiene ciudades. Ve a la pestaña <strong>Tenant</strong>, añade ciudades (ej. <code className="text-amber-100">["Tampa, FL","Orlando, FL"]</code>) y guarda. Sin ciudades el Radar no buscará.
+                      </div>
+                    )}
                   </div>
                 );
               })()}
@@ -1330,13 +1367,37 @@ export default function App() {
                 </div>
 
                 {opportunities.filter(o => opportunityPriorityFilter === 'ALL' || o.priority_tier === opportunityPriorityFilter).length === 0 ? (
-                  <div className="text-center py-10 bg-slate-900/10 rounded-2xl border border-slate-900 p-5">
+                  <div className="text-center py-10 bg-slate-900/10 rounded-2xl border border-slate-900 p-5 space-y-3">
                     <Sparkles className="w-6 h-6 text-slate-600 mx-auto mb-2" />
                     <p className="text-xs text-slate-500 leading-normal">
                       {currentMode === 'tenant'
-                        ? 'Aún no hay prospectos para este tenant. Pulsa CORRER RADAR AHORA.'
-                        : 'No hay oportunidades identificadas en este filtro. Ejecuta el Radar para activar el Opportunity Intelligence engine.'}
+                        ? 'Aún no hay oportunidades para este tenant. Configura ciudades y pulsa CORRER RADAR AHORA.'
+                        : 'No hay oportunidades identificadas. Puedes regenerarlas desde los prospectos ya puntuados o ejecutar el Radar.'}
                     </p>
+                    {currentMode === 'founder' && prospects.length > 0 && (
+                      <button
+                        onClick={async () => {
+                          try {
+                            const res = await fetch(`${apiUrl}/api/opportunities/backfill`, {
+                              method: 'POST',
+                              credentials: 'include'
+                            });
+                            const data = await res.json().catch(() => ({}));
+                            if (res.ok) {
+                              alert(`✓ ${data.opportunities_created || 0} oportunidades creadas de ${data.prospects_scanned || 0} prospectos.`);
+                              fetchTelemetry();
+                            } else {
+                              alert('Error: ' + (data.error || res.status));
+                            }
+                          } catch (e: any) {
+                            alert('Error de red: ' + e.message);
+                          }
+                        }}
+                        className="mx-auto px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold transition-all"
+                      >
+                        Regenerar Oportunidades desde Prospectos
+                      </button>
+                    )}
                   </div>
                 ) : (
                   <div className="space-y-3">

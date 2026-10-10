@@ -34,13 +34,13 @@ queue = "bvelt-radar-jobs"
 max_batch_size = 1
 max_batch_timeout = 5
 max_retries = 3
-retry_delay = 60
+retry_delay = 30
 dead_letter_queue = "bvelt-radar-dlq"
-max_concurrency = 1
+max_concurrency = 3
 
-# Automated daily prospecting scheduled cron
+# Automated daily prospecting scheduled cron (runs once a day at 12:00 PM UTC)
 [triggers]
-crons = ["0 12,17,22 * * *"]
+crons = ["0 12 * * *", "0 17 * * *", "0 22 * * *"]
 
 
 # Optional Workers AI binding used only for semantic deduplication; it does NOT alter Gemini/Groq generation.

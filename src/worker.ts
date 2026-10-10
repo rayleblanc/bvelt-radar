@@ -15,7 +15,7 @@ import { getAlerts, tradeForEvent, WeatherAlert } from './weatherSignals';
 import { dispatchEmail, EmailDispatchResult } from './emailDispatcher';
 import { auditDomainSecurityAndMx, auditWebsitePerformance, auditCityWeatherEmergency } from './openAudits';
 import { fetchPermitContractors } from './permitSources';
-import { pickTargets, findPlace, markSearched, placeKey, haversineKm } from './geoFrontier';
+import { pickTargets, findPlace, markSearched, placeKey } from './geoFrontier';
 
 // Global type declarations for Cloudflare Worker compilation
 declare global {
@@ -334,17 +334,27 @@ const PRIORITY_TRADES = [
 ];
 
 // Mapping of contractor trades to their ideal B2B target niches
+/**
+ * Maps a Bvelt client's trade → buyer segments Radar hunts for them.
+ * Order = priority. Learning re-ranks via win rates over time.
+ * This is the product intelligence core: contractor → their ideal local buyers.
+ */
 const TENANT_TARGET_MAP: Record<string, string[]> = {
-  plumbing: ["property management", "real estate", "hotel", "restaurant", "facility manager"],
-  hvac: ["property management", "real estate", "hotel", "facility manager", "general contractor"],
-  landscaping: ["property management", "real estate", "homeowners association", "commercial developer"],
-  lawn_care: ["property management", "real estate", "homeowners association"],
-  house_cleaning: ["property management", "real estate", "airbnb host", "vacation rental"],
-  pool_cleaning: ["property manager", "hotel", "gym", "aquatic center"],
-  handyman: ["property manager", "real estate", "retail store", "restaurant"],
-  roofing: ["property manager", "real estate", "general contractor", "insurance agency"],
-  pest_control: ["property manager", "restaurant", "hotel", "food processing"],
-  electrical: ["property manager", "facility manager", "general contractor", "industrial plant"]
+  plumbing: ["property management", "real estate", "hotel", "restaurant", "facility manager", "apartment complex", "hoa"],
+  hvac: ["property management", "real estate", "hotel", "facility manager", "general contractor", "apartment complex", "office building"],
+  landscaping: ["property management", "real estate", "homeowners association", "commercial developer", "hoa", "apartment complex", "golf course"],
+  lawn_care: ["property management", "real estate", "homeowners association", "hoa", "apartment complex", "school"],
+  house_cleaning: ["property management", "real estate", "hotel", "airbnb host", "vacation rental", "office building"],
+  pool_cleaning: ["property management", "hotel", "gym", "aquatic center", "apartment complex", "hoa"],
+  handyman: ["property management", "real estate", "retail store", "restaurant", "hotel", "facility manager"],
+  roofing: ["property management", "real estate", "general contractor", "insurance agency", "apartment complex", "hoa"],
+  pest_control: ["property management", "restaurant", "hotel", "food processing", "apartment complex", "school"],
+  electrical: ["property management", "facility manager", "general contractor", "industrial plant", "office building"],
+  cleaning: ["property management", "real estate", "hotel", "office building"],
+  "pool service": ["property management", "hotel", "gym", "apartment complex"],
+  painting: ["property management", "real estate", "hotel", "apartment complex"],
+  flooring: ["property management", "real estate", "hotel", "apartment complex"],
+  "water damage": ["property management", "insurance agency", "real estate", "hotel"],
 };
 
 // OSM Tag mappings by trade for high-precision Overpass queries (contractor field operators, not retail stores)
@@ -368,22 +378,43 @@ const OVERPASS_TRADE_TAGS: Record<string, string[]> = {
   handyman: ['craft="handyman"', 'craft="carpenter"', 'craft="joiner"'],
   roofing: ['craft="roofer"', 'craft="roofing"'],
   pest_control: ['craft="pest_control"', 'amenity="pest_control"'],
-  "property management": ['office="property_management"', 'amenity="property_management"', 'name~"property management"'],
-  "real estate": ['office="estate_agent"', 'amenity="real_estate"', 'name~"real estate"', 'name~"realty"'],
-  hotel: ['tourism="hotel"', 'tourism="motel"', 'tourism="guest_house"'],
+  "property management": [
+    'office="property_management"', 'amenity="property_management"',
+    'name~"property management"', 'name~"property manager"', 'name~"prop management"',
+    'office="estate_agent"', 'name~"apartment management"', 'name~"community management"'
+  ],
+  "property manager": [
+    'office="property_management"', 'name~"property manager"', 'name~"property management"'
+  ],
+  "real estate": [
+    'office="estate_agent"', 'amenity="real_estate"', 'name~"real estate"', 'name~"realty"',
+    'name~"realtor"', 'office="realtor"'
+  ],
+  hotel: ['tourism="hotel"', 'tourism="motel"', 'tourism="guest_house"', 'tourism="hostel"'],
   restaurant: ['amenity="restaurant"', 'amenity="cafe"', 'amenity="fast_food"'],
-  "facility manager": ['office="facility_management"', 'name~"facility"'],
-  "homeowners association": ['office="association"', 'name~"HOA"', 'name~"homeowners association"'],
-  "commercial developer": ['office="developer"', 'craft="builder"', 'name~"developer"'],
-  "airbnb host": ['tourism="apartment"', 'tourism="chalet"', 'name~"airbnb"'],
-  "vacation rental": ['tourism="apartment"', 'tourism="guest_house"', 'name~"vacation"'],
-  gym: ['leisure="fitness_centre"', 'leisure="sports_centre"', 'name~"gym"'],
-  "aquatic center": ['leisure="swimming_pool"', 'amenity="public_bath"'],
+  "facility manager": ['office="facility_management"', 'name~"facility"', 'name~"facilities management"'],
+  "homeowners association": [
+    'office="association"', 'name~"HOA"', 'name~"homeowners association"',
+    'name~"homeowner association"', 'name~"community association"'
+  ],
+  hoa: ['office="association"', 'name~"HOA"', 'name~"homeowners"', 'name~"community association"'],
+  "apartment complex": [
+    'building="apartments"', 'name~"apartment"', 'name~"apartments"',
+    'name~"residential community"', 'landuse="residential"'
+  ],
+  "office building": ['building="office"', 'office="company"', 'name~"office park"', 'name~"business center"'],
+  "commercial developer": ['office="developer"', 'craft="builder"', 'name~"developer"', 'name~"development"'],
+  "airbnb host": ['tourism="apartment"', 'tourism="chalet"', 'name~"airbnb"', 'name~"short term"'],
+  "vacation rental": ['tourism="apartment"', 'tourism="guest_house"', 'name~"vacation"', 'name~"holiday rental"'],
+  gym: ['leisure="fitness_centre"', 'leisure="sports_centre"', 'name~"gym"', 'amenity="gym"'],
+  "aquatic center": ['leisure="swimming_pool"', 'amenity="public_bath"', 'name~"aquatic"'],
   "retail store": ['shop="department_store"', 'shop="supermarket"', 'shop="mall"'],
-  "general contractor": ['craft="builder"', 'craft="contractor"', 'name~"contractor"'],
-  "insurance agency": ['office="insurance"'],
+  "general contractor": ['craft="builder"', 'craft="contractor"', 'name~"contractor"', 'name~"construction"'],
+  "insurance agency": ['office="insurance"', 'name~"insurance"'],
   "food processing": ['industrial="food_factory"', 'craft="bakery"'],
-  "industrial plant": ['industrial="factory"', 'man_made="works"']
+  "industrial plant": ['industrial="factory"', 'man_made="works"'],
+  school: ['amenity="school"', 'amenity="college"', 'building="school"'],
+  "golf course": ['leisure="golf_course"', 'name~"golf"'],
 };
 
 function isAuthorized(request: Request, env: Env, serviceKey?: string, validSessionHash?: string): boolean {
@@ -445,8 +476,7 @@ export default {
 
       // 1. Enhanced Health Check (public)
       if (path === "/health" && method === "GET") {
-        const tenantId = url.searchParams.get("tenant_id") || "founder";
-        return await handleHealth(env, corsHeaders, tenantId);
+        return await handleHealth(env, corsHeaders);
       }
 
       // 1ab. Telegram Test Endpoint (Supports GET and POST)
@@ -826,8 +856,7 @@ export default {
 
       // 4. Stats Endpoint (Includes learning performance)
       if (path === "/stats" && method === "GET") {
-        const tenantId = url.searchParams.get("tenant_id") || "founder";
-        return await handleStats(env, corsHeaders, tenantId);
+        return await handleStats(env, corsHeaders);
       }
 
       // 6. Decision API Endpoint (sent / discard / suppress / replied / demo / won)
@@ -881,7 +910,7 @@ export default {
       // 8b. Opportunity Intelligence Endpoints
       if ((path === "/opportunities" || path === "/api/opportunities") && method === "GET") {
         const limit = parseInt(url.searchParams.get("limit") || "100", 10);
-        const tenantId = url.searchParams.get("tenant_id") || "founder";
+        const tenantId = url.searchParams.get("tenant_id");
         const priority = url.searchParams.get("priority");
         const decisionState = url.searchParams.get("decision_state");
         const minScore = parseInt(url.searchParams.get("min_score") || "0", 10);
@@ -892,9 +921,14 @@ export default {
                  p.status as prospect_status, p.draft_subject, p.draft_body
           FROM opportunities o
           LEFT JOIN prospects p ON o.prospect_id = p.id
-          WHERE o.strategic_score >= ? AND COALESCE(o.tenant_id,'founder') = ?
+          WHERE o.strategic_score >= ?
         `;
-        const params: any[] = [minScore, tenantId];
+        const params: any[] = [minScore];
+
+        if (tenantId) {
+          query += " AND o.tenant_id = ?";
+          params.push(tenantId);
+        }
         if (priority) {
           query += " AND o.priority_tier = ?";
           params.push(priority);
@@ -940,6 +974,80 @@ export default {
             signals: signals.results || [],
             actions: actions.results || [],
             outcomes: outcomes.results || []
+          }, { headers: corsHeaders });
+        } catch (e: any) {
+          return Response.json({ error: e.message }, { status: 500, headers: corsHeaders });
+        }
+      }
+
+      // 8c-bis. Backfill opportunities from existing scored prospects (one-shot repair)
+      if ((path === "/api/opportunities/backfill" || path === "/opportunities/backfill") && method === "POST") {
+        try {
+          const tenantFilter = url.searchParams.get("tenant_id");
+          let q = `SELECT id, name, city, trade, score, opportunity_score, confidence_score,
+                          fit_score, intent_score, pain_score, ability_to_pay_score,
+                          contactability_score, timing_score, evidence_score, signal_freshness_score,
+                          expected_value, decision_state, why_now_json, tenant_id, status
+                   FROM prospects
+                   WHERE COALESCE(score, opportunity_score, 0) >= 45
+                     AND status NOT IN ('discarded','suppressed','blocked')`;
+          const binds: any[] = [];
+          if (tenantFilter) {
+            q += ` AND COALESCE(tenant_id,'founder') = ?`;
+            binds.push(tenantFilter);
+          }
+          q += ` ORDER BY COALESCE(score, opportunity_score, 0) DESC LIMIT 200`;
+          const rows = await env.RADAR_DB.prepare(q).bind(...binds).all();
+          const prospects = rows.results || [];
+          let created = 0;
+          const nowIso = new Date().toISOString();
+
+          for (const p of prospects as any[]) {
+            const oppId = `opp_${p.id}`;
+            const existing = await env.RADAR_DB.prepare("SELECT id FROM opportunities WHERE id = ?").bind(oppId).first();
+            if (existing) continue;
+
+            const stratScore = Math.round(p.opportunity_score || p.score || 50);
+            let priority = "MEDIUM";
+            if (stratScore >= 80) priority = "HIGH";
+            else if (stratScore < 55) priority = "LOW";
+
+            const title = `${p.name} — ${p.trade || 'service'} (${p.city || ''})`;
+            const tenantId = p.tenant_id || "founder";
+
+            await env.RADAR_DB.prepare(`
+              INSERT INTO opportunities (
+                id, prospect_id, tenant_id, title, strategic_score, fit_score, intent_score,
+                pain_score, ability_to_pay_score, contactability_score, timing_score,
+                evidence_score, signal_freshness_score, expected_value, decision_state,
+                why_now_json, priority_tier, created_at, updated_at
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              ON CONFLICT(id) DO NOTHING
+            `).bind(
+              oppId, p.id, tenantId, title,
+              stratScore,
+              p.fit_score || stratScore,
+              p.intent_score || Math.round(stratScore * 0.8),
+              p.pain_score || Math.round(stratScore * 0.7),
+              p.ability_to_pay_score || 60,
+              p.contactability_score || 70,
+              p.timing_score || 50,
+              p.evidence_score || 50,
+              p.signal_freshness_score || 80,
+              p.expected_value || 0,
+              p.decision_state || "open",
+              p.why_now_json || null,
+              priority,
+              nowIso, nowIso
+            ).run();
+            created++;
+          }
+
+          return Response.json({
+            success: true,
+            prospects_scanned: prospects.length,
+            opportunities_created: created,
+            message: `Backfilled ${created} opportunities from ${prospects.length} scored prospects.`
           }, { headers: corsHeaders });
         } catch (e: any) {
           return Response.json({ error: e.message }, { status: 500, headers: corsHeaders });
@@ -1734,7 +1842,7 @@ export default {
 /**
  * Enhanced Health Check with usage metrics & Cloudflare Queues observability
  */
-async function handleHealth(env: Env, headers: Record<string, string>, tenantId: string = "founder"): Promise<Response> {
+async function handleHealth(env: Env, headers: Record<string, string>): Promise<Response> {
   const db = env.RADAR_DB;
   const today = new Date().toISOString().split('T')[0];
 
@@ -1806,8 +1914,8 @@ async function handleHealth(env: Env, headers: Record<string, string>, tenantId:
   // Check latest prospect notification timestamp if available
   try {
     const notifiedProspect = await db.prepare(
-      "SELECT updated_at FROM prospects WHERE status IN ('notified', 'sent', 'approved') AND COALESCE(tenant_id,'founder') = ? ORDER BY updated_at DESC LIMIT 1"
-    ).bind(tenantId).first() as any;
+      "SELECT updated_at FROM prospects WHERE status IN ('notified', 'sent', 'approved') ORDER BY updated_at DESC LIMIT 1"
+    ).first() as any;
     if (notifiedProspect && notifiedProspect.updated_at) {
       lastTelegramOk = notifiedProspect.updated_at;
     } else if (lastTelegramOk === null && telegramConfigured) {
@@ -1817,7 +1925,7 @@ async function handleHealth(env: Env, headers: Record<string, string>, tenantId:
 
   // Aggregate prospects counts by status
   try {
-    const statusRows = await db.prepare("SELECT status, COUNT(*) as count FROM prospects WHERE COALESCE(tenant_id,'founder') = ? GROUP BY status").bind(tenantId).all();
+    const statusRows = await db.prepare("SELECT status, COUNT(*) as count FROM prospects GROUP BY status").all();
     if (statusRows.results) {
       for (const row of statusRows.results as any[]) {
         if (row.status) {
@@ -1851,12 +1959,12 @@ async function handleHealth(env: Env, headers: Record<string, string>, tenantId:
   let suppressedCount = 0;
 
   try {
-    const totalRow = await db.prepare("SELECT COUNT(*) as count FROM prospects WHERE COALESCE(tenant_id,'founder') = ?").bind(tenantId).first() as any;
+    const totalRow = await db.prepare("SELECT COUNT(*) as count FROM prospects").first() as any;
     if (totalRow) prospectsTotal = totalRow.count;
   } catch (e) {}
 
   try {
-    const uniqueRow = await db.prepare("SELECT COUNT(DISTINCT identity_key) as count FROM prospects WHERE created_at >= ? AND COALESCE(tenant_id,'founder') = ?").bind(`${today}T00:00:00.000Z`, tenantId).first() as any;
+    const uniqueRow = await db.prepare("SELECT COUNT(DISTINCT identity_key) as count FROM prospects WHERE created_at >= ?").bind(`${today}T00:00:00.000Z`).first() as any;
     if (uniqueRow) prospectsUniqueToday = uniqueRow.count;
   } catch (e) {}
 
@@ -2223,22 +2331,21 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
 /**
  * Administrative and learning stats
  */
-async function handleStats(env: Env, headers: Record<string, string>, tenantId: string = "founder"): Promise<Response> {
+async function handleStats(env: Env, headers: Record<string, string>): Promise<Response> {
   const db = env.RADAR_DB;
 
   const prospectStats = await db.prepare(`
     SELECT status, COUNT(*) as count 
     FROM prospects 
-    WHERE COALESCE(tenant_id,'founder') = ?
     GROUP BY status
-  `).bind(tenantId).all();
+  `).all();
 
   const outcomeStats = await db.prepare(`
     SELECT outcome, COUNT(*) as count 
     FROM prospects 
-    WHERE outcome IS NOT NULL AND COALESCE(tenant_id,'founder') = ?
+    WHERE outcome IS NOT NULL 
     GROUP BY outcome
-  `).bind(tenantId).all();
+  `).all();
 
   const totalRuns = await db.prepare(`
     SELECT COUNT(*) as count, SUM(discovered) as total_discovered, SUM(finalized) as total_finalized 
@@ -2736,6 +2843,21 @@ export async function startProspectingRun(
   const dayOfYear = getDayOfYear(new Date());
   const { activeCities, activeTrades, pairs } = await getPriorityTargets(dayOfYear, env, mode, tenantId, overrides);
 
+  // Abort early if no valid cities (tenant without config, or empty founder markets)
+  if ((!activeCities || activeCities.length === 0) && (!pairs || pairs.length === 0)) {
+    const reason = mode === "tenant"
+      ? `Tenant "${tId}" no tiene ciudades configuradas. Configura cities_json en Tenant Mode antes de correr el Radar.`
+      : "No hay ciudades activas para discovery. Revisa FOUNDING_CITIES.";
+    console.warn(`[startProspectingRun] ${reason}`);
+    return {
+      run_id: "no_cities",
+      jobs_enqueued: 0,
+      active_cities: [],
+      active_trades: activeTrades || [],
+      diagnostics: { reason, city: null, trade: null, discovered_raw: 0 }
+    };
+  }
+
   // Register run record in D1
   await db.prepare(
     "INSERT INTO runs (id, day, mode, tenant_id, discovered, finalized, ai_calls, hunter_calls, errors_json, created_at) VALUES (?, ?, ?, ?, 0, 0, 0, 0, '[]', ?)"
@@ -2744,8 +2866,11 @@ export async function startProspectingRun(
   let jobsEnqueued = 0;
   const hasOverrides = !!(overrides && (overrides.cities || overrides.trades || overrides.countries || overrides.languages || overrides.min_score));
 
+  // Cap jobs per run to avoid queue flood (max 8 discovery pairs)
+  const MAX_JOBS = Math.min(8, Number(env.RADAR_JOBS_PER_RUN || 8));
+
   if (pairs && pairs.length > 0 && !hasOverrides) {
-    for (const pair of pairs) {
+    for (const pair of pairs.slice(0, MAX_JOBS)) {
       const jobId = `discovery_${runId}_${pair.city.replace(/[^a-z0-9]/gi, '_')}_${pair.trade.replace(/[^a-z0-9]/gi, '_')}`.toLowerCase();
       await enqueueJob(env, {
         run_id: runId,
@@ -2758,8 +2883,10 @@ export async function startProspectingRun(
       jobsEnqueued++;
     }
   } else {
-    for (const city of activeCities) {
+    // Cartesian product capped
+    outer: for (const city of activeCities) {
       for (const trade of activeTrades) {
+        if (jobsEnqueued >= MAX_JOBS) break outer;
         const jobId = `discovery_${runId}_${city.replace(/[^a-z0-9]/gi, '_')}_${trade}`.toLowerCase();
         await enqueueJob(env, {
           run_id: runId,
@@ -2774,7 +2901,7 @@ export async function startProspectingRun(
     }
   }
 
-  console.log(`[Queue Run Initiated] Run ${runId} enqueued ${jobsEnqueued} discovery jobs.`);
+  console.log(`[Queue Run Initiated] Run ${runId} enqueued ${jobsEnqueued} discovery jobs for cities=[${activeCities.join(', ')}] trades=[${activeTrades.join(', ')}]`);
 
   return {
     run_id: runId,
@@ -2782,12 +2909,12 @@ export async function startProspectingRun(
     active_cities: activeCities,
     active_trades: activeTrades,
     diagnostics: {
-      bizdata_status: "ready",
+      bizdata_status: (env.ENABLE_BIZDATA === "0" || env.ENABLE_BIZDATA === "false") ? "disabled" : "auto-fallback",
       overpass_status: "ready",
       nominatim_status: "ready",
       discovered_raw: 0,
       filtered: 0,
-      reason: `Enqueued ${jobsEnqueued} autonomous discovery jobs across ${activeCities.join(', ')} for ${activeTrades.join(', ')}`
+      reason: `Enqueued ${jobsEnqueued} discovery jobs across ${activeCities.join(', ') || 'pairs'} for ${activeTrades.join(', ')}`
     }
   };
 }
@@ -3019,7 +3146,7 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
     const identityKey = generateIdentityKey(candidate.email, candidate.website, candidate.phone, candidate.name, candidate.city);
 
     // 2. Composite suppression check
-    const suppression = await checkSuppressedComposite(env.RADAR_DB, candidate.email, candidate.website, candidate.phone, candidate.name, candidate.city, job.tenant_id || "founder");
+    const suppression = await checkSuppressedComposite(env.RADAR_DB, candidate.email, candidate.website, candidate.phone, candidate.name, candidate.city);
     if (suppression) {
       await releaseBudget(env.RADAR_DB, tenantId, 'discovery_units', 1);
       filteredCount++;
@@ -3027,7 +3154,7 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
     }
 
     // 3. Duplicate & anti-spam lifecycle check
-    const overlap = await findExistingProspectOverlap(env.RADAR_DB, candidate.email, candidate.website, candidate.phone, candidate.name, candidate.city, job.tenant_id || "founder");
+    const overlap = await findExistingProspectOverlap(env.RADAR_DB, candidate.email, candidate.website, candidate.phone, candidate.name, candidate.city);
     if (overlap) {
       const p = overlap.overlap;
       const status = (p.status || '').toLowerCase();
@@ -3424,238 +3551,75 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
     return;
   }
 
-  let totalScore = 0;
-  let finalScore = 0;
-  let breakdown: any = {};
-  let confidence = 0;
-  let evidenceSummary = "";
-  let evidenceItems: any[] = [];
-  let painHypothesis: any = {};
+  const { 
+    totalScore, 
+    breakdown, 
+    confidence, 
+    evidenceSummary, 
+    evidenceItems = [], 
+    painHypothesis = {} 
+  } = calculateMultiFactorScore(
+    prospect,
+    prospect.email,
+    isEmailValidated,
+    prospect.phone,
+    isPriorityCity,
+    isPriorityTrade,
+    learningStats,
+    signals,
+    missionConfig
+  );
+
+  // Generación de etiquetas de señal (incluyendo SMS Gap, Multi-área y Obra activa)
   const signalTags: string[] = [];
-  let bveltAngle = "";
-
-  if (isTenant) {
-    let tenantConfig: any = null;
-    if (job.tenant_id) {
-      try {
-        tenantConfig = await env.RADAR_DB.prepare("SELECT * FROM tenant_config WHERE tenant_id = ?").bind(job.tenant_id).first();
-      } catch (e) {}
-    }
-
-    // 1. Encaje (0-40): coincidencia del nombre/oficio con segmento o keywords en icp_expansion_json (+25 si coincide segmento, +15 con website real)
-    let encajeScore = 0;
-    let segmentMatched = false;
-    const targetLabels: string[] = [];
-    const targetKeywords: string[] = [];
-
-    if (tenantConfig?.icp_expansion_json) {
-      try {
-        const exp = typeof tenantConfig.icp_expansion_json === "string" 
-          ? JSON.parse(tenantConfig.icp_expansion_json) 
-          : tenantConfig.icp_expansion_json;
-        if (Array.isArray(exp?.segments)) {
-          for (const s of exp.segments) {
-            if (s.label) targetLabels.push(s.label.toLowerCase().trim());
-            if (Array.isArray(s.keywords)) {
-              for (const kw of s.keywords) {
-                if (kw) targetKeywords.push(kw.toLowerCase().trim());
-              }
-            }
-          }
-        }
-      } catch (e) {}
-    }
-
-    if (Array.isArray(missionConfig?.niches)) {
-      for (const n of missionConfig.niches) {
-        if (n) targetLabels.push(n.toLowerCase().trim());
-      }
-    }
-
-    const pTrade = (prospect.trade || "").toLowerCase().trim();
-    const pName = (prospect.name || "").toLowerCase().trim();
-
-    for (const label of targetLabels) {
-      if (!label) continue;
-      if (pTrade && (pTrade === label || pTrade.includes(label) || label.includes(pTrade))) {
-        segmentMatched = true;
-        break;
-      }
-      if (pName && pName.includes(label)) {
-        segmentMatched = true;
-        break;
-      }
-    }
-
-    if (!segmentMatched) {
-      for (const kw of targetKeywords) {
-        if (!kw) continue;
-        if (pTrade && (pTrade === kw || pTrade.includes(kw) || kw.includes(pTrade))) {
-          segmentMatched = true;
-          break;
-        }
-        if (pName && pName.includes(kw)) {
-          segmentMatched = true;
-          break;
-        }
-      }
-    }
-
-    if (segmentMatched) {
-      encajeScore += 25;
-    }
-    const hasRealWebsite = !!(prospect.website && isRealWebsite(prospect.website));
-    if (hasRealWebsite) {
-      encajeScore += 15;
-    }
-
-    // 2. Contacto (0-25): +15 email validado, +10 teléfono (tope 25)
-    let contactoScore = 0;
-    const hasValidatedEmail = !!(prospect.email && (isEmailValidated || parsedMeta.is_email_validated || parsedMeta.email_verified));
-    if (hasValidatedEmail) {
-      contactoScore += 15;
-    }
-    const hasPhone = !!(prospect.phone && prospect.phone.trim().length >= 7);
-    if (hasPhone) {
-      contactoScore += 10;
-      signalTags.push("Teléfono directo");
-    }
-    contactoScore = Math.min(25, contactoScore);
-
-    // 3. Cercanía (0-20): distancia en km entre findPlace(prospect.city) y findPlace(primera ciudad cities_json)
-    let cercaniaScore = 8;
-    let tenantBaseCity: string | null = null;
-    if (tenantConfig?.cities_json) {
-      try {
-        const cities = typeof tenantConfig.cities_json === "string" 
-          ? JSON.parse(tenantConfig.cities_json) 
-          : tenantConfig.cities_json;
-        if (Array.isArray(cities) && cities.length > 0 && typeof cities[0] === "string") {
-          tenantBaseCity = cities[0];
-        }
-      } catch (e) {}
-    }
-    if (!tenantBaseCity && Array.isArray(missionConfig?.geographies) && missionConfig.geographies.length > 0) {
-      tenantBaseCity = missionConfig.geographies[0];
-    }
-
-    const prospectPlace = prospect.city ? findPlace(prospect.city) : null;
-    const tenantPlace = tenantBaseCity ? findPlace(tenantBaseCity) : null;
-
-    if (prospectPlace && tenantPlace && 
-        typeof prospectPlace.lat === 'number' && typeof prospectPlace.lon === 'number' &&
-        typeof tenantPlace.lat === 'number' && typeof tenantPlace.lon === 'number') {
-      const distKm = haversineKm(prospectPlace.lat, prospectPlace.lon, tenantPlace.lat, tenantPlace.lon);
-      if (distKm <= 15) {
-        cercaniaScore = 20;
-      } else if (distKm <= 30) {
-        cercaniaScore = 14;
-      } else if (distKm <= 60) {
-        cercaniaScore = 8;
-      } else {
-        cercaniaScore = 3;
-      }
-      signalTags.push(`A ${Math.round(distKm)} km de tu base`);
-    }
-
-    // 4. Señal (0-15): +15 si permits_90d >= 3 ("Obra activa"), +8 si nombre contiene property management/etc.
-    let senalScore = 0;
-    if (permits_90d >= 3) {
-      senalScore += 15;
-      signalTags.push(`Obra activa (${permits_90d} permisos/90d)`);
-    }
-    const pmRegex = /property management|property manager|facility|hoa|general contractor/i;
-    if (pmRegex.test(prospect.name || "")) {
-      senalScore += 8;
-    }
-    senalScore = Math.min(15, senalScore);
-
-    finalScore = Math.min(100, encajeScore + contactoScore + cercaniaScore + senalScore);
-    totalScore = finalScore;
-    confidence = Math.min(95, Math.max(50, (encajeScore > 0 ? 30 : 0) + (contactoScore > 0 ? 30 : 0) + (cercaniaScore >= 14 ? 20 : 10) + (senalScore > 0 ? 15 : 0)));
-    breakdown = {
-      encaje: encajeScore,
-      contacto: contactoScore,
-      cercania: cercaniaScore,
-      senal: senalScore
-    };
-    evidenceSummary = signalTags.join("; ") || "Tenant ICP criteria matched";
-    evidenceItems = signalTags.map(tag => ({
-      signal_type: 'tenant_signal',
+  if (isPermitsSource && permits_90d >= 3) {
+    signalTags.push(`Obra activa (${permits_90d} permisos/90d)`);
+    signals.active_permits = true;
+    signals.permits_label = `Obra activa (${permits_90d} permisos/90d)`;
+    evidenceItems.unshift({
+      signal_type: 'active_permits',
       value: 'detected',
+      source_url: 'municipal_permits',
+      source_type: 'permit_records',
       observed_at: new Date().toISOString(),
-      evidence_text: tag,
-      confidence: 1.0
-    }));
-  } else {
-    const scoringResult = calculateMultiFactorScore(
-      prospect,
-      prospect.email,
-      isEmailValidated,
-      prospect.phone,
-      isPriorityCity,
-      isPriorityTrade,
-      learningStats,
-      signals,
-      missionConfig
-    );
-    totalScore = scoringResult.totalScore;
-    breakdown = scoringResult.breakdown;
-    confidence = scoringResult.confidence;
-    evidenceSummary = scoringResult.evidenceSummary;
-    evidenceItems = scoringResult.evidenceItems || [];
-    painHypothesis = scoringResult.painHypothesis || {};
+      evidence_text: `Obra activa (${permits_90d} permisos/90d)`,
+      confidence: 1.0,
+      freshness: 1.0,
+      page_type: 'permits'
+    });
+  }
+  if (signals.emergency) signalTags.push("24/7 / Urgencias");
+  if (signals.sms_gap) signalTags.push("SMS Gap");
+  if (signals.quote_request) signalTags.push("Presupuesto");
+  if (signals.booking) signalTags.push("Reserva");
+  if (signals.multiple_areas) signalTags.push("Multi-área");
+  if (signals.lead_capture) signalTags.push("Captura Leads");
+  if (signals.contact_form) signalTags.push("Contacto");
 
-    // Generación de etiquetas de señal (incluyendo SMS Gap, Multi-área y Obra activa)
-    if (isPermitsSource && permits_90d >= 3) {
-      signalTags.push(`Obra activa (${permits_90d} permisos/90d)`);
-      signals.active_permits = true;
-      signals.permits_label = `Obra activa (${permits_90d} permisos/90d)`;
-      evidenceItems.unshift({
-        signal_type: 'active_permits',
-        value: 'detected',
-        source_url: 'municipal_permits',
-        source_type: 'permit_records',
-        observed_at: new Date().toISOString(),
-        evidence_text: `Obra activa (${permits_90d} permisos/90d)`,
-        confidence: 1.0,
-        freshness: 1.0,
-        page_type: 'permits'
-      });
-    }
-    if (signals.emergency) signalTags.push("24/7 / Urgencias");
-    if (signals.sms_gap) signalTags.push("SMS Gap");
-    if (signals.quote_request) signalTags.push("Presupuesto");
-    if (signals.booking) signalTags.push("Reserva");
-    if (signals.multiple_areas) signalTags.push("Multi-área");
-    if (signals.lead_capture) signalTags.push("Captura Leads");
-    if (signals.contact_form) signalTags.push("Contacto");
+  // Suma 10 puntos si viene de permisos y tiene >= 3 permisos en 90 días (máximo 100)
+  let finalScore = totalScore;
+  if (isPermitsSource && permits_90d >= 3) {
+    finalScore = Math.min(100, finalScore + 10);
+    breakdown.active_permits = 10;
+  }
 
-    // Suma 10 puntos si viene de permisos y tiene >= 3 permisos en 90 días (máximo 100)
-    finalScore = totalScore;
-    if (isPermitsSource && permits_90d >= 3) {
-      finalScore = Math.min(100, finalScore + 10);
-      breakdown.active_permits = 10;
-    }
-
-    bveltAngle = "missed_lead_response";
-    if (signals.emergency) {
-      bveltAngle = "after_hours";
-    } else if (signals.sms_gap) {
-      bveltAngle = "contact_gap";
-    } else if (signals.booking) {
-      bveltAngle = "booking_gap";
-    } else if (signals.quote_request || signals.estimate_language) {
-      bveltAngle = "quote_followup";
-    } else if (signals.lead_capture) {
-      bveltAngle = "lead_capture_gap";
-    } else if (signals.multiple_areas) {
-      bveltAngle = "lead_reactivation";
-    }
+  let bveltAngle = "missed_lead_response";
+  if (signals.emergency) {
+    bveltAngle = "after_hours";
+  } else if (signals.sms_gap) {
+    bveltAngle = "contact_gap";
+  } else if (signals.booking) {
+    bveltAngle = "booking_gap";
+  } else if (signals.quote_request || signals.estimate_language) {
+    bveltAngle = "quote_followup";
+  } else if (signals.lead_capture) {
+    bveltAngle = "lead_capture_gap";
+  } else if (signals.multiple_areas) {
+    bveltAngle = "lead_reactivation";
   }
 
   const variantId = (hashCode(prospect.name + prospect.city) % 2 === 0) ? "missed_calls" : "dormant_leads";
-  const evidenceSummaryWithPermits = (!isTenant && isPermitsSource && permits_90d >= 3)
+  const evidenceSummaryWithPermits = (isPermitsSource && permits_90d >= 3)
     ? `Obra activa (${permits_90d} permisos/90d); ${evidenceSummary}`
     : evidenceSummary;
 
@@ -3664,13 +3628,13 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
     permits_90d,
     signal_tags: signalTags,
     active_signals: signalTags,
-    permits_tag: (permits_90d >= 3) ? `Obra activa (${permits_90d} permisos/90d)` : undefined,
+    permits_tag: (isPermitsSource && permits_90d >= 3) ? `Obra activa (${permits_90d} permisos/90d)` : undefined,
     signals,
     is_priority_city: isPriorityCity,
     is_priority_trade: isPriorityTrade,
     variant_id: variantId,
     score_breakdown: breakdown,
-    bvelt_angle: isTenant ? undefined : bveltAngle,
+    bvelt_angle: bveltAngle,
     confidence,
     evidence_summary: evidenceSummaryWithPermits,
     evidence_json: evidenceItems,
@@ -3695,11 +3659,6 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
     signals,
     missionConfig
   );
-  if (isTenant) {
-    strat.strategic_score = finalScore;
-    strat.fit_score = breakdown.encaje || 0;
-    strat.contactability_score = breakdown.contacto || 0;
-  }
 
   // Determine commercial value band based on total score
   const valueBand = finalScore >= 80 ? "premium" : finalScore >= 60 ? "high" : finalScore >= 45 ? "medium" : "low";
@@ -4479,8 +4438,7 @@ export async function verifyTrustStackGate(
     prospect.website,
     prospect.phone,
     prospect.name,
-    prospect.city,
-    prospect.tenant_id || "founder"
+    prospect.city
   );
   if (isSuppressed) {
     const decision: TrustGateDecision = {
@@ -4752,27 +4710,34 @@ export async function getPriorityTargets(
           try {
             tenantPicks = await pickTargets(env.RADAR_DB, {
               tenantId,
-              trades: config.niches,
+              trades: config.niches.length > 0 ? config.niches : ["property management"],
               count: 6,
               centerLabel,
               serviceRadiusKm: Number(tenantConfig.service_radius_km || 60),
-              countries: ["US", "CA"]
+              countries: ["US", "CA"],
+              allowedCities: citiesList
             });
           } catch (e) {
             console.warn("[getPriorityTargets] tenant pickTargets error:", e);
             tenantPicks = [];
           }
         }
+        // If tenant has NO cities configured, leave geographies empty — run will abort cleanly
+        if (!citiesList || citiesList.length === 0) {
+          config.geographies = [];
+          console.warn(`[getPriorityTargets] Tenant ${tenantId} has no cities configured. Discovery will not run.`);
+        }
       } else {
-        // Fallback generic tenant logic if ID provided but not found
-        config.geographies = ["Orlando", "Austin", "Tampa"];
-        config.niches = ["property_management", "real_estate", "hotel"];
+        // Tenant ID provided but not found in DB — do NOT invent fallback cities
+        config.geographies = [];
+        config.niches = [];
+        console.warn(`[getPriorityTargets] Tenant config not found for ${tenantId}`);
       }
     } catch (e) {}
   } else if (mode === "tenant") {
-    // PoC Generic Tenant mode
-    config.geographies = ["Orlando", "Austin", "Tampa"];
-    config.niches = ["property_management", "real_estate", "hotel"];
+    // Tenant mode without tenant_id — refuse to invent data
+    config.geographies = [];
+    config.niches = [];
     config.icp = {
       description: "Local B2B businesses with recurrent maintenance needs.",
       keywords: ["property management", "estate agent", "hotel"]
@@ -4860,29 +4825,53 @@ export async function getPriorityTargets(
     } catch (e) {}
   }
 
-  // Weight and rank geographies based on learning stats
+  // Rank geographies with Thompson Sampling (explore uncertain cities, exploit winners)
   const sortedGeographies = [...config.geographies].sort((a, b) => {
     const rateA = learningStats[`city:${a}`] ?? 0.5;
     const rateB = learningStats[`city:${b}`] ?? 0.5;
-    return rateB - rateA;
+    // Approximate trials from rate distance to prior 0.5 (more extreme = more data)
+    const trialsA = Math.max(2, Math.round(Math.abs(rateA - 0.5) * 40));
+    const trialsB = Math.max(2, Math.round(Math.abs(rateB - 0.5) * 40));
+    const winsA = rateA * trialsA;
+    const winsB = rateB * trialsB;
+    const sampleA = thompsonSample(winsA, trialsA);
+    const sampleB = thompsonSample(winsB, trialsB);
+    return sampleB - sampleA;
   });
 
-  // Weight and rank niches based on learning stats and preferred trade boost
+  // Rank niches/segments: Thompson + EV ticket + mode priors
   const sortedNiches = [...config.niches].sort((a, b) => {
-    const rateA = (learningStats[`trade:${a}`] ?? 0.5) + (PREFERRED_TRADES.has(a.toLowerCase()) ? 0.2 : 0);
-    const rateB = (learningStats[`trade:${b}`] ?? 0.5) + (PREFERRED_TRADES.has(b.toLowerCase()) ? 0.2 : 0);
-    return rateB - rateA;
+    const aL = a.toLowerCase();
+    const bL = b.toLowerCase();
+    let rateA = learningStats[`trade:${aL}`] ?? learningStats[`trade:${a}`] ?? 0.5;
+    let rateB = learningStats[`trade:${bL}`] ?? learningStats[`trade:${b}`] ?? 0.5;
+    if (mode === "founder") {
+      if (PREFERRED_TRADES.has(aL)) rateA += 0.15;
+      if (PREFERRED_TRADES.has(bL)) rateB += 0.15;
+    }
+    if (mode === "tenant") {
+      if (/property management|hoa|facility|hotel|real estate/i.test(aL)) rateA += 0.2;
+      if (/property management|hoa|facility|hotel|real estate/i.test(bL)) rateB += 0.2;
+    }
+    const trialsA = Math.max(2, Math.round(Math.abs(rateA - 0.5) * 40));
+    const trialsB = Math.max(2, Math.round(Math.abs(rateB - 0.5) * 40));
+    // EV = P(win) × ticket → prefer high-ticket segments when rates similar
+    const evA = thompsonSample(rateA * trialsA, trialsA) * estimateTicketUsd(aL);
+    const evB = thompsonSample(rateB * trialsB, trialsB) * estimateTicketUsd(bL);
+    return evB - evA;
   });
 
-  // SOLO rama founder y sin overrides.cities: pickTargets
+  // SOLO rama founder y sin overrides.cities: pickTargets restringido a ciudades configuradas
   let picks: { place: any; trade: string; why: string }[] = [];
   if (!skipPicks && mode === "founder" && !(overrides && overrides.cities)) {
     try {
       picks = await pickTargets(env.RADAR_DB, {
         tenantId: "founder",
         trades: sortedNiches,
-        count: Math.min(20, Number(env.RADAR_JOBS_PER_RUN || 10)),
-        countries: ["US", "CA"]
+        count: Math.min(12, Number(env.RADAR_JOBS_PER_RUN || 8)),
+        countries: ["US", "CA"],
+        // CRITICAL: only search within configured Sun Belt markets — never national drift
+        allowedCities: sortedGeographies.length > 0 ? sortedGeographies : PRIORITY_CITIES
       });
     } catch (e) {
       console.warn("[getPriorityTargets] pickTargets error:", e);
@@ -5217,10 +5206,10 @@ export function calculateStrategicScores(
     decision_state = 'closed';
   }
 
-  // EXPECTED VALUE CALCULATION (Separating observed, inference, estimation)
-  const avgJobValue = isHighTicketTrade ? 2800 : isPreferredTrade ? 1800 : 1200;
-  const estimatedMonthlyRecoveredValue = Math.round(avgJobValue * (pain_score / 100) * 2);
-  const conversionProb = (strategic_score / 100) * (contactability_score / 100) * 0.30;
+  // EXPECTED VALUE: P(convert) × ticket — ticket by trade economics
+  const avgJobValue = estimateTicketUsd(item.trade || "");
+  const estimatedMonthlyRecoveredValue = Math.round(avgJobValue * (pain_score / 100) * 2.2);
+  const conversionProb = (strategic_score / 100) * (contactability_score / 100) * 0.32;
   const expected_value = Math.round(estimatedMonthlyRecoveredValue * conversionProb);
 
   // WHY NOW STRUCTURED REASONING
@@ -5374,9 +5363,89 @@ export function calculateMultiFactorScore(
   }
 
   const isTenantMode = missionConfig?.mode === 'tenant';
+  const tradeLower = (item.trade || "").toLowerCase();
+  const nameLower = (item.name || "").toLowerCase();
 
-  // --- NEW 6-COMPONENT FORMULA FOR TOTAL/OPPORTUNITY SCORE ---
+  // --- TENANT MODE: score "buyers of Bvelt clients" (PMs, hotels, HOAs…) ---
+  // Different formula: contactability + ICP fit + commercial density matter more than "SMS gap".
+  if (isTenantMode) {
+    let tenantScore = 0;
+    const breakdownT: Record<string, number> = {};
+
+    // ICP / segment fit (0-35)
+    let icpFit = 10;
+    const targetNiches = (missionConfig?.niches || []).map(n => n.toLowerCase());
+    const icpKeywords = (missionConfig?.icp?.keywords || []).map(k => k.toLowerCase());
+    const haystack = `${nameLower} ${tradeLower}`;
+    if (targetNiches.some(n => haystack.includes(n) || tradeLower.includes(n.replace(/\s+/g, "_")))) {
+      icpFit += 15;
+    }
+    if (icpKeywords.some(k => haystack.includes(k))) {
+      icpFit += 10;
+    }
+    // Buyer-type keywords strongly associated with recurring service spend
+    if (/property|management|manager|hoa|homeowner|apartment|condo|facility|realty|real estate|hotel|motel|resort/i.test(haystack)) {
+      icpFit += 8;
+    }
+    icpFit = Math.min(35, icpFit);
+    breakdownT.icp_fit = icpFit;
+    tenantScore += icpFit;
+
+    // Contactability (0-30)
+    let contact = 0;
+    if (email) contact += isEmailValidated ? 14 : 10;
+    if (phone) contact += 10;
+    if (item.website && isRealWebsite(item.website)) contact += 6;
+    contact = Math.min(30, contact);
+    breakdownT.contactability = contact;
+    tenantScore += contact;
+
+    // Commercial opportunity / multi-unit signal (0-20)
+    let commercial = 5;
+    if (/llc|inc|corp|group|partners|properties|management|associates/i.test(nameLower)) commercial += 6;
+    if (isPriorityCity) commercial += 5;
+    if (item.source === "permits") commercial += 6;
+    const pairKey = `pair:${item.city}|${tradeLower}`;
+    const cityKey = `city:${item.city}`;
+    const learned = learningStats[pairKey] ?? learningStats[cityKey] ?? learningStats[`trade:${tradeLower}`] ?? 0.5;
+    if (learned > 0.55) commercial += 4;
+    commercial = Math.min(20, commercial);
+    breakdownT.commercial = commercial;
+    tenantScore += commercial;
+
+    // Evidence / digital maturity (0-15)
+    let evidence = 3;
+    if (signals.contact_form || signals.lead_capture) evidence += 4;
+    if (signals.quote_request) evidence += 3;
+    if (signals.multiple_areas) evidence += 3;
+    if (item.website) evidence += 2;
+    evidence = Math.min(15, evidence);
+    breakdownT.evidence = evidence;
+    tenantScore += evidence;
+
+    tenantScore = Math.min(100, Math.max(0, Math.round(tenantScore)));
+    const confidence = Math.min(100, 40 + (email ? 20 : 0) + (phone ? 15 : 0) + (item.website ? 15 : 0) + (isEmailValidated ? 10 : 0));
+
+    return {
+      totalScore: tenantScore,
+      breakdown: breakdownT,
+      confidence,
+      evidenceSummary: `Tenant ICP score for buyer segment "${item.trade}" in ${item.city}`,
+      evidenceItems: [],
+      painHypothesis: { mode: "tenant_buyer", icp_match: icpFit >= 20 },
+      strategicScore: tenantScore
+    };
+  }
+
+  // --- FOUNDER MODE: 6-COMPONENT FORMULA (contractors who need Bvelt) ---
   
+  // Facebook/Instagram-only "website" = digitally immature operator (high pain / high Bvelt fit)
+  const webLower = String(item.website || "").toLowerCase();
+  const isSocialOnlySite = !!webLower && (
+    /facebook\.com|fb\.com|instagram\.com|linktr\.ee|bit\.ly/i.test(webLower)
+  );
+  const hasNoRealWebsite = !item.website || !isRealWebsite(item.website) || isSocialOnlySite;
+
   // 1. Need Evidence (0 - 30 pts)
   let needEvidenceScore = 0;
   if (signals.sms_gap) needEvidenceScore += 12;
@@ -5384,11 +5453,12 @@ export function calculateMultiFactorScore(
   if (!signals.quote_request && !signals.estimate_language) needEvidenceScore += 8;
   if (signals.emergency && signals.sms_gap) needEvidenceScore += 4;
   if (phone && !email) needEvidenceScore += 4;
+  if (hasNoRealWebsite && phone) needEvidenceScore += 5; // phone-first businesses bleed leads
+  if (isSocialOnlySite) needEvidenceScore += 3;
   needEvidenceScore = Math.min(30, Math.max(0, needEvidenceScore));
 
   // 2. Bvelt Fit (0 - 20 pts)
   let bveltFitScore = 0;
-  const tradeLower = (item.trade || "").toLowerCase();
   const isPreferred = PREFERRED_TRADES.has(tradeLower) ||
     /hvac|plumb|electr|roof|lawn|landscap|pool|clean|handyman/i.test(tradeLower);
   if (isPreferred) bveltFitScore += 15;
@@ -5967,13 +6037,17 @@ export async function fetchLocalBusinessesWithDiagnostics(
   overpassStatus = overpassRes.status;
   rawBusinesses.push(...overpassRes.businesses);
 
-  // 3. BizData Scraper (ONLY if fewer than 5 results AND env.ENABLE_BIZDATA === "1")
-  if (rawBusinesses.length < 5 && env.ENABLE_BIZDATA === "1") {
+  // 3. BizData Scraper — auto-fallback when Overpass is weak unless explicitly disabled
+  // ENABLE_BIZDATA=0 → never use; ENABLE_BIZDATA=1 or unset → use when <5 Overpass results
+  const bizDataExplicitlyOff = env.ENABLE_BIZDATA === "0" || env.ENABLE_BIZDATA === "false";
+  if (rawBusinesses.length < 5 && !bizDataExplicitlyOff) {
     const bizDataRes = await fetchBizDataBusinesses(city, trade);
     bizdataStatus = bizDataRes.status;
     rawBusinesses.push(...bizDataRes.businesses);
   } else {
-    bizdataStatus = rawBusinesses.length >= 5 ? `skipped (have ${rawBusinesses.length} results)` : "disabled (ENABLE_BIZDATA!=1)";
+    bizdataStatus = rawBusinesses.length >= 5
+      ? `skipped (have ${rawBusinesses.length} results)`
+      : "disabled (ENABLE_BIZDATA=0)";
   }
 
   // Deduplicate: permit candidates go first
@@ -6361,11 +6435,40 @@ async function generateAICopy(
       }
     }
 
+    // 3. CLOUDFLARE WORKERS AI (free Neurons) — guerrilla backup, no external key
+    if (env.AI && typeof env.AI.run === "function") {
+      console.log(`[Gemini Cascade] Calling Workers AI (Llama) backup...`);
+      try {
+        const response = await env.AI.run("@cf/meta/llama-3.2-3b-instruct", {
+          messages: [
+            { role: "system", content: "Reply ONLY with valid JSON: {\"subject\":string,\"body\":string}. No markdown." },
+            { role: "user", content: prompt }
+          ],
+          max_tokens: 400
+        });
+        let rawText = "";
+        if (typeof response === "string") rawText = response;
+        else if (response && typeof (response as any).response === "string") rawText = (response as any).response;
+        else rawText = JSON.stringify(response);
+        const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          const content = JSON.parse(jsonMatch[0]);
+          if (content.subject && content.body) {
+            console.log(`[Gemini Cascade] Success using Workers AI backup`);
+            await commitBudget(env.RADAR_DB, tenantId, 'ai_units', 1);
+            return { subject: String(content.subject), body: String(content.body) };
+          }
+        }
+      } catch (e: any) {
+        console.warn("[Gemini Cascade] Workers AI backup failed:", e.message);
+      }
+    }
+
     // Release budget if all AI attempts failed
     await releaseBudget(env.RADAR_DB, tenantId, 'ai_units', 1);
   }
 
-  // 3. Static High-Converting Template Fallback
+  // 4. Static High-Converting Template Fallback (always works offline)
   console.log(`[Gemini Cascade] All AI pipelines failed or budget exceeded. Reverting to deterministic backup template.`);
   return getTradePsychologyFallback(prospect.name, prospect.trade, prospect.city, bveltAngle, language, prospect.phone, prospect.demo_token, prospect.signal_event, prospect.signal_area, env);
 }
@@ -7114,8 +7217,7 @@ export async function sendOrQueueOutreach(prospect: any, runId: string, env: Env
     prospect.website,
     prospect.phone,
     prospect.name,
-    prospect.city,
-    prospect.tenant_id || "founder"
+    prospect.city
   );
   if (suppression) {
     await env.RADAR_DB.prepare("UPDATE prospects SET status = 'suppressed', outcome = ?, updated_at = ? WHERE id = ?")
@@ -7130,8 +7232,7 @@ export async function sendOrQueueOutreach(prospect: any, runId: string, env: Env
     prospect.website,
     prospect.phone,
     prospect.name,
-    prospect.city,
-    prospect.tenant_id || "founder"
+    prospect.city
   );
   if (overlap && isCooldownActive(overlap.overlap.cooldown_until)) {
     await env.RADAR_DB.prepare("UPDATE prospects SET status = 'held', outcome = 'cooldown_active', updated_at = ? WHERE id = ?")
@@ -7439,12 +7540,8 @@ export async function checkSuppressedComposite(
   website: string | null,
   phone: string | null,
   name: string,
-  city: string,
-  tenantId: string = "founder"
+  city: string
 ): Promise<{ suppressed: boolean; reason: string } | null> {
-  if (tenantId !== "founder") {
-    return null;
-  }
   const keys: string[] = [];
   if (email) keys.push(email.toLowerCase().trim());
   if (website) {
@@ -7473,8 +7570,7 @@ export async function findExistingProspectOverlap(
   website: string | null,
   phone: string | null,
   name: string,
-  city: string,
-  tenantId: string = "founder"
+  city: string
 ): Promise<{ overlap: any; reason: string } | null> {
   const normEmail = email ? email.toLowerCase().trim() : null;
   const normDomain = website ? getDomain(website) : null;
@@ -7482,25 +7578,25 @@ export async function findExistingProspectOverlap(
   const identityKey = generateIdentityKey(email, website, phone, name, city);
 
   try {
-    const matchIdentity = await db.prepare("SELECT * FROM prospects WHERE identity_key = ? AND COALESCE(tenant_id,'founder') = ?").bind(identityKey, tenantId).first();
+    const matchIdentity = await db.prepare("SELECT * FROM prospects WHERE identity_key = ?").bind(identityKey).first();
     if (matchIdentity) return { overlap: matchIdentity, reason: "Same identity_key: " + identityKey };
 
     if (normEmail) {
-      const match = await db.prepare("SELECT * FROM prospects WHERE email = ? AND COALESCE(tenant_id,'founder') = ?").bind(normEmail, tenantId).first();
+      const match = await db.prepare("SELECT * FROM prospects WHERE email = ?").bind(normEmail).first();
       if (match) return { overlap: match, reason: "Same email match: " + normEmail };
     }
 
     if (normDomain) {
-      const match = await db.prepare("SELECT * FROM prospects WHERE website LIKE ? AND COALESCE(tenant_id,'founder') = ?").bind(`%${normDomain}%`, tenantId).first();
+      const match = await db.prepare("SELECT * FROM prospects WHERE website LIKE ?").bind(`%${normDomain}%`).first();
       if (match) return { overlap: match, reason: "Same website domain match: " + normDomain };
     }
 
     if (normPhone && normPhone.length >= 7) {
-      const match = await db.prepare("SELECT * FROM prospects WHERE (phone = ? OR phone LIKE ?) AND COALESCE(tenant_id,'founder') = ?").bind(normPhone, `%${normPhone}%`, tenantId).first();
+      const match = await db.prepare("SELECT * FROM prospects WHERE phone = ? OR phone LIKE ?").bind(normPhone, `%${normPhone}%`).first();
       if (match) return { overlap: match, reason: "Same phone number match: " + normPhone };
     }
 
-    const matchNameCity = await db.prepare("SELECT * FROM prospects WHERE name = ? AND city = ? AND COALESCE(tenant_id,'founder') = ?").bind(name, city, tenantId).first();
+    const matchNameCity = await db.prepare("SELECT * FROM prospects WHERE name = ? AND city = ?").bind(name, city).first();
     if (matchNameCity) {
       return { overlap: matchNameCity, reason: "Same business name and city match" };
     }
@@ -7565,22 +7661,134 @@ async function recordLearningEvent(
 /**
  * Retrieve Learning Win Rates by City/Trade/Variant
  */
+/**
+ * Thompson Sampling draw from Beta(wins+1, losses+1).
+ * Balances explore (uncertain arms) vs exploit (high win-rate arms).
+ * Used to rank cities and trade segments autonomously.
+ */
+function thompsonSample(wins: number, total: number): number {
+  const a = Math.max(0.5, wins + 1);
+  const b = Math.max(0.5, (total - wins) + 1);
+  // Marsaglia gamma approx for Beta via two gammas (simple for Workers)
+  const sampleGamma = (k: number): number => {
+    if (k < 1) {
+      const u = Math.random();
+      return sampleGamma(1 + k) * Math.pow(u, 1 / k);
+    }
+    const d = k - 1 / 3;
+    const c = 1 / Math.sqrt(9 * d);
+    for (;;) {
+      let x: number, v: number;
+      do {
+        x = normal01();
+        v = 1 + c * x;
+      } while (v <= 0);
+      v = v * v * v;
+      const u = Math.random();
+      if (u < 1 - 0.0331 * (x * x) * (x * x)) return d * v;
+      if (Math.log(u) < 0.5 * x * x + d * (1 - v + Math.log(v))) return d * v;
+    }
+  };
+  const g1 = sampleGamma(a);
+  const g2 = sampleGamma(b);
+  return g1 / (g1 + g2);
+}
+
+function normal01(): number {
+  const u = 1 - Math.random();
+  const v = Math.random();
+  return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+}
+
+/** Expected value proxy: P(convert) × ticket by trade (USD). */
+function estimateTicketUsd(trade: string): number {
+  const t = (trade || "").toLowerCase();
+  if (/hvac|roof|electr/.test(t)) return 2800;
+  if (/plumb|water/.test(t)) return 2200;
+  if (/pool/.test(t)) return 1600;
+  if (/landscap|lawn|pest|clean|paint|floor/.test(t)) return 1200;
+  if (/property|hotel|hoa|facility|real estate/.test(t)) return 3500; // tenant buyer LTV proxy
+  return 1500;
+}
+
+/**
+ * Learning brain: win rates by city/trade/variant/segment.
+ * Uses learning_stats (primary) + live prospect outcomes as Bayesian prior.
+ * Lower threshold (total_count >= 2) so the system starts learning faster.
+ * Returns scores in [0, 1] used to re-rank cities, trades and ICP segments.
+ */
 async function getLearningStats(db: D1Database): Promise<Record<string, number>> {
   const winRates: Record<string, number> = {};
   try {
     if (!db || typeof db.prepare !== "function") return winRates;
-    const prep = db.prepare("SELECT key, sent_count, win_count, total_count FROM learning_stats WHERE total_count >= 5");
-    if (prep && typeof prep.all === "function") {
-      const rows = await prep.all() as any;
-      if (rows && rows.results) {
-        for (const r of rows.results) {
-          const wins = typeof r.win_count === 'number' ? r.win_count : 0;
-          winRates[r.key] = r.total_count > 0 ? (wins / r.total_count) : 0;
+
+    // 1. Aggregated learning_stats (faster path)
+    try {
+      const prep = db.prepare(
+        "SELECT key, sent_count, win_count, total_count FROM learning_stats WHERE total_count >= 2"
+      );
+      if (prep && typeof prep.all === "function") {
+        const rows = await prep.all() as any;
+        if (rows && rows.results) {
+          for (const r of rows.results) {
+            const wins = typeof r.win_count === "number" ? r.win_count : 0;
+            const total = Math.max(1, r.total_count || 1);
+            // Laplace smoothing so early wins don't dominate
+            winRates[r.key] = (wins + 1) / (total + 2);
+          }
         }
       }
-    }
+    } catch (_) {}
+
+    // 2. Live outcomes from prospects (fills gaps when learning_stats is sparse)
+    try {
+      const live = await db.prepare(`
+        SELECT city, trade,
+          SUM(CASE WHEN outcome IN ('sent','replied','won','positive','booked') OR tenant_outcome IN ('replied','won') THEN 1 ELSE 0 END) as wins,
+          COUNT(*) as total
+        FROM prospects
+        WHERE city IS NOT NULL AND trade IS NOT NULL
+        GROUP BY city, trade
+        HAVING total >= 2
+      `).all() as any;
+      if (live && live.results) {
+        for (const r of live.results) {
+          const cityKey = `city:${r.city}`;
+          const tradeKey = `trade:${String(r.trade).toLowerCase()}`;
+          const pairKey = `pair:${r.city}|${String(r.trade).toLowerCase()}`;
+          const rate = (Number(r.wins || 0) + 1) / (Number(r.total || 1) + 2);
+          if (winRates[cityKey] === undefined) winRates[cityKey] = rate;
+          else winRates[cityKey] = (winRates[cityKey] + rate) / 2;
+          if (winRates[tradeKey] === undefined) winRates[tradeKey] = rate;
+          else winRates[tradeKey] = (winRates[tradeKey] + rate) / 2;
+          winRates[pairKey] = rate;
+        }
+      }
+    } catch (_) {}
+
+    // 3. geo_coverage wins/replies as geographic signal
+    try {
+      const geo = await db.prepare(`
+        SELECT place_key, trade, SUM(wins) as w, SUM(replies) as r, SUM(qualified) as q, SUM(searches) as s
+        FROM geo_coverage
+        GROUP BY place_key, trade
+        HAVING s >= 1
+      `).all() as any;
+      if (geo && geo.results) {
+        for (const r of geo.results) {
+          const cityName = String(r.place_key || "").split("|")[0];
+          if (!cityName) continue;
+          const successes = Number(r.w || 0) + Number(r.r || 0) * 0.5;
+          const trials = Math.max(1, Number(r.s || 1));
+          const rate = (successes + 1) / (trials + 2);
+          const key = `city:${cityName}`;
+          if (winRates[key] === undefined) winRates[key] = rate;
+          else winRates[key] = Math.max(winRates[key], rate);
+        }
+      }
+    } catch (_) {}
   } catch (e) {
-    // Graceful fallback
+    // Graceful fallback — empty rates = uniform prior
   }
   return winRates;
 }

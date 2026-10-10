@@ -16,8 +16,21 @@ export interface PermitContractor {
   source: "permits";
 }
 
+/**
+ * Free municipal open-data permit feeds (Socrata SODA — no API key for moderate use).
+ * Keys are lowercase city names matched against discovery city labels.
+ * Expand carefully: only verified public datasets.
+ */
 export const PERMIT_SOURCES: Record<string, { domain: string; dataset: string }> = {
-  austin: { domain: "data.austintexas.gov", dataset: "3syk-w9eu" }
+  austin: { domain: "data.austintexas.gov", dataset: "3syk-w9eu" },
+  // Chicago Building Permits
+  chicago: { domain: "data.cityofchicago.org", dataset: "ydr8-5enu" },
+  // SF Building Permits
+  "san francisco": { domain: "data.sfgov.org", dataset: "i98e-djp9" },
+  // New Orleans
+  "new orleans": { domain: "data.nola.gov", dataset: "72f9-bi28" },
+  // Los Angeles LADBS (building + related)
+  "los angeles": { domain: "data.lacity.org", dataset: "pi9x-tg5x" },
 };
 
 /**
