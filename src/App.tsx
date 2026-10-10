@@ -503,10 +503,11 @@ export default function App() {
     setLastRunError(null);
 
     try {
-      // 1. Send POST /run - returns IMMEDIATELY without waiting
+      // 1. Send POST /run — force=true ALWAYS when user taps the button
+      // (idempotent skip only applies to cron, not manual runs)
       const runParam = currentMode === 'tenant' && selectedTenantId
         ? `mode=tenant&tenant_id=${encodeURIComponent(selectedTenantId)}&force=true`
-        : `mode=founder`;
+        : `mode=founder&force=true`;
       const startRes = await fetch(`${apiUrl}/run?${runParam}`, {
         method: 'POST',
         credentials: 'include'
@@ -1719,7 +1720,7 @@ export default function App() {
                             )}
                             {p.phone && (
                               <a 
-                                href={`https://wa.me/1${p.phone.replace(/\D/g, '')}?text=${encodeURIComponent(p.draft_body || '')}`}
+                                href={`https://wa.me/1${String(p.phone || '').replace(/\D/g, '')}?text=${encodeURIComponent(p.draft_body || '')}`}
                                 target="_blank" 
                                 rel="noreferrer" 
                                 className="px-2.5 py-1 rounded-lg bg-emerald-950/50 border border-emerald-800/40 text-emerald-300 hover:bg-emerald-900/60 flex items-center gap-1 font-bold"

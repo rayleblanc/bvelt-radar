@@ -1668,7 +1668,7 @@ export default {
           hunter_api: { ready: false, key_present: !!env.HUNTER_API_KEY, details: null },
           abstract_api: { ready: false, key_present: !!env.ABSTRACT_API_KEY, details: null },
           trust_stack: { ready: false, url_present: !!env.TRUST_STACK_URL, details: null },
-          cron_trigger: { ready: true, schedule: "0 12 * * *" },
+          cron_trigger: { ready: true, schedule: "0 14 * * *" },
           worker_routes: { ready: true, active_routes: ["/health", "/prospects", "/run", "/decision", "/stats", "/api/events", "/api/tenants/config"] }
         };
 
@@ -6488,7 +6488,7 @@ function getTradePsychologyFallback(
   signalArea?: string | null,
   env?: Env
 ): { subject: string; body: string } {
-  const cTrade = trade.replace('_', ' ');
+  const cTrade = String(trade || 'service').replace(/_/g, ' ');
   const isSpanish = language.toLowerCase().startsWith("es");
   const ctaLink = demoToken
     ? `https://bvelt.app/demo?p=${demoToken}`
