@@ -482,7 +482,29 @@ export default function App() {
   };
 
   // Run decision state mutate via endpoint
-  const submitDecision = async (prospectId: string, action: string) => {
+  
+  const submitTenantOutcome = async (prospectId: string, outcome: "contacted" | "replied" | "won") => {
+    if (!selectedTenantId || selectedTenantId === "founder") return;
+    let value_usd: number | undefined;
+    if (outcome === "won") {
+      const raw = prompt("Valor ganado en USD (opcional):", "500");
+      if (raw == null) return;
+      value_usd = parseFloat(raw) || 0;
+    }
+    try {
+      await fetch(`${apiUrl}/api/prospects/outcome`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prospect_id: prospectId, tenant_id: selectedTenantId, outcome, value_usd })
+      });
+      fetchTelemetry();
+    } catch (e) {
+      alert("Error al guardar resultado: " + e);
+    }
+  };
+
+const submitDecision = async (prospectId: string, action: string) => {
     try {
       const res = await fetch(`${apiUrl}/decision`, {
         method: 'POST',
@@ -1375,6 +1397,16 @@ export default function App() {
                 </div>
 
                 {/* ROI funnel — product metric for founder + tenant */}
+                {currentMode === 'tenant' && selectedTenantId && selectedTenantId !== 'founder' && (
+                  <button
+                    type="button"
+                    onClick={() => window.open(`${apiUrl}/api/tenants/leads.csv?tenant_id=${encodeURIComponent(selectedTenantId)}`, '_blank')}
+                    className="w-full py-2 rounded-xl bg-slate-900 border border-slate-700 text-[11px] font-bold text-slate-300 font-mono"
+                  >
+                    Exportar CSV (tenant)
+                  </button>
+                )}
+
                 {roiStats && (
                   <div className="bg-slate-900/50 border border-slate-800 rounded-2xl p-3 grid grid-cols-4 gap-2 text-center font-mono">
                     <div>
@@ -1919,6 +1951,16 @@ export default function App() {
                                   ✕ Descartar
                                 </button>
                               </div>
+                              {currentMode === 'tenant' && selectedTenantId && selectedTenantId !== 'founder' && (
+                                <div className="grid grid-cols-3 gap-1.5 pt-1 font-mono">
+                                  <button type="button" onClick={() => submitTenantOutcome(p.id, 'contacted')}
+                                    className="h-9 text-[10px] font-bold rounded-lg bg-slate-900 border border-slate-700 text-slate-300">Contactado</button>
+                                  <button type="button" onClick={() => submitTenantOutcome(p.id, 'replied')}
+                                    className="h-9 text-[10px] font-bold rounded-lg bg-amber-950/40 border border-amber-800 text-amber-300">Respondió</button>
+                                  <button type="button" onClick={() => submitTenantOutcome(p.id, 'won')}
+                                    className="h-9 text-[10px] font-bold rounded-lg bg-emerald-950/40 border border-emerald-800 text-emerald-300">Ganado $</button>
+                                </div>
+                              )}
                             </div>
                           )}
                         </div>

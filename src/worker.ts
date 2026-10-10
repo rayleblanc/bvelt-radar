@@ -11,7 +11,7 @@
  * - D1 Feedback loop & Outcome learning engine
  */
 
-import { getAlerts, tradeForEvent, WeatherAlert } from './weatherSignals';
+import { getAlerts, tradeForEvent, eventAppliesToTrade, WeatherAlert } from './weatherSignals';
 import { dispatchEmail, EmailDispatchResult } from './emailDispatcher';
 import { auditDomainSecurityAndMx, auditWebsitePerformance, auditCityWeatherEmergency } from './openAudits';
 import { fetchPermitContractors } from './permitSources';
@@ -1484,6 +1484,46 @@ export default {
         }
 
         return Response.json({ success: true, tenant_id: tenantId, run_id: runId, message: "Tenant config saved successfully." }, { headers: corsHeaders });
+      }
+
+      // 16a2. Tenant leads CSV export
+      if ((path === "/api/tenants/leads.csv" || path === "/tenants/leads.csv") && method === "GET") {
+        if (!isAuthorized(request, env, serviceKey, validSessionHash)) {
+          return Response.json({ error: "Unauthorized" }, { status: 401, headers: corsHeaders });
+        }
+        const tenantId = url.searchParams.get("tenant_id");
+        if (!tenantId) {
+          return Response.json({ error: "tenant_id required" }, { status: 400, headers: corsHeaders });
+        }
+        try {
+          const rows = await env.RADAR_DB.prepare(`
+            SELECT name, trade, city, phone, email, website, score, status, tenant_outcome, won_value_usd, bvelt_angle, created_at
+            FROM prospects
+            WHERE COALESCE(tenant_id,'founder') = ?
+              AND status IN ('qualified','scored','enriched','scouted','discovered','approved','sent')
+            ORDER BY COALESCE(score, opportunity_score, 0) DESC
+            LIMIT 500
+          `).bind(tenantId).all();
+          const esc = (v: any) => {
+            const s = v == null ? "" : String(v);
+            if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+            return s;
+          };
+          const header = "name,trade,city,phone,email,website,score,status,tenant_outcome,won_value_usd,angle,created_at";
+          const lines = [header];
+          for (const r of (rows.results || []) as any[]) {
+            lines.push([r.name, r.trade, r.city, r.phone, r.email, r.website, r.score, r.status, r.tenant_outcome, r.won_value_usd, r.bvelt_angle, r.created_at].map(esc).join(","));
+          }
+          return new Response(lines.join("\n"), {
+            headers: {
+              ...corsHeaders,
+              "Content-Type": "text/csv; charset=utf-8",
+              "Content-Disposition": 'attachment; filename="tenant-leads.csv"'
+            }
+          });
+        } catch (e: any) {
+          return Response.json({ error: e.message }, { status: 500, headers: corsHeaders });
+        }
       }
 
       // 16b. Bvelt → Radar bootstrap (free analysis / profile). Autonomous tenant.
@@ -3079,7 +3119,10 @@ async function bootstrapBveltTenant(
   let runId: string | null = null;
   const runPromise = startProspectingRun(env, "tenant", tenantId, {
     cities: cityLabel,
-    trades: searchTrade
+    trades: searchTrade,
+    countries: null,
+    languages: null,
+    min_score: null
   }, true).then((r) => {
     runId = r.run_id;
     return r;
@@ -3671,10 +3714,8 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
 
         for (const alert of alerts) {
           const areaLower = (alert.areaDesc || "").toLowerCase();
-          const alertTrades = tradeForEvent(alert.event);
-
           const cityMatch = candCity && areaLower.includes(candCity);
-          const tradeMatch = alertTrades.length === 0 || alertTrades.includes(candTrade);
+          const tradeMatch = eventAppliesToTrade(alert.event, candTrade);
 
           if (cityMatch && tradeMatch) {
             signalEvent = alert.event;
@@ -4051,6 +4092,74 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
   if (isPermitsSource && permits_90d >= 3) {
     finalScore = Math.min(100, finalScore + 10);
     breakdown.active_permits = 10;
+  }
+
+  // Tenant: Clef-flash ranks recurring buyers (max 5 AI calls per score job)
+  if (isTenant && finalScore >= 35 && env.AI && typeof env.AI.run === "function") {
+    const clefCalls = Number((job.payload as any)._clef_calls || 0);
+    if (clefCalls < 5) {
+      try {
+        let tenantNiche = prospect.trade || "services";
+        let icp = "";
+        if (job.tenant_id) {
+          const tc = await env.RADAR_DB.prepare(
+            "SELECT niche, icp_description FROM tenant_config WHERE tenant_id = ?"
+          ).bind(job.tenant_id).first() as any;
+          if (tc?.niche) tenantNiche = tc.niche;
+          if (tc?.icp_description) icp = tc.icp_description;
+        }
+        const response: any = await env.AI.run("@cf/cloudflare/clef-flash", {
+          model: "clef-flash",
+          state: {
+            name: prospect.name,
+            website: prospect.website || "n/a",
+            city: prospect.city,
+            tenant_niche: tenantNiche,
+            icp: icp || "n/a"
+          },
+          questions: {
+            buyer: {
+              type: "choice",
+              instructions: "What type of buyer is `name` for a business that sells `tenant_niche` services?",
+              criteria: {
+                property_manager: "Manages rental or commercial properties",
+                hotel_hospitality: "Hotel, motel or hospitality",
+                hoa_condo: "HOA or condo association",
+                general_contractor: "General contractor or builder",
+                commercial_office: "Commercial or office building",
+                other: null
+              }
+            },
+            recurring: {
+              type: "score",
+              instructions: "How likely is `name` to buy this service repeatedly?",
+              criteria: ["Buys once", "Buys occasionally", "Buys recurrently"]
+            }
+          }
+        });
+        const answers = response?.answers || response;
+        const buyerChoice = String(answers?.buyer?.choice || answers?.buyer || "other");
+        const recScore = Number(answers?.recurring?.score ?? answers?.recurring ?? 0);
+        const boost = Math.min(20, Math.round((recScore / 2) * 15) + (buyerChoice !== "other" ? 5 : 0));
+        finalScore = Math.min(100, finalScore + boost);
+        breakdown.clef_buyer = boost;
+        if (recScore >= 1.4) signalTags.push("Cuenta recurrente");
+        const buyerEs: Record<string, string> = {
+          property_manager: "Property Manager",
+          hotel_hospitality: "Hotel / Hospitality",
+          hoa_condo: "HOA / Condo",
+          general_contractor: "General Contractor",
+          commercial_office: "Oficina comercial",
+          other: "Otro"
+        };
+        if (buyerChoice && buyerChoice !== "other") {
+          signalTags.push(buyerEs[buyerChoice] || buyerChoice);
+        }
+        (job.payload as any)._clef_calls = clefCalls + 1;
+      } catch (e: any) {
+        console.warn("[handleScoreJob] tenant Clef skip:", e?.message || e);
+      }
+    }
   }
 
   let bveltAngle = "missed_lead_response";

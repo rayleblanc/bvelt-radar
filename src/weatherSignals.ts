@@ -62,31 +62,34 @@ export async function getAlerts(states: string[]): Promise<WeatherAlert[]> {
 /**
  * Maps a weather event name to relevant contractor/service trades
  */
+export const EVENT_TRADE_MAP: { pattern: RegExp; trades: string[] }[] = [
+  { pattern: /hail|wind|tornado|thunderstorm|hurricane|tropical/i, trades: ["roofing", "landscaping", "handyman", "lawn_care"] },
+  { pattern: /heat|excessive heat/i, trades: ["hvac"] },
+  { pattern: /freeze|frost|winter|ice|cold|extreme cold/i, trades: ["plumbing", "hvac"] },
+  { pattern: /flood|rain|flash flood/i, trades: ["plumbing", "pool_cleaning", "handyman"] },
+  { pattern: /air quality|smoke|dust/i, trades: ["hvac"] },
+  { pattern: /fire|red flag/i, trades: ["landscaping", "lawn_care"] },
+];
+
+/** True if this weather event is relevant to the prospect trade (avoids AQI on pest control, etc.) */
+export function eventAppliesToTrade(event: string, trade: string): boolean {
+  if (!event || !trade) return false;
+  const t = trade.toLowerCase().replace(/-/g, "_").replace(/\s+/g, "_");
+  const trades = tradeForEvent(event);
+  if (trades.length === 0) return false;
+  return trades.some((x) => {
+    const n = x.toLowerCase().replace(/-/g, "_").replace(/\s+/g, "_");
+    return t === n || t.includes(n) || n.includes(t);
+  });
+}
+
 export function tradeForEvent(event: string): string[] {
   if (!event) return [];
-  const e = event.toLowerCase();
-
-  if (e.includes("freeze") || e.includes("extreme cold")) {
-    return ["plumbing", "hvac"];
+  const out = new Set<string>();
+  for (const row of EVENT_TRADE_MAP) {
+    if (row.pattern.test(event)) {
+      for (const t of row.trades) out.add(t);
+    }
   }
-
-  if (
-    e.includes("tornado") ||
-    e.includes("hurricane") ||
-    e.includes("tropical storm") ||
-    e.includes("severe thunderstorm warning") ||
-    e.includes("high wind warning")
-  ) {
-    return ["roofing", "landscaping", "handyman"];
-  }
-
-  if (e.includes("flood warning") || e.includes("flood")) {
-    return ["plumbing"];
-  }
-
-  if (e.includes("heat")) {
-    return ["hvac"];
-  }
-
-  return [];
+  return Array.from(out);
 }
