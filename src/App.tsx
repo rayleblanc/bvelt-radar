@@ -267,8 +267,9 @@ export default function App() {
         }
       }
 
-      // Auth header for Bearer session token (supports iframe and header-based auth)
-      const token = localStorage.getItem('BVELT_FOUNDER_KEY') || 'FOUNDER_SERVICE_KEY_LOCAL';
+      // Session is managed via HttpOnly cookie with credentials: 'include'.
+      // If no token exists, do not send Authorization header.
+      const token = null;
       const authHeaders: Record<string, string> = token ? { 'Authorization': `Bearer ${token}` } : {};
 
       // 2. GET /stats (protected by Worker HttpOnly cookie or Bearer token)
@@ -404,7 +405,6 @@ export default function App() {
       }).catch(() => null);
 
       if (res && res.ok) {
-        localStorage.setItem('BVELT_FOUNDER_KEY', candidate);
         setIsAuthenticated(true);
         setLoginError(null);
         setIsVerifying(false);
@@ -422,7 +422,6 @@ export default function App() {
 
   const handleLogout = async () => {
     await fetch(`${apiUrl}/logout`, { method: 'POST', credentials: 'include' }).catch(() => null);
-    localStorage.removeItem('BVELT_FOUNDER_KEY');
     setIsAuthenticated(false);
     setProspects([]);
     setStats(null);
@@ -974,16 +973,6 @@ export default function App() {
                   'Entrar'
                 )}
               </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  setLoginInputKey('FOUNDER_SERVICE_KEY_LOCAL');
-                }}
-                className="text-[11px] text-slate-400 hover:text-blue-400 text-center w-full transition-colors font-mono"
-              >
-                💡 Usar clave por defecto: <span className="text-blue-400 underline">FOUNDER_SERVICE_KEY_LOCAL</span>
-              </button>
             </form>
           </div>
         </div>
@@ -1028,24 +1017,32 @@ export default function App() {
       <div className="flex-1 overflow-y-auto px-5 py-4 space-y-5">
 
         {/* Connection or Run Errors */}
-        {(errorState || lastRunError) && (
-          <div className="bg-rose-950/20 border border-rose-900/40 rounded-2xl p-4 flex items-start gap-3">
-            <AlertTriangle className="w-5 h-5 text-rose-500 shrink-0 mt-0.5" />
-            <div className="flex-1 space-y-1">
-              <h4 className="text-xs font-bold text-rose-300">Aviso del Sistema</h4>
-              <p className="text-[11px] text-slate-400 leading-relaxed">{lastRunError || errorState}</p>
-              <button 
-                onClick={() => {
-                  setLoading(true);
-                  fetchTelemetry();
-                }}
-                className="text-[11px] font-bold text-blue-400 flex items-center gap-1 pt-1.5"
-              >
-                <RefreshCw className="w-3 h-3 text-blue-400 animate-spin" /> Actualizar Estado
-              </button>
+        {(errorState || lastRunError) && (() => {
+          const alertMsg = String(lastRunError || errorState);
+          const isOk = /ready|OK/i.test(alertMsg);
+          return (
+            <div className={`${isOk ? 'bg-emerald-950/20 border-emerald-900/40' : 'bg-rose-950/20 border-rose-900/40'} border rounded-2xl p-4 flex items-start gap-3`}>
+              {isOk ? (
+                <CheckCircle2 className="w-5 h-5 text-emerald-500 shrink-0 mt-0.5" />
+              ) : (
+                <AlertTriangle className="w-5 h-5 text-rose-500 shrink-0 mt-0.5" />
+              )}
+              <div className="flex-1 space-y-1">
+                <h4 className={`text-xs font-bold ${isOk ? 'text-emerald-300' : 'text-rose-300'}`}>Aviso del Sistema</h4>
+                <p className="text-[11px] text-slate-400 leading-relaxed">{alertMsg}</p>
+                <button 
+                  onClick={() => {
+                    setLoading(true);
+                    fetchTelemetry();
+                  }}
+                  className="text-[11px] font-bold text-blue-400 flex items-center gap-1 pt-1.5"
+                >
+                  <RefreshCw className="w-3 h-3 text-blue-400 animate-spin" /> Actualizar Estado
+                </button>
+              </div>
             </div>
-          </div>
-        )}
+          );
+        })()}
 
         {loading ? (
           <div className="flex flex-col items-center justify-center py-16 gap-3">
@@ -1785,57 +1782,64 @@ export default function App() {
             {/* TAB 3: MISSIONS SYSTEM (RADAR FUSION MAX) */}
             {mainTab === 'missions' && (
               <div className="space-y-4 font-mono">
-                {dailyMissions.map((dm, dIdx) => (
-                  <div key={dIdx} className="bg-slate-900/40 border border-slate-800 rounded-2xl p-4 space-y-3">
-                    <div className="flex items-center justify-between border-b border-slate-800 pb-2">
-                      <div className="flex items-center gap-2">
-                        <Target className="w-4 h-4 text-blue-400" />
-                        <h4 className="text-xs font-bold text-white uppercase">Misión Diaria ({dm.day})</h4>
-                      </div>
-                      <span className="px-2 py-0.5 rounded text-[9px] font-bold uppercase bg-emerald-950/60 border border-emerald-800 text-emerald-300">
-                        {dm.status}
-                      </span>
-                    </div>
-
-                    <div className="space-y-1 text-xs">
-                      <span className="text-[10px] text-slate-500 block uppercase">Objetivo Operativo:</span>
-                      <p className="text-slate-200">{dm.goal}</p>
-                    </div>
-
-                    <div className="space-y-2 pt-2">
-                      <div>
-                        <div className="flex justify-between text-[10px] text-slate-400 mb-1">
-                          <span>Prospectos Calificados:</span>
-                          <span className="text-blue-400 font-bold">{dm.qualified_count} / {dm.target_qualified}</span>
-                        </div>
-                        <div className="w-full bg-slate-950 h-2 rounded-full overflow-hidden border border-slate-800">
-                          <div 
-                            className="bg-blue-600 h-full rounded-full transition-all"
-                            style={{ width: `${Math.min(100, ((dm.qualified_count || 0) / (dm.target_qualified || 1)) * 100)}%` }}
-                          />
-                        </div>
-                      </div>
-
-                      <div>
-                        <div className="flex justify-between text-[10px] text-slate-400 mb-1">
-                          <span>Outreach / Mensajes Enviados:</span>
-                          <span className="text-emerald-400 font-bold">{dm.outreach_count} / {dm.target_outreach}</span>
-                        </div>
-                        <div className="w-full bg-slate-950 h-2 rounded-full overflow-hidden border border-slate-800">
-                          <div 
-                            className="bg-emerald-500 h-full rounded-full transition-all"
-                            style={{ width: `${Math.min(100, ((dm.outreach_count || 0) / (dm.target_outreach || 1)) * 100)}%` }}
-                          />
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-2 text-[10px] pt-1 text-slate-400 border-t border-slate-850">
-                      <div><strong className="text-slate-500 block">Mercados:</strong> {dm.markets}</div>
-                      <div><strong className="text-slate-500 block">Presupuesto:</strong> {dm.budget}</div>
-                    </div>
+                {dailyMissions.length === 0 ? (
+                  <div className="bg-slate-900/40 border border-slate-800 rounded-2xl p-8 text-center text-slate-400 text-xs">
+                    <Target className="w-8 h-8 text-slate-600 mx-auto mb-2" />
+                    <p>Aún no hay misión de hoy. Corre el Radar.</p>
                   </div>
-                ))}
+                ) : (
+                  dailyMissions.map((dm, dIdx) => (
+                    <div key={dIdx} className="bg-slate-900/40 border border-slate-800 rounded-2xl p-4 space-y-3">
+                      <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+                        <div className="flex items-center gap-2">
+                          <Target className="w-4 h-4 text-blue-400" />
+                          <h4 className="text-xs font-bold text-white uppercase">Misión Diaria ({dm.day})</h4>
+                        </div>
+                        <span className="px-2 py-0.5 rounded text-[9px] font-bold uppercase bg-emerald-950/60 border border-emerald-800 text-emerald-300">
+                          {dm.status}
+                        </span>
+                      </div>
+
+                      <div className="space-y-1 text-xs">
+                        <span className="text-[10px] text-slate-500 block uppercase">Objetivo Operativo:</span>
+                        <p className="text-slate-200">{dm.goal}</p>
+                      </div>
+
+                      <div className="space-y-2 pt-2">
+                        <div>
+                          <div className="flex justify-between text-[10px] text-slate-400 mb-1">
+                            <span>Prospectos Calificados:</span>
+                            <span className="text-blue-400 font-bold">{dm.qualified_count} / {dm.target_qualified}</span>
+                          </div>
+                          <div className="w-full bg-slate-950 h-2 rounded-full overflow-hidden border border-slate-800">
+                            <div 
+                              className="bg-blue-600 h-full rounded-full transition-all"
+                              style={{ width: `${Math.min(100, ((dm.qualified_count || 0) / (dm.target_qualified || 1)) * 100)}%` }}
+                            />
+                          </div>
+                        </div>
+
+                        <div>
+                          <div className="flex justify-between text-[10px] text-slate-400 mb-1">
+                            <span>Outreach / Mensajes Enviados:</span>
+                            <span className="text-emerald-400 font-bold">{dm.outreach_count} / {dm.target_outreach}</span>
+                          </div>
+                          <div className="w-full bg-slate-950 h-2 rounded-full overflow-hidden border border-slate-800">
+                            <div 
+                              className="bg-emerald-500 h-full rounded-full transition-all"
+                              style={{ width: `${Math.min(100, ((dm.outreach_count || 0) / (dm.target_outreach || 1)) * 100)}%` }}
+                            />
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2 text-[10px] pt-1 text-slate-400 border-t border-slate-850">
+                        <div><strong className="text-slate-500 block">Mercados:</strong> {dm.markets}</div>
+                        <div><strong className="text-slate-500 block">Presupuesto:</strong> {dm.budget}</div>
+                      </div>
+                    </div>
+                  ))
+                )}
               </div>
             )}
 

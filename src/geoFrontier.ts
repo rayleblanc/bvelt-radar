@@ -1,173 +1,373 @@
 import { GEO_PLACES, GeoPlace } from "./geoData";
 
-export function placeKey(place: any): string {
-  if (Array.isArray(place)) {
-    return `${place[0]}:${place[1]}`;
-  }
-  if (place && typeof place === "object") {
-    return `${place.name || place[0] || "Unknown"}:${place.region || place[1] || "US"}`;
-  }
-  return String(place || "unknown:US");
+export type D1Like = {
+  prepare(q: string): {
+    bind(...a: any[]): {
+      all(): Promise<{ results: any[] }>;
+      run(): Promise<any>;
+    };
+  };
+};
+
+// ---------------------------------------------------------------------------
+// Utilidades básicas
+// ---------------------------------------------------------------------------
+
+/** Clave única: `${nombre}|${región}|${país}` */
+export function placeKey(p: GeoPlace): string {
+  return `${p.name}|${p.region}|${p.country}`;
+}
+
+/** Radio de influencia (km) según población */
+export function radiusKm(pop: number): number {
+  return pop >= 500000 ? 25 : pop >= 100000 ? 15 : pop >= 25000 ? 10 : 7;
 }
 
 export function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const R = 6371;
   const dLat = (lat2 - lat1) * (Math.PI / 180);
   const dLon = (lon2 - lon1) * (Math.PI / 180);
-  const a = 
+  const a =
     Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos(lat1 * (Math.PI / 180)) * Math.cos(lat2 * (Math.PI / 180)) * 
-    Math.sin(dLon / 2) * Math.sin(dLon / 2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R * c;
+    Math.cos(lat1 * (Math.PI / 180)) * Math.cos(lat2 * (Math.PI / 180)) *
+      Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-export function radiusKm(center: [number, number], point: [number, number]): number {
-  return haversineKm(center[0], center[1], point[0], point[1]);
+function normalizeStr(str: string): string {
+  const s = (str || "").trim();
+  // Solo normaliza (NFD) si hay caracteres no ASCII: es más barato en CPU
+  const base = /[^\x00-\x7f]/.test(s) ? s.normalize("NFD").replace(/[\u0300-\u036f]/g, "") : s;
+  return base.toLowerCase().replace(/\./g, "").replace(/\s+/g, " ").trim();
 }
 
-export function findPlace(cityName: string): any | null {
-  if (!cityName) return null;
-  const clean = cityName.toLowerCase().trim();
-  for (const p of GEO_PLACES) {
-    const name = (p.name || p[0] || "").toLowerCase();
-    const region = (p.region || p[1] || "").toLowerCase();
-    const full = `${name}, ${region}`;
-    if (clean === name || clean === full || clean.startsWith(name)) {
-      return [p.name || p[0], p.region || p[1], p.country || p[2], p.lat, p.lon];
+const REGION_NAMES: Record<string, string> = {
+  alabama: "al", alaska: "ak", arizona: "az", arkansas: "ar", california: "ca", colorado: "co",
+  connecticut: "ct", delaware: "de", "district of columbia": "dc", florida: "fl", georgia: "ga",
+  hawaii: "hi", idaho: "id", illinois: "il", indiana: "in", iowa: "ia", kansas: "ks", kentucky: "ky",
+  louisiana: "la", maine: "me", maryland: "md", massachusetts: "ma", michigan: "mi", minnesota: "mn",
+  mississippi: "ms", missouri: "mo", montana: "mt", nebraska: "ne", nevada: "nv", "new hampshire": "nh",
+  "new jersey": "nj", "new mexico": "nm", "new york": "ny", "north carolina": "nc", "north dakota": "nd",
+  ohio: "oh", oklahoma: "ok", oregon: "or", pennsylvania: "pa", "rhode island": "ri",
+  "south carolina": "sc", "south dakota": "sd", tennessee: "tn", texas: "tx", utah: "ut", vermont: "vt",
+  virginia: "va", washington: "wa", "west virginia": "wv", wisconsin: "wi", wyoming: "wy",
+  alberta: "ab", "british columbia": "bc", manitoba: "mb", "new brunswick": "nb",
+  "newfoundland and labrador": "nl", newfoundland: "nl", "nova scotia": "ns", ontario: "on",
+  "prince edward island": "pe", quebec: "qc", saskatchewan: "sk", yukon: "yt",
+  "northwest territories": "nt", nunavut: "nu",
+};
+
+/** "Texas" / "TX" / "tx." -> "tx" */
+function regionCode(raw: string): string {
+  const n = normalizeStr(raw);
+  return REGION_NAMES[n] || n;
+}
+
+// Índice por nombre, construido una sola vez por isolate (lista ya ordenada por población desc)
+const BY_NAME = new Map<string, GeoPlace[]>();
+for (const p of GEO_PLACES) {
+  const k = normalizeStr(p.name);
+  const arr = BY_NAME.get(k);
+  if (arr) arr.push(p);
+  else BY_NAME.set(k, [p]);
+}
+const POP_DESC = (a: GeoPlace, b: GeoPlace) => (b.population || 0) - (a.population || 0);
+
+/**
+ * Busca un lugar a partir de "Austin, TX", "Austin, Texas" o "Austin".
+ * - Con región: solo devuelve coincidencias de esa región (si no hay, null; nunca otro estado).
+ * - Sin región: el de mayor población con ese nombre.
+ */
+export function findPlace(label: string): GeoPlace | null {
+  if (!label || typeof label !== "string") return null;
+  const parts = label.split(",").map((s) => s.trim()).filter(Boolean);
+  if (parts.length === 0) return null;
+  const name = normalizeStr(parts[0]);
+  const candidates = BY_NAME.get(name);
+
+  if (parts.length >= 2) {
+    const region = regionCode(parts[1]);
+    if (candidates) {
+      const hit = candidates.find((p) => normalizeStr(p.region) === region);
+      if (hit) return hit;
     }
+    return null;
   }
-  // Fallback to first place if not found
-  const first = GEO_PLACES[0];
-  if (first) {
-    return [first.name || first[0], first.region || first[1], first.country || first[2], first.lat, first.lon];
-  }
+  if (candidates && candidates.length > 0) return candidates[0];
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// Selección de objetivos
+// ---------------------------------------------------------------------------
+
+interface CoverageRecord {
+  tenant_id: string;
+  place_key: string;
+  trade: string;
+  last_searched_at?: string | null;
+  searches?: number;
+  candidates?: number;
+  qualified?: number;
+  replies?: number;
+  wins?: number;
+}
+
+interface Cand {
+  place: GeoPlace;
+  trade: string;
+  score: number;
+  prior: number;
+  isNew: boolean;
+  dist: number; // km al centro (solo tenant)
+}
+
+const DAY_MS = 86400000;
+
+function withTuple(p: GeoPlace): GeoPlace {
+  // El worker lee place[0], place[1], place[2]
+  return Object.assign({}, p, { 0: p.name, 1: p.region, 2: p.country }) as GeoPlace;
+}
+
 export async function pickTargets(
-  db: any,
-  options: {
-    tenantId?: string;
+  db: D1Like,
+  o: {
+    tenantId: string;
     trades: string[];
-    count?: number;
+    count: number;
     centerLabel?: string;
     serviceRadiusKm?: number;
     countries?: string[];
   }
-): Promise<{ place: any; trade: string; why: string }[]> {
-  const tenantId = options.tenantId || "founder";
-  const trades = options.trades && options.trades.length > 0 ? options.trades : ["plumber", "electrician"];
-  const count = options.count || 10;
-  const countries = options.countries || ["US", "CA"];
+): Promise<{ place: GeoPlace; trade: string; why: string }[]> {
+  const count = Math.max(1, Math.min(30, o.count || 5));
+  const trades = (o.trades && o.trades.length > 0 ? o.trades : ["general"])
+    .map((t) => String(t).trim())
+    .filter(Boolean);
+  const countries = (o.countries && o.countries.length > 0 ? o.countries : ["US", "CA"]).map((c) => c.toUpperCase());
+  const isTenantArea = !!o.centerLabel;
 
-  let candidatePlaces = GEO_PLACES.filter(p => countries.includes(p.country || p[2] as string));
+  // 1) Centro del tenant: si se pidió y no se puede resolver, NO devolvemos nada
+  //    (el llamador usa su comportamiento anterior en vez de buscar en todo el país).
+  let center: GeoPlace | null = null;
+  if (isTenantArea) {
+    center = findPlace(o.centerLabel as string);
+    if (!center) return [];
+  }
+  const maxDist = o.serviceRadiusKm ?? 60;
 
-  if (options.centerLabel) {
-    const center = GEO_PLACES.find(p => 
-      (p.name || p[0] || "").toLowerCase() === options.centerLabel!.toLowerCase() ||
-      `${p.name}, ${p.region}`.toLowerCase() === options.centerLabel!.toLowerCase()
-    );
-    if (center && options.serviceRadiusKm) {
-      candidatePlaces = candidatePlaces.filter(p => {
-        const dist = haversineKm(center.lat, center.lon, p.lat, p.lon);
-        return dist <= (options.serviceRadiusKm || 60);
-      });
+  // 2) Historial (una sola consulta)
+  let rows: CoverageRecord[] = [];
+  try {
+    if (db && typeof db.prepare === "function") {
+      const res = await db.prepare("SELECT * FROM geo_coverage WHERE tenant_id=?").bind(o.tenantId).all();
+      if (res && Array.isArray(res.results)) rows = res.results;
     }
+  } catch {
+    rows = [];
   }
 
-  if (candidatePlaces.length === 0) {
-    candidatePlaces = [...GEO_PLACES];
-  }
+  const now = Date.now();
+  const hist = new Map<string, CoverageRecord>();
+  const regionStats = new Map<string, { q: number; c: number }>();
+  const recentByTrade = new Map<string, { lat: number; lon: number; r: number }[]>();
+  const keyToPlace = new Map<string, GeoPlace>();
 
-  let coverageMap = new Map<string, any>();
-  if (db && typeof db.prepare === "function") {
-    try {
-      const rows = await db.prepare("SELECT * FROM geo_coverage WHERE tenant_id = ?").bind(tenantId).all();
-      if (rows && rows.results) {
-        for (const r of rows.results) {
-          coverageMap.set(`${r.place_key}:${r.trade}`, r);
+  for (const row of rows) {
+    const trade = (row.trade || "").toLowerCase();
+    hist.set(`${row.place_key}::${trade}`, row);
+    const region = ((row.place_key || "").split("|")[1] || "").toLowerCase();
+    const rk = `${trade}::${region}`;
+    const st = regionStats.get(rk) || { q: 0, c: 0 };
+    st.q += row.qualified || 0;
+    st.c += row.candidates || 0;
+    regionStats.set(rk, st);
+
+    if (row.last_searched_at) {
+      const days = (now - new Date(row.last_searched_at).getTime()) / DAY_MS;
+      if (days < 30) {
+        const nm = (row.place_key || "").split("|");
+        const list = BY_NAME.get(normalizeStr(nm[0] || ""));
+        const pl = list ? list.find((p) => p.region === nm[1] && p.country === nm[2]) : undefined;
+        if (pl) {
+          keyToPlace.set(row.place_key, pl);
+          const arr = recentByTrade.get(trade) || [];
+          arr.push({ lat: pl.lat, lon: pl.lon, r: radiusKm(pl.population || 0) });
+          recentByTrade.set(trade, arr);
         }
       }
-    } catch (e) {
-      // table might not exist yet or query failed
     }
   }
 
-  const picks: { place: any; trade: string; why: string }[] = [];
+  // 3) Pool de lugares
+  let pool: GeoPlace[];
+  if (center) {
+    const dLat = maxDist / 111 + 0.05;
+    pool = [];
+    for (const p of GEO_PLACES) {
+      if (!countries.includes(p.country)) continue;
+      if (Math.abs(p.lat - center.lat) > dLat) continue; // descarte barato antes de haversine
+      if (haversineKm(center.lat, center.lon, p.lat, p.lon) <= maxDist) pool.push(p);
+    }
+  } else {
+    // Nacional: top 120 por población + 80 aleatorios de las ciudades de 15.000+ (acota el CPU)
+    const eligible = GEO_PLACES.filter((p) => countries.includes(p.country));
+    const top = eligible.slice(0, 120);
+    const mid = eligible.slice(120).filter((p) => (p.population || 0) >= 15000);
+    const extra: GeoPlace[] = [];
+    for (let i = 0; i < 80 && mid.length > 0; i++) {
+      extra.push(mid[Math.floor(Math.random() * mid.length)]);
+    }
+    pool = Array.from(new Set([...top, ...extra]));
+  }
+  if (pool.length === 0) return [];
 
-  // Sort candidate places by least searches / oldest last_searched_at if coverage exists
-  const scoredPlaces = candidatePlaces.map(p => {
-    const placeArr = [p.name || p[0], p.region || p[1], p.country || p[2], p.lat, p.lon];
-    const pKey = placeKey(placeArr);
-    let totalSearches = 0;
-    let oldestDate = "";
+  // 4) Candidatos (lugar, oficio) con score
+  const cands: Cand[] = [];
+  for (const place of pool) {
+    const pk = placeKey(place);
+    const pop = Math.max(place.population || 1000, 100);
+    const region = place.region.toLowerCase();
+    const dist = center ? haversineKm(center.lat, center.lon, place.lat, place.lon) : 0;
     for (const trade of trades) {
-      const cov = coverageMap.get(`${pKey}:${trade}`);
-      if (cov) {
-        totalSearches += (cov.searches || 0);
-        if (!oldestDate || (cov.last_searched_at && cov.last_searched_at < oldestDate)) {
-          oldestDate = cov.last_searched_at;
+      const t = trade.toLowerCase();
+      const h = hist.get(`${pk}::${t}`);
+      let fresh = 1;
+      let isNew = true;
+      if (h && h.last_searched_at) {
+        isNew = false;
+        const days = (now - new Date(h.last_searched_at).getTime()) / DAY_MS;
+        if (days < 30) continue;
+        fresh = Math.min(1, days / 30);
+      }
+      // No repetir zonas cubiertas hace <30 días con el mismo oficio
+      const recents = recentByTrade.get(t);
+      if (recents) {
+        let near = false;
+        for (const r of recents) {
+          if (Math.abs(r.lat - place.lat) > 0.3) continue; // 0.3° ~ 33 km > radio máximo
+          if (haversineKm(place.lat, place.lon, r.lat, r.lon) < r.r) {
+            near = true;
+            break;
+          }
+        }
+        if (near) continue;
+      }
+      const st = regionStats.get(`${t}::${region}`) || { q: 0, c: 0 };
+      const prior = (st.q + 1) / (st.c + 8);
+      let score = Math.log(pop) * fresh * (0.5 + prior);
+      if (center) score *= 1 / (1 + dist / 30); // más cerca de la base = mejor
+      cands.push({ place, trade, score, prior, isNew, dist });
+    }
+  }
+  if (cands.length === 0) return [];
+  cands.sort((a, b) => b.score - a.score);
+
+  // 5) Selección
+  const out: { place: GeoPlace; trade: string; why: string }[] = [];
+  const regionCount = new Map<string, number>();
+  const tradeCount = new Map<string, number>();
+  const chosen: { lat: number; lon: number; r: number }[] = [];
+  const chosenKeys = new Set<string>();
+  const regionCap = isTenantArea ? count : 2;
+  const tradeCap = isTenantArea ? count : Math.ceil(count / Math.min(3, trades.length));
+
+  const allowed = (c: Cand): boolean => {
+    const key = `${placeKey(c.place)}::${c.trade.toLowerCase()}`;
+    if (chosenKeys.has(key)) return false;
+    if ((regionCount.get(c.place.region) || 0) >= regionCap) return false;
+    if ((tradeCount.get(c.trade.toLowerCase()) || 0) >= tradeCap) return false;
+    if (!isTenantArea) {
+      // Founder: un lugar por zona y por corrida (evita NYC + Brooklyn)
+      for (const ch of chosen) {
+        if (Math.abs(ch.lat - c.place.lat) > 0.3) continue;
+        if (haversineKm(c.place.lat, c.place.lon, ch.lat, ch.lon) < Math.max(ch.r, radiusKm(c.place.population || 0))) {
+          return false;
         }
       }
     }
-    return { place: placeArr, totalSearches, oldestDate, raw: p };
-  });
+    return true;
+  };
 
-  scoredPlaces.sort((a, b) => {
-    if (a.totalSearches !== b.totalSearches) {
-      return a.totalSearches - b.totalSearches;
+  const take = (c: Cand, why: string) => {
+    out.push({ place: withTuple(c.place), trade: c.trade, why });
+    chosenKeys.add(`${placeKey(c.place)}::${c.trade.toLowerCase()}`);
+    regionCount.set(c.place.region, (regionCount.get(c.place.region) || 0) + 1);
+    tradeCount.set(c.trade.toLowerCase(), (tradeCount.get(c.trade.toLowerCase()) || 0) + 1);
+    chosen.push({ lat: c.place.lat, lon: c.place.lon, r: radiusKm(c.place.population || 0) });
+  };
+
+  const describe = (c: Cand): string => {
+    if (isTenantArea) return `cerca de tu base (${Math.round(c.dist)} km)`;
+    if (c.prior > 0.2) return `alto rendimiento en ${c.place.region}`;
+    if (c.isNew) return "nunca explorada";
+    return `refresco en ${c.place.region}`;
+  };
+
+  const neverList = isTenantArea ? [] : cands.filter((c) => c.isNew && (c.place.population || 0) >= 20000);
+
+  let cursor = 0;
+  while (out.length < count) {
+    const turn = out.length + 1;
+    let picked = false;
+
+    // Cada 4º pick (solo founder): exploración aleatoria entre lugares nunca buscados
+    if (!isTenantArea && turn % 4 === 0 && neverList.length > 0) {
+      for (let tries = 0; tries < 30; tries++) {
+        const c = neverList[Math.floor(Math.random() * neverList.length)];
+        if (allowed(c)) {
+          take(c, "exploración");
+          picked = true;
+          break;
+        }
+      }
     }
-    return (a.oldestDate || "").localeCompare(b.oldestDate || "");
-  });
-
-  for (let i = 0; i < count; i++) {
-    const sp = scoredPlaces[i % scoredPlaces.length];
-    const trade = trades[i % trades.length];
-    const pKey = placeKey(sp.place);
-    const cov = coverageMap.get(`${pKey}:${trade}`);
-    const why = cov ? `Searched ${cov.searches} times, last at ${cov.last_searched_at || 'never'}` : 'Fresh high-priority frontier target';
-
-    picks.push({
-      place: sp.place,
-      trade,
-      why
-    });
+    if (!picked) {
+      while (cursor < cands.length) {
+        const c = cands[cursor++];
+        if (allowed(c)) {
+          take(c, describe(c));
+          picked = true;
+          break;
+        }
+      }
+    }
+    if (!picked) break;
   }
 
-  return picks;
+  return out;
 }
 
+/** Registra o actualiza una búsqueda en geo_coverage (oficio siempre en minúsculas). */
 export async function markSearched(
-  db: any,
+  db: D1Like,
   tenantId: string,
-  place: any,
+  place: GeoPlace,
   trade: string,
-  stats: { candidates: number; qualified: number }
+  s: { candidates: number; qualified: number }
 ): Promise<void> {
-  if (!db || !place || !trade) return;
-  const pKey = placeKey(place);
-  const now = new Date().toISOString();
-  const tradeLower = trade.toLowerCase();
-
   try {
-    const existing = await db.prepare(
-      "SELECT * FROM geo_coverage WHERE tenant_id = ? AND place_key = ? AND trade = ?"
-    ).bind(tenantId, pKey, tradeLower).first();
-
-    if (existing) {
-      await db.prepare(`
-        UPDATE geo_coverage 
-        SET last_searched_at = ?, searches = searches + 1, candidates = candidates + ?, qualified = qualified + ?
-        WHERE tenant_id = ? AND place_key = ? AND trade = ?
-      `).bind(now, stats.candidates, stats.qualified, tenantId, pKey, tradeLower).run();
-    } else {
-      await db.prepare(`
-        INSERT INTO geo_coverage (tenant_id, place_key, trade, last_searched_at, searches, candidates, qualified, replies, wins)
-        VALUES (?, ?, ?, ?, 1, ?, ?, 0, 0)
-      `).bind(tenantId, pKey, tradeLower, now, stats.candidates, stats.qualified).run();
-    }
-  } catch (e) {
-    console.warn("[geoFrontier] markSearched error:", e);
+    if (!db || typeof db.prepare !== "function") return;
+    await db
+      .prepare(
+        `INSERT INTO geo_coverage (tenant_id, place_key, trade, last_searched_at, searches, candidates, qualified, replies, wins)
+         VALUES (?, ?, ?, ?, 1, ?, ?, 0, 0)
+         ON CONFLICT(tenant_id, place_key, trade) DO UPDATE SET
+           last_searched_at = excluded.last_searched_at,
+           searches = searches + 1,
+           candidates = candidates + excluded.candidates,
+           qualified = qualified + excluded.qualified`
+      )
+      .bind(
+        tenantId,
+        placeKey(place),
+        String(trade || "").toLowerCase(),
+        new Date().toISOString(),
+        Math.max(0, s.candidates || 0),
+        Math.max(0, s.qualified || 0)
+      )
+      .run();
+  } catch {
+    // si geo_coverage no existe, no lanza error
   }
 }

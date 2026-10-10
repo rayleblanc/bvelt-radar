@@ -112,9 +112,9 @@ export interface Env {
 
 export function getBudgetLimit(unitType: string): number {
   switch (unitType) {
-    case 'discovery_units': return 30;
-    case 'enrichment_units': return 20;
-    case 'ai_units': return 10;
+    case 'discovery_units': return 45;
+    case 'enrichment_units': return 40;
+    case 'ai_units': return 15;
     case 'hunter_units': return 8;
     case 'outreach_units': return 3;
     case 'finalize_units': return 10;
@@ -859,12 +859,13 @@ export default {
       if ((path === "/prospects" || path === "/api/prospects") && method === "GET") {
         const limit = url.searchParams.get("limit") || "100";
         const status = url.searchParams.get("status");
+        const tenantId = url.searchParams.get("tenant_id") || "founder";
         
-        let queryStr = "SELECT * FROM prospects";
-        const params: any[] = [];
+        let queryStr = "SELECT * FROM prospects WHERE COALESCE(tenant_id,'founder') = ?";
+        const params: any[] = [tenantId];
         
         if (status) {
-          queryStr += " WHERE status = ?";
+          queryStr += " AND status = ?";
           params.push(status);
         }
         
@@ -2711,16 +2712,21 @@ export async function startProspectingRun(
   const tId = tenantId || "founder";
   if (!force) {
     try {
-      const existingRun = await db.prepare("SELECT * FROM runs WHERE day = ? AND mode = ? AND (tenant_id = ? OR (? IS NULL AND tenant_id IS NULL))").bind(today, mode, tenantId, tenantId).first() as any;
+      const existingRun = await db.prepare("SELECT id, created_at FROM runs WHERE day = ? AND mode = ? AND COALESCE(tenant_id,'founder') = ? ORDER BY created_at DESC LIMIT 1").bind(today, mode, tId).first() as any;
       if (existingRun) {
-        console.log(`[startProspectingRun] Run already exists today for mode ${mode}. Returning existing run ID: ${existingRun.id}`);
-        return {
-          run_id: existingRun.id,
-          jobs_enqueued: 0,
-          active_cities: [],
-          active_trades: [],
-          diagnostics: { reason: "Run already exists today (idempotent skip)." }
-        };
+        const createdAtMs = existingRun.created_at ? new Date(existingRun.created_at).getTime() : 0;
+        const diffMs = Date.now() - createdAtMs;
+        const fourHoursMs = 4 * 60 * 60 * 1000;
+        if (createdAtMs > 0 && diffMs < fourHoursMs) {
+          console.log(`[startProspectingRun] Run already exists today for mode ${mode}. Returning existing run ID: ${existingRun.id}`);
+          return {
+            run_id: existingRun.id,
+            jobs_enqueued: 0,
+            active_cities: [],
+            active_trades: [],
+            diagnostics: { reason: "Run already exists today (idempotent skip)." }
+          };
+        }
       }
     } catch (e) {
       console.error("[startProspectingRun] Error checking duplicate runs:", e);
@@ -2740,7 +2746,7 @@ export async function startProspectingRun(
   let jobsEnqueued = 0;
   const hasOverrides = !!(overrides && (overrides.cities || overrides.trades || overrides.countries || overrides.languages || overrides.min_score));
 
-  if (mode !== "tenant" && pairs && pairs.length > 0 && !hasOverrides) {
+  if (pairs && pairs.length > 0 && !hasOverrides) {
     for (const pair of pairs) {
       const jobId = `discovery_${runId}_${pair.city.replace(/[^a-z0-9]/gi, '_')}_${pair.trade.replace(/[^a-z0-9]/gi, '_')}`.toLowerCase();
       await enqueueJob(env, {
@@ -2786,6 +2792,40 @@ export async function startProspectingRun(
       reason: `Enqueued ${jobsEnqueued} autonomous discovery jobs across ${activeCities.join(', ')} for ${activeTrades.join(', ')}`
     }
   };
+}
+
+export function isNonBusinessEntity(name: string, website: string | undefined, mode: string): boolean {
+  if (website) {
+    try {
+      const parsedUrl = new URL(website.startsWith("http") ? website : `http://${website}`);
+      const hostname = parsedUrl.hostname.toLowerCase();
+      if (hostname.endsWith(".edu") || hostname.endsWith(".gov")) {
+        return true;
+      }
+    } catch {
+      const lowerWeb = website.toLowerCase();
+      if (lowerWeb.endsWith(".edu") || lowerWeb.endsWith(".gov") || lowerWeb.includes(".edu/") || lowerWeb.includes(".gov/")) {
+        return true;
+      }
+    }
+  }
+
+  if (name) {
+    const lowerName = name.toLowerCase();
+    const commonPattern = /\b(extension|university|college|school district|county|city of|library|museum|foundation|chamber of commerce)\b/;
+    if (commonPattern.test(lowerName)) {
+      return true;
+    }
+
+    if (mode !== "tenant") {
+      const nonTenantPattern = /\b(church|ministry|association|hoa|homeowners)\b/;
+      if (nonTenantPattern.test(lowerName)) {
+        return true;
+      }
+    }
+  }
+
+  return false;
 }
 
 /**
@@ -2838,7 +2878,7 @@ export async function classifyWithWorkersAI(
     const reason = String(parsed.reason || "");
 
     return {
-      ok: realLocal && matchesTrade,
+      ok: realLocal,
       reason: reason || "ai_classification"
     };
   } catch (e: any) {
@@ -2922,13 +2962,6 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
   const remainingBudget = await getRemainingBudget(env.RADAR_DB, tenantId, 'discovery_units');
   if (remainingBudget <= 0) {
     console.log(`[Job: discovery] 0 discovery units available for tenant: ${tenantId}`);
-    const place = findPlace(city);
-    if (place) {
-      await markSearched(env.RADAR_DB, job.tenant_id || "founder", place, trade, {
-        candidates: scraped.length,
-        qualified: 0
-      });
-    }
     return;
   }
 
@@ -2954,7 +2987,7 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
     return 0;
   });
 
-  const perJobCap = Math.max(3, Math.min(6, Math.floor(remainingBudget / 4)));
+  const perJobCap = 3;
   const bounded = ranked.slice(0, Math.min(remainingBudget, perJobCap));
   let enqueuedEnrich = 0;
   let filteredCount = 0;
@@ -2972,14 +3005,14 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
     const isMock = (candidate.email && candidate.email.toLowerCase().includes("example.com")) ||
                    (candidate.website && candidate.website.toLowerCase().includes("example.com")) ||
                    (candidate.name && (candidate.name.toLowerCase().includes("test business") || candidate.name.toLowerCase().includes("test contractor")));
-    if (isMock || isHardRejectedChain(candidate.name)) {
+    if (isMock || isHardRejectedChain(candidate.name) || isNonBusinessEntity(candidate.name, candidate.website, job.mode)) {
       await releaseBudget(env.RADAR_DB, tenantId, 'discovery_units', 1);
       filteredCount++;
       continue;
     }
 
-    // 1. Hard-rejected chain check
-    if (isHardRejectedChain(candidate.name)) {
+    // 1. Hard-rejected chain & non-business entity check
+    if (isHardRejectedChain(candidate.name) || isNonBusinessEntity(candidate.name, candidate.website, job.mode)) {
       await releaseBudget(env.RADAR_DB, tenantId, 'discovery_units', 1);
       filteredCount++;
       continue;
@@ -3358,6 +3391,7 @@ async function handleEnrichJob(job: RadarJobMessage, env: Env): Promise<void> {
  * 3. SCORE JOB: Computes 0-100 multi-factor score and Bvelt angle
  */
 async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
+  const isTenant = job.mode === "tenant";
   const { prospect_id, overrides, permits_90d: payloadPermits } = job.payload;
   const prospect = await env.RADAR_DB.prepare("SELECT * FROM prospects WHERE id = ?").bind(prospect_id).first() as any;
   if (!prospect) return;
@@ -3365,7 +3399,7 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
   if (['approved', 'drafted', 'notified', 'sent'].includes(prospect.status)) return;
 
   const dayOfYear = getDayOfYear(new Date());
-  const { missionConfig } = await getPriorityTargets(dayOfYear, env, job.mode, job.tenant_id, overrides);
+  const { missionConfig } = await getPriorityTargets(dayOfYear, env, job.mode, job.tenant_id, overrides, true);
   const learningStats = await getLearningStats(env.RADAR_DB);
 
   let parsedMeta: any = {};
@@ -3504,8 +3538,11 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
   // Determine commercial value band based on total score
   const valueBand = finalScore >= 80 ? "premium" : finalScore >= 60 ? "high" : finalScore >= 45 ? "medium" : "low";
 
-  // Rule: Do not set QUALIFIED if score < 45 OR no email
-  if (finalScore < 45 || !prospect.email) {
+  const isDisqualified = isTenant
+    ? (finalScore < (Number(overrides?.min_score) || 40) || (!prospect.email && !prospect.phone))
+    : (finalScore < 45 || !prospect.email);
+
+  if (isDisqualified) {
     await env.RADAR_DB.prepare(`
       UPDATE prospects
       SET score = ?, opportunity_score = ?, confidence_score = ?, evidence_json = ?, commercial_value_band = ?, pain_hypothesis_json = ?, signals_json = ?, score_breakdown = ?, variant_id = ?, bvelt_angle = ?,
@@ -3645,6 +3682,11 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
     await env.RADAR_DB.prepare("UPDATE daily_missions SET qualified_count = qualified_count + 1 WHERE tenant_id = ? AND day = ?").bind(tenantKey, todayStr).run();
   } catch (e) {}
 
+  if (isTenant) {
+    await env.RADAR_DB.prepare("UPDATE prospects SET status = 'qualified' WHERE id = ?").bind(prospect_id).run();
+    return;
+  }
+
   // --- HOT LEAD INTERRUPT TRIGGERS ---
   const detectedCount = evidenceItems.filter((e: any) => e.value === 'detected').length;
   // Bvelt Fit Score
@@ -3712,6 +3754,7 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
  * 4. APPROVE JOB: Evaluates target threshold and enqueues outreach
  */
 async function handleApproveJob(job: RadarJobMessage, env: Env): Promise<void> {
+  if (job.mode === "tenant") return;
   const { prospect_id, overrides } = job.payload;
   const prospect = await env.RADAR_DB.prepare("SELECT * FROM prospects WHERE id = ?").bind(prospect_id).first() as any;
   if (!prospect) return;
@@ -3749,6 +3792,7 @@ async function handleApproveJob(job: RadarJobMessage, env: Env): Promise<void> {
  * 5. OUTREACH JOB: Generates AI copywriting draft and dispatches Telegram notification
  */
 async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> {
+  if (job.mode === "tenant") return;
   const { prospect_id, overrides } = job.payload;
   const prospect = await env.RADAR_DB.prepare("SELECT * FROM prospects WHERE id = ?").bind(prospect_id).first() as any;
   if (!prospect) return;
@@ -3767,7 +3811,7 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
   if (prospect.draft_body && ['queued', 'notified', 'sent'].includes(prospect.status)) return;
 
   const dayOfYear = getDayOfYear(new Date());
-  const { missionConfig } = await getPriorityTargets(dayOfYear, env, job.mode, job.tenant_id, overrides);
+  const { missionConfig } = await getPriorityTargets(dayOfYear, env, job.mode, job.tenant_id, overrides, true);
   const primaryLanguage = (missionConfig.languages && missionConfig.languages[0]) || "en";
 
   const tenantId = job.tenant_id || "founder";
@@ -4498,7 +4542,8 @@ export async function getPriorityTargets(
     countries: string | null;
     languages: string | null;
     min_score: string | null;
-  }
+  },
+  skipPicks?: boolean
 ): Promise<{ activeCities: string[]; activeTrades: string[]; missionConfig: MissionConfig; pairs?: { city: string; trade: string }[] }> {
   const config: MissionConfig = JSON.parse(JSON.stringify(DEFAULT_FOUNDER_MISSION));
 
@@ -4517,9 +4562,14 @@ export async function getPriorityTargets(
           
           // If niches are empty, use expandTenantIcp or fallback to TENANT_TARGET_MAP
           if (config.niches.length === 0) {
-            const expanded = await expandTenantIcp(env, tenantConfig);
-            if (expanded && expanded.segments && expanded.segments.length > 0) {
-              config.niches = expanded.segments.map(s => s.label);
+            if (!skipPicks) {
+              const expanded = await expandTenantIcp(env, tenantConfig);
+              if (expanded && expanded.segments && expanded.segments.length > 0) {
+                config.niches = expanded.segments.map(s => s.label);
+              } else if (tenantConfig.niche) {
+                const trade = tenantConfig.niche.toLowerCase();
+                config.niches = TENANT_TARGET_MAP[trade] || ["property management", "real estate"];
+              }
             } else if (tenantConfig.niche) {
               const trade = tenantConfig.niche.toLowerCase();
               config.niches = TENANT_TARGET_MAP[trade] || ["property management", "real estate"];
@@ -4531,7 +4581,7 @@ export async function getPriorityTargets(
 
         const citiesList = JSON.parse(tenantConfig.cities_json || '[]');
         const centerLabel = citiesList[0] || null;
-        if (centerLabel) {
+        if (centerLabel && !skipPicks) {
           try {
             tenantPicks = await pickTargets(env.RADAR_DB, {
               tenantId,
@@ -4659,7 +4709,7 @@ export async function getPriorityTargets(
 
   // SOLO rama founder y sin overrides.cities: pickTargets
   let picks: { place: any; trade: string; why: string }[] = [];
-  if (mode === "founder" && !(overrides && overrides.cities)) {
+  if (!skipPicks && mode === "founder" && !(overrides && overrides.cities)) {
     try {
       picks = await pickTargets(env.RADAR_DB, {
         tenantId: "founder",
@@ -4691,10 +4741,12 @@ export async function getPriorityTargets(
   }
 
   let weatherAlerts: WeatherAlert[] = [];
-  try {
-    weatherAlerts = await getAlerts(extractedStates);
-  } catch (e) {
-    console.warn("[Weather Signals] getAlerts warning:", e);
+  if (!skipPicks) {
+    try {
+      weatherAlerts = await getAlerts(extractedStates);
+    } catch (e) {
+      console.warn("[Weather Signals] getAlerts warning:", e);
+    }
   }
 
   // Prioritize city+trade combinations whose county/city appears in areaDesc
@@ -7021,7 +7073,7 @@ export async function sendOrQueueOutreach(prospect: any, runId: string, env: Env
 
       try {
         const todayStr = new Date().toISOString().split('T')[0];
-        await env.RADAR_DB.prepare("UPDATE daily_missions SET outreach_count = outreach_count + 1 WHERE day = ?").bind(todayStr).run();
+        await env.RADAR_DB.prepare("UPDATE daily_missions SET outreach_count = outreach_count + 1 WHERE tenant_id = ? AND day = ?").bind(prospect.tenant_id || "founder", todayStr).run();
       } catch (e) {}
 
       await env.RADAR_DB.prepare(`
@@ -7107,7 +7159,7 @@ export async function sendOrQueueOutreach(prospect: any, runId: string, env: Env
       // Increment outreach_count for today's daily mission
       try {
         const todayStr = new Date().toISOString().split('T')[0];
-        await env.RADAR_DB.prepare("UPDATE daily_missions SET outreach_count = outreach_count + 1 WHERE day = ?").bind(todayStr).run();
+        await env.RADAR_DB.prepare("UPDATE daily_missions SET outreach_count = outreach_count + 1 WHERE tenant_id = ? AND day = ?").bind(prospect.tenant_id || "founder", todayStr).run();
       } catch (e) {}
 
       await env.RADAR_DB.prepare(`

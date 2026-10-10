@@ -125,13 +125,24 @@ export async function fetchPermitContractors(
     url.searchParams.set('$limit', '2000');
     url.searchParams.set('$order', 'issued_date DESC');
     url.searchParams.set('$where', `issued_date > '${dateFormatted}T00:00:00'`);
+    url.searchParams.set('$select', 'contractor_company_name,contractor_phone,contractor_trade,contractor_city,contractor_zip,issued_date');
 
-    const response = await fetch(url.toString(), {
+    let response = await fetch(url.toString(), {
       signal: controller.signal,
       headers: {
         Accept: 'application/json'
       }
     });
+
+    if (!response.ok) {
+      url.searchParams.delete('$select');
+      response = await fetch(url.toString(), {
+        signal: controller.signal,
+        headers: {
+          Accept: 'application/json'
+        }
+      });
+    }
 
     if (!response.ok) {
       return [];
