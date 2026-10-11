@@ -990,8 +990,8 @@ export default {
                           contactability_score, timing_score, evidence_score, signal_freshness_score,
                           expected_value, decision_state, why_now_json, tenant_id, status
                    FROM prospects
-                   WHERE COALESCE(score, opportunity_score, 0) >= 45
-                     AND status NOT IN ('discarded','suppressed','blocked')`;
+                   WHERE COALESCE(score, opportunity_score, 0) >= 40
+                     AND status NOT IN ('discarded','suppressed','blocked','disqualified')`;
           const binds: any[] = [];
           if (tenantFilter) {
             q += ` AND COALESCE(tenant_id,'founder') = ?`;
@@ -1908,7 +1908,56 @@ export default {
   // Daily Scheduled Trigger (Cron: "0 12 * * *")
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
     console.log(`[Radar Cron] Scheduled trigger initiated at ${new Date().toISOString()}`);
-    await startProspectingRun(env, "founder", null);
+    const run = startProspectingRun(env, "founder", null);
+    // After discovery wave, repair opportunities table from scored prospects (guerrilla self-heal)
+    const heal = (async () => {
+      try {
+        await run;
+        await ensureOpportunitiesSchema(env.RADAR_DB);
+        const rows = await env.RADAR_DB.prepare(`
+          SELECT id, name, city, trade, score, opportunity_score, tenant_id, expected_value,
+                 fit_score, intent_score, pain_score, decision_state, why_now_json
+          FROM prospects
+          WHERE COALESCE(score, opportunity_score, 0) >= 45
+            AND status NOT IN ('discarded','suppressed','blocked','disqualified')
+          ORDER BY COALESCE(score, opportunity_score, 0) DESC LIMIT 80
+        `).all();
+        const nowIso = new Date().toISOString();
+        let n = 0;
+        for (const p of (rows.results || []) as any[]) {
+          const oppId = `opp_${p.id}`;
+          const exists = await env.RADAR_DB.prepare("SELECT id FROM opportunities WHERE id = ?").bind(oppId).first();
+          if (exists) continue;
+          const stratScore = Math.round(p.opportunity_score || p.score || 50);
+          const priority = stratScore >= 80 ? "high" : stratScore >= 55 ? "medium" : "low";
+          const title = `${p.name} — ${p.trade || "service"} (${p.city || ""})`;
+          await env.RADAR_DB.prepare(`
+            INSERT INTO opportunities (
+              id, prospect_id, tenant_id, title, strategic_score, fit_score, intent_score,
+              pain_score, ability_to_pay_score, contactability_score, timing_score,
+              evidence_score, signal_freshness_score, expected_value, decision_state,
+              why_now_json, priority_tier, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO NOTHING
+          `).bind(
+            oppId, p.id, p.tenant_id || "founder", title, stratScore,
+            p.fit_score || stratScore, p.intent_score || Math.round(stratScore * 0.8),
+            p.pain_score || 50, 60, 70, 50, 50, 80,
+            p.expected_value || 0, p.decision_state || "identified",
+            p.why_now_json || null, priority, nowIso, nowIso
+          ).run();
+          n++;
+        }
+        console.log(`[Radar Cron] Self-heal opportunities created: ${n}`);
+      } catch (e) {
+        console.warn("[Radar Cron] opportunity heal failed:", e);
+      }
+    })();
+    if (ctx && typeof ctx.waitUntil === "function") {
+      ctx.waitUntil(heal);
+    } else {
+      await heal;
+    }
   },
 
   // Cloudflare Queues Consumer Handler (Infrastructure Safe & Idempotent)
@@ -4222,9 +4271,12 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
   // Determine commercial value band based on total score
   const valueBand = finalScore >= 80 ? "premium" : finalScore >= 60 ? "high" : finalScore >= 45 ? "medium" : "low";
 
-  const isDisqualified = isTenant
-    ? (finalScore < (Number(overrides?.min_score) || 40) || (!prospect.email && !prospect.phone))
-    : (finalScore < 45 || !prospect.email);
+  // Contactable = email OR phone (WhatsApp-first businesses are real leads)
+  const contactable = !!(prospect.email || prospect.phone);
+  const minScoreGate = isTenant
+    ? (Number(overrides?.min_score) || Number(missionConfig?.min_score) || 40)
+    : 45;
+  const isDisqualified = finalScore < minScoreGate || !contactable;
 
   if (isDisqualified) {
     await env.RADAR_DB.prepare(`
@@ -4292,13 +4344,15 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
     prospect_id
   ).run();
 
-  // Opportunity Intelligence registration
+  // Opportunity Intelligence — core row first (signals/actions never block the opportunity)
   try {
     await ensureOpportunitiesSchema(env.RADAR_DB);
     const oppId = `opp_${prospect_id}`;
-    const tenantId = job.tenant_id || "founder";
+    const tenantId = job.tenant_id || prospect.tenant_id || "founder";
     const title = `${prospect.name} — ${prospect.trade} (${prospect.city})`;
     const nowIso = new Date().toISOString();
+    const stratScore = Math.round(strat.strategic_score || finalScore || 50);
+    const priority = strat.priority_tier || (stratScore >= 80 ? "high" : stratScore >= 55 ? "medium" : "low");
 
     await env.RADAR_DB.prepare(`
       INSERT INTO opportunities (
@@ -4324,38 +4378,43 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
         priority_tier = excluded.priority_tier,
         updated_at = excluded.updated_at
     `).bind(
-      oppId, prospect_id, tenantId, title, strat.strategic_score, strat.fit_score, strat.intent_score,
-      strat.pain_score, strat.ability_to_pay_score, strat.contactability_score, strat.timing_score,
-      strat.evidence_score, strat.signal_freshness_score, strat.expected_value, strat.decision_state,
-      strat.why_now_json, strat.priority_tier, nowIso, nowIso
+      oppId, prospect_id, tenantId, title,
+      stratScore, strat.fit_score || stratScore, strat.intent_score || Math.round(stratScore * 0.8),
+      strat.pain_score || Math.round(stratScore * 0.7), strat.ability_to_pay_score || 60,
+      strat.contactability_score || 70, strat.timing_score || 50,
+      strat.evidence_score || 50, strat.signal_freshness_score || 80,
+      strat.expected_value || finalScore || 0, strat.decision_state || "identified",
+      strat.why_now_json || JSON.stringify({ signals: signalTags }),
+      priority, nowIso, nowIso
     ).run();
 
-    // Insert signals into opportunity_signals
-    for (const fact of strat.why_now.distinctions.observed_facts) {
-      const sigId = `sig_${crypto.randomUUID().replace(/-/g, "")}`;
+    try {
+      for (const fact of (strat.why_now?.distinctions?.observed_facts || []).slice(0, 5)) {
+        const sigId = `sig_${crypto.randomUUID().replace(/-/g, "")}`;
+        await env.RADAR_DB.prepare(`
+          INSERT INTO opportunity_signals (
+            id, opportunity_id, signal_type, observed_evidence, inferred_reasoning,
+            confidence, freshness_score, observed_at, created_at
+          ) VALUES (?, ?, 'observed_signal', ?, ?, 0.85, ?, ?, ?)
+        `).bind(
+          sigId, oppId, fact,
+          strat.why_now?.distinctions?.inferences?.[0] || null,
+          strat.signal_freshness_score || 80, nowIso, nowIso
+        ).run();
+      }
+      const actionId = `act_${crypto.randomUUID().replace(/-/g, "")}`;
       await env.RADAR_DB.prepare(`
-        INSERT INTO opportunity_signals (
-          id, opportunity_id, signal_type, observed_evidence, inferred_reasoning,
-          confidence, freshness_score, observed_at, created_at
-        ) VALUES (?, ?, 'observed_signal', ?, ?, 0.85, ?, ?, ?)
+        INSERT INTO opportunity_actions (
+          id, opportunity_id, action_type, status, details_json, proposed_at, executed_at
+        ) VALUES (?, ?, 'outreach_draft', 'proposed', ?, ?, NULL)
       `).bind(
-        sigId, oppId, fact,
-        strat.why_now.distinctions.inferences[0] || null,
-        strat.signal_freshness_score, nowIso, nowIso
+        actionId, oppId,
+        JSON.stringify({ recommended: strat.why_now?.recommended_action || "Contact", angle: bveltAngle }),
+        nowIso
       ).run();
+    } catch (inner) {
+      console.warn("[Opportunity Intelligence] signals/actions optional fail:", inner);
     }
-
-    // Insert initial proposed action into opportunity_actions
-    const actionId = `act_${crypto.randomUUID().replace(/-/g, "")}`;
-    await env.RADAR_DB.prepare(`
-      INSERT INTO opportunity_actions (
-        id, opportunity_id, action_type, status, details_json, proposed_at, executed_at
-      ) VALUES (?, ?, 'outreach_draft', 'proposed', ?, ?, NULL)
-    `).bind(
-      actionId, oppId,
-      JSON.stringify({ recommended: strat.why_now.recommended_action, angle: bveltAngle }),
-      nowIso
-    ).run();
   } catch (e) {
     console.warn("[Opportunity Intelligence] Error registering opportunity:", e);
   }
@@ -6332,13 +6391,13 @@ export async function fetchOverpassBusinesses(
     }).join("\n");
 
     const query = geo ? `
-      [out:json][timeout:12];
+      [out:json][timeout:25];
       (
         ${tagQueries}
       );
       out body 35;
     ` : `
-      [out:json][timeout:12];
+      [out:json][timeout:25];
       area["name"="${cityClean}"]->.searchArea;
       (
         ${tagQueries}

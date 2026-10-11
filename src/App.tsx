@@ -697,22 +697,30 @@ const submitDecision = async (prospectId: string, action: string) => {
   const getCategory = (p: Prospect): StatusCategory => {
     const s = (p.status || '').toLowerCase();
     const score = typeof p.score === 'number' ? p.score : 0;
+    const contactable = !!(p.email || p.phone);
     
     const cdTime = p.cooldown_until ? new Date(p.cooldown_until).getTime() : 0;
     const isDataBugCooldown = cdTime > Date.now() + 60 * 24 * 60 * 60 * 1000;
+    // Cooldown is NOT blocked — separate anti-spam state
     if (p.cooldown_until && cdTime > Date.now() && !isDataBugCooldown) {
-      return 'BLOCKED';
+      return 'BLOCKED'; // badge shows COOLDOWN
     }
     if (p.suppression_reason || s === 'suppressed' || s === 'unsubscribed') {
       return 'SUPPRESSED';
     }
-    if (s === 'blocked' || s === 'hold' || s === 'discarded' || s === 'disqualified') {
+    if (s === 'blocked' || s === 'discarded') {
       return 'BLOCKED';
+    }
+    if (s === 'disqualified' && score < 40) {
+      return 'BLOCKED';
+    }
+    if (s === 'hold') {
+      return 'QUEUED'; // waiting founder decision
     }
     if (s === 'replied' || s === 'human_review' || s === 'positive' || s === 'question') {
       return 'REPLIED';
     }
-    if (s === 'sent' || s === 'delivered') {
+    if (s === 'sent' || s === 'delivered' || s === 'contacted') {
       return 'SENT';
     }
     if (s === 'queued' || s === 'notified' || s === 'pending') {
@@ -721,10 +729,11 @@ const submitDecision = async (prospectId: string, action: string) => {
     if (s === 'approved' || s === 'drafted') {
       return 'APPROVED';
     }
-    if ((s === 'qualified' || s === 'scored') && score >= 45 && p.email) {
+    // Phone-only is valid (esp. tenant bootstrap + founder SMS-gap leads)
+    if ((s === 'qualified' || s === 'scored' || s === 'enriched' || s === 'discovered') && score >= 40 && contactable) {
       return 'QUALIFIED';
     }
-    if (s === 'scored' || s === 'disqualified' || score < 45 || !p.email) {
+    if (score < 40 && !contactable) {
       return 'BLOCKED';
     }
     return 'SCOUTED';
@@ -764,6 +773,7 @@ const submitDecision = async (prospectId: string, action: string) => {
         return { label: s === 'unsubscribed' ? 'UNSUBSCRIBED' : 'SUPPRESSED', color: 'bg-rose-950/50 text-rose-400 border-rose-800/40' };
       case 'BLOCKED':
         return { label: p.cooldown_until ? 'COOLDOWN' : 'BLOCKED', color: 'bg-zinc-800/80 text-zinc-400 border-zinc-700/40' };
+      // hold already mapped to QUEUED above
       case 'REPLIED':
         return { label: 'REPLIED', color: 'bg-orange-950/50 text-orange-400 border-orange-800/40' };
       case 'SENT':
@@ -1453,23 +1463,27 @@ const submitDecision = async (prospectId: string, action: string) => {
                         ? 'Aún no hay oportunidades para este tenant. Configura ciudades y pulsa CORRER RADAR AHORA.'
                         : 'No hay oportunidades identificadas. Puedes regenerarlas desde los prospectos ya puntuados o ejecutar el Radar.'}
                     </p>
-                    {currentMode === 'founder' && prospects.length > 0 && (
+                    {prospects.length > 0 && (
                       <button
                         onClick={async () => {
                           try {
-                            const res = await fetch(`${apiUrl}/api/opportunities/backfill`, {
-                              method: 'POST',
-                              credentials: 'include'
+                            const tid =
+                              currentMode === "tenant" && selectedTenantId && selectedTenantId !== "founder"
+                                ? `?tenant_id=${encodeURIComponent(selectedTenantId)}`
+                                : "";
+                            const res = await fetch(`${apiUrl}/api/opportunities/backfill${tid}`, {
+                              method: "POST",
+                              credentials: "include"
                             });
                             const data = await res.json().catch(() => ({}));
                             if (res.ok) {
-                              alert(`✓ ${data.opportunities_created || 0} oportunidades creadas de ${data.prospects_scanned || 0} prospectos.`);
+                              alert(`✓ ${data.opportunities_created || 0} oportunidades de ${data.prospects_scanned || 0} prospectos.`);
                               fetchTelemetry();
                             } else {
-                              alert('Error: ' + (data.error || res.status));
+                              alert("Error: " + (data.error || res.status));
                             }
                           } catch (e: any) {
-                            alert('Error de red: ' + e.message);
+                            alert("Error de red: " + e.message);
                           }
                         }}
                         className="mx-auto px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold transition-all"
