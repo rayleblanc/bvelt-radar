@@ -375,7 +375,7 @@ const OVERPASS_TRADE_TAGS: Record<string, string[]> = {
   cleaning: ['craft="cleaner"', 'office="cleaning_agency"', 'office="cleaning"'],
   pool_cleaning: ['craft="swimming_pool"', 'craft="pool_technician"', 'office="pool_service"'],
   pool: ['craft="swimming_pool"', 'craft="pool_technician"', 'office="pool_service"'],
-  handyman: ['craft="handyman"', 'craft="carpenter"', 'craft="joiner"'],
+  handyman: ['craft="handyman"', 'craft="carpenter"', 'craft="joiner"', 'craft="builder"', 'name~"handyman"', 'name~"handy man"', 'shop="doityourself"'],
   roofing: ['craft="roofer"', 'craft="roofing"'],
   pest_control: ['craft="pest_control"', 'amenity="pest_control"'],
   "property management": [
@@ -1009,39 +1009,28 @@ export default {
             if (existing) continue;
 
             const stratScore = Math.round(p.opportunity_score || p.score || 50);
-            let priority = "MEDIUM";
-            if (stratScore >= 80) priority = "HIGH";
-            else if (stratScore < 55) priority = "LOW";
-
             const title = `${p.name} — ${p.trade || 'service'} (${p.city || ''})`;
             const tenantId = p.tenant_id || "founder";
-
-            await env.RADAR_DB.prepare(`
-              INSERT INTO opportunities (
-                id, prospect_id, tenant_id, mode, title, strategic_score, fit_score, intent_score,
-                pain_score, ability_to_pay_score, contactability_score, timing_score,
-                evidence_score, signal_freshness_score, expected_value, decision_state,
-                why_now_json, priority_tier, created_at, updated_at
-              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-              ON CONFLICT(id) DO NOTHING
-            `).bind(
-              oppId, p.id, tenantId, (tenantId === "founder" ? "founder" : "tenant"), title,
-              stratScore,
-              p.fit_score || stratScore,
-              p.intent_score || Math.round(stratScore * 0.8),
-              p.pain_score || Math.round(stratScore * 0.7),
-              p.ability_to_pay_score || 60,
-              p.contactability_score || 70,
-              p.timing_score || 50,
-              p.evidence_score || 50,
-              p.signal_freshness_score || 80,
-              p.expected_value || 0,
-              p.decision_state || "open",
-              p.why_now_json || null,
-              priority,
-              nowIso, nowIso
-            ).run();
-            created++;
+            const ok = await upsertOpportunity(env.RADAR_DB, {
+              id: oppId,
+              prospect_id: p.id,
+              tenant_id: tenantId,
+              title,
+              strategic_score: stratScore,
+              fit_score: p.fit_score || stratScore,
+              intent_score: p.intent_score || Math.round(stratScore * 0.8),
+              pain_score: p.pain_score || Math.round(stratScore * 0.7),
+              ability_to_pay_score: p.ability_to_pay_score || 60,
+              contactability_score: p.contactability_score || 70,
+              timing_score: p.timing_score || 50,
+              evidence_score: p.evidence_score || 50,
+              signal_freshness_score: p.signal_freshness_score || 80,
+              expected_value: p.expected_value || 0,
+              decision_state: p.decision_state || "open",
+              why_now_json: p.why_now_json || null,
+              priority_tier: stratScore >= 80 ? "high" : stratScore >= 55 ? "medium" : "low"
+            });
+            if (ok) created++;
           }
 
           return Response.json({
@@ -1929,24 +1918,22 @@ export default {
           const exists = await env.RADAR_DB.prepare("SELECT id FROM opportunities WHERE id = ?").bind(oppId).first();
           if (exists) continue;
           const stratScore = Math.round(p.opportunity_score || p.score || 50);
-          const priority = stratScore >= 80 ? "high" : stratScore >= 55 ? "medium" : "low";
           const title = `${p.name} — ${p.trade || "service"} (${p.city || ""})`;
-          await env.RADAR_DB.prepare(`
-            INSERT INTO opportunities (
-              id, prospect_id, tenant_id, mode, title, strategic_score, fit_score, intent_score,
-              pain_score, ability_to_pay_score, contactability_score, timing_score,
-              evidence_score, signal_freshness_score, expected_value, decision_state,
-              why_now_json, priority_tier, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO NOTHING
-          `).bind(
-            oppId, p.id, p.tenant_id || "founder", ((p.tenant_id || "founder") === "founder" ? "founder" : "tenant"), title, stratScore,
-            p.fit_score || stratScore, p.intent_score || Math.round(stratScore * 0.8),
-            p.pain_score || 50, 60, 70, 50, 50, 80,
-            p.expected_value || 0, p.decision_state || "identified",
-            p.why_now_json || null, priority, nowIso, nowIso
-          ).run();
-          n++;
+          const ok = await upsertOpportunity(env.RADAR_DB, {
+            id: oppId,
+            prospect_id: p.id,
+            tenant_id: p.tenant_id || "founder",
+            title,
+            strategic_score: stratScore,
+            fit_score: p.fit_score || stratScore,
+            intent_score: p.intent_score || Math.round(stratScore * 0.8),
+            pain_score: p.pain_score || 50,
+            expected_value: p.expected_value || 0,
+            decision_state: p.decision_state || "identified",
+            why_now_json: p.why_now_json || null,
+            priority_tier: stratScore >= 80 ? "high" : stratScore >= 55 ? "medium" : "low"
+          });
+          if (ok) n++;
         }
         console.log(`[Radar Cron] Self-heal opportunities created: ${n}`);
       } catch (e) {
@@ -3409,6 +3396,9 @@ async function ensureOpportunitiesSchema(db: D1Database): Promise<void> {
   const cols = [
     "title TEXT",
     "mode TEXT DEFAULT 'founder'",
+    "first_seen_at TEXT",
+    "last_seen_at TEXT",
+    "status TEXT DEFAULT 'open'",
     "strategic_score INTEGER DEFAULT 0",
     "fit_score INTEGER DEFAULT 0",
     "intent_score INTEGER DEFAULT 0",
@@ -3427,18 +3417,25 @@ async function ensureOpportunitiesSchema(db: D1Database): Promise<void> {
     "tenant_id TEXT DEFAULT 'founder'",
     "prospect_id TEXT",
   ];
-  // Production DBs may have mode NOT NULL without default — backfill nulls
-  try {
-    await db.prepare("UPDATE opportunities SET mode = 'founder' WHERE mode IS NULL OR mode = ''").run();
-  } catch { /* ok */ }
   for (const col of cols) {
     try {
       await db.prepare(`ALTER TABLE opportunities ADD COLUMN ${col}`).run();
     } catch {
-      // column already exists — ignore
+      // column already exists
     }
   }
-  // Ensure table exists at all (fresh envs)
+  const nowIso = new Date().toISOString();
+  // Heal NOT NULL columns that production may require without defaults
+  for (const sql of [
+    `UPDATE opportunities SET mode = 'founder' WHERE mode IS NULL OR mode = ''`,
+    `UPDATE opportunities SET first_seen_at = COALESCE(first_seen_at, created_at, '${nowIso}') WHERE first_seen_at IS NULL OR first_seen_at = ''`,
+    `UPDATE opportunities SET last_seen_at = COALESCE(last_seen_at, updated_at, created_at, '${nowIso}') WHERE last_seen_at IS NULL OR last_seen_at = ''`,
+    `UPDATE opportunities SET status = COALESCE(NULLIF(status,''), 'open') WHERE status IS NULL OR status = ''`,
+    `UPDATE opportunities SET created_at = COALESCE(created_at, '${nowIso}') WHERE created_at IS NULL`,
+    `UPDATE opportunities SET updated_at = COALESCE(updated_at, '${nowIso}') WHERE updated_at IS NULL`,
+  ]) {
+    try { await db.prepare(sql).run(); } catch { /* ok */ }
+  }
   try {
     await db.prepare(`
       CREATE TABLE IF NOT EXISTS opportunities (
@@ -3447,6 +3444,9 @@ async function ensureOpportunitiesSchema(db: D1Database): Promise<void> {
         tenant_id TEXT DEFAULT 'founder',
         mode TEXT DEFAULT 'founder',
         title TEXT,
+        first_seen_at TEXT,
+        last_seen_at TEXT,
+        status TEXT DEFAULT 'open',
         strategic_score INTEGER DEFAULT 0,
         fit_score INTEGER DEFAULT 0,
         intent_score INTEGER DEFAULT 0,
@@ -3465,6 +3465,106 @@ async function ensureOpportunitiesSchema(db: D1Database): Promise<void> {
       )
     `).run();
   } catch { /* ok */ }
+}
+
+/**
+ * Production-safe opportunity upsert. Always fills mode + first_seen_at + last_seen_at
+ * so NOT NULL constraints on drifted prod schemas never fail.
+ */
+async function upsertOpportunity(
+  db: D1Database,
+  opts: {
+    id: string;
+    prospect_id: string;
+    tenant_id: string;
+    mode?: string;
+    title: string;
+    strategic_score: number;
+    fit_score?: number;
+    intent_score?: number;
+    pain_score?: number;
+    ability_to_pay_score?: number;
+    contactability_score?: number;
+    timing_score?: number;
+    evidence_score?: number;
+    signal_freshness_score?: number;
+    expected_value?: number;
+    decision_state?: string;
+    why_now_json?: string | null;
+    priority_tier?: string;
+  }
+): Promise<boolean> {
+  await ensureOpportunitiesSchema(db);
+  const nowIso = new Date().toISOString();
+  const mode = opts.mode || (opts.tenant_id === "founder" ? "founder" : "tenant");
+  const s = Math.round(opts.strategic_score || 50);
+  try {
+    await db.prepare(`
+      INSERT INTO opportunities (
+        id, prospect_id, tenant_id, mode, title,
+        first_seen_at, last_seen_at, status,
+        strategic_score, fit_score, intent_score, pain_score,
+        ability_to_pay_score, contactability_score, timing_score,
+        evidence_score, signal_freshness_score, expected_value,
+        decision_state, why_now_json, priority_tier, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        title = excluded.title,
+        last_seen_at = excluded.last_seen_at,
+        strategic_score = excluded.strategic_score,
+        fit_score = excluded.fit_score,
+        intent_score = excluded.intent_score,
+        pain_score = excluded.pain_score,
+        ability_to_pay_score = excluded.ability_to_pay_score,
+        contactability_score = excluded.contactability_score,
+        timing_score = excluded.timing_score,
+        evidence_score = excluded.evidence_score,
+        signal_freshness_score = excluded.signal_freshness_score,
+        expected_value = excluded.expected_value,
+        decision_state = excluded.decision_state,
+        why_now_json = excluded.why_now_json,
+        priority_tier = excluded.priority_tier,
+        updated_at = excluded.updated_at
+    `).bind(
+      opts.id,
+      opts.prospect_id,
+      opts.tenant_id || "founder",
+      mode,
+      opts.title,
+      nowIso,
+      nowIso,
+      "open",
+      s,
+      opts.fit_score ?? s,
+      opts.intent_score ?? Math.round(s * 0.8),
+      opts.pain_score ?? Math.round(s * 0.7),
+      opts.ability_to_pay_score ?? 60,
+      opts.contactability_score ?? 70,
+      opts.timing_score ?? 50,
+      opts.evidence_score ?? 50,
+      opts.signal_freshness_score ?? 80,
+      opts.expected_value ?? 0,
+      opts.decision_state || "identified",
+      opts.why_now_json ?? null,
+      opts.priority_tier || (s >= 80 ? "high" : s >= 55 ? "medium" : "low"),
+      nowIso,
+      nowIso
+    ).run();
+    return true;
+  } catch (e: any) {
+    console.warn("[upsertOpportunity] failed:", e?.message || e);
+    // Last-resort minimal insert if extra columns unknown
+    try {
+      await db.prepare(`
+        INSERT OR IGNORE INTO opportunities (id, prospect_id, tenant_id, mode, title, first_seen_at, last_seen_at, created_at, updated_at, strategic_score)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).bind(opts.id, opts.prospect_id, opts.tenant_id || "founder", mode, opts.title, nowIso, nowIso, nowIso, nowIso, s).run();
+      return true;
+    } catch (e2: any) {
+      console.warn("[upsertOpportunity] minimal also failed:", e2?.message || e2);
+      return false;
+    }
+  }
 }
 
 /**
@@ -4388,7 +4488,6 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
 
   // Opportunity Intelligence — core row first (signals/actions never block the opportunity)
   try {
-    await ensureOpportunitiesSchema(env.RADAR_DB);
     const oppId = `opp_${prospect_id}`;
     const tenantId = job.tenant_id || prospect.tenant_id || "founder";
     const title = `${prospect.name} — ${prospect.trade} (${prospect.city})`;
@@ -4396,39 +4495,25 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
     const stratScore = Math.round(strat.strategic_score || finalScore || 50);
     const priority = strat.priority_tier || (stratScore >= 80 ? "high" : stratScore >= 55 ? "medium" : "low");
 
-    await env.RADAR_DB.prepare(`
-      INSERT INTO opportunities (
-        id, prospect_id, tenant_id, mode, title, strategic_score, fit_score, intent_score,
-        pain_score, ability_to_pay_score, contactability_score, timing_score,
-        evidence_score, signal_freshness_score, expected_value, decision_state,
-        why_now_json, priority_tier, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        title = excluded.title,
-        strategic_score = excluded.strategic_score,
-        fit_score = excluded.fit_score,
-        intent_score = excluded.intent_score,
-        pain_score = excluded.pain_score,
-        ability_to_pay_score = excluded.ability_to_pay_score,
-        contactability_score = excluded.contactability_score,
-        timing_score = excluded.timing_score,
-        evidence_score = excluded.evidence_score,
-        signal_freshness_score = excluded.signal_freshness_score,
-        expected_value = excluded.expected_value,
-        decision_state = excluded.decision_state,
-        why_now_json = excluded.why_now_json,
-        priority_tier = excluded.priority_tier,
-        updated_at = excluded.updated_at
-    `).bind(
-      oppId, prospect_id, tenantId, (tenantId === "founder" ? "founder" : "tenant"), title,
-      stratScore, strat.fit_score || stratScore, strat.intent_score || Math.round(stratScore * 0.8),
-      strat.pain_score || Math.round(stratScore * 0.7), strat.ability_to_pay_score || 60,
-      strat.contactability_score || 70, strat.timing_score || 50,
-      strat.evidence_score || 50, strat.signal_freshness_score || 80,
-      strat.expected_value || finalScore || 0, strat.decision_state || "identified",
-      strat.why_now_json || JSON.stringify({ signals: signalTags }),
-      priority, nowIso, nowIso
-    ).run();
+    await upsertOpportunity(env.RADAR_DB, {
+      id: oppId,
+      prospect_id,
+      tenant_id: tenantId,
+      title,
+      strategic_score: stratScore,
+      fit_score: strat.fit_score || stratScore,
+      intent_score: strat.intent_score || Math.round(stratScore * 0.8),
+      pain_score: strat.pain_score || Math.round(stratScore * 0.7),
+      ability_to_pay_score: strat.ability_to_pay_score || 60,
+      contactability_score: strat.contactability_score || 70,
+      timing_score: strat.timing_score || 50,
+      evidence_score: strat.evidence_score || 50,
+      signal_freshness_score: strat.signal_freshness_score || 80,
+      expected_value: strat.expected_value || finalScore || 0,
+      decision_state: strat.decision_state || "identified",
+      why_now_json: strat.why_now_json || JSON.stringify({ signals: signalTags }),
+      priority_tier: priority
+    });
 
     try {
       for (const fact of (strat.why_now?.distinctions?.observed_facts || []).slice(0, 5)) {
@@ -6337,6 +6422,11 @@ export function mapTradeToBizDataCategory(trade: string): string | null {
     "painter": "painter",
     "painting": "painter",
     "moving": "moving_company",
+    "handyman": "general_contractor",
+    "landscaping": "general_contractor",
+    "lawn_care": "general_contractor",
+    "pest_control": "general_contractor",
+    "hvac": "general_contractor",
     "real_estate": "real_estate_agency"
   };
 
