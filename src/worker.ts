@@ -1018,14 +1018,14 @@ export default {
 
             await env.RADAR_DB.prepare(`
               INSERT INTO opportunities (
-                id, prospect_id, tenant_id, title, strategic_score, fit_score, intent_score,
+                id, prospect_id, tenant_id, mode, title, strategic_score, fit_score, intent_score,
                 pain_score, ability_to_pay_score, contactability_score, timing_score,
                 evidence_score, signal_freshness_score, expected_value, decision_state,
                 why_now_json, priority_tier, created_at, updated_at
-              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
               ON CONFLICT(id) DO NOTHING
             `).bind(
-              oppId, p.id, tenantId, title,
+              oppId, p.id, tenantId, (tenantId === "founder" ? "founder" : "tenant"), title,
               stratScore,
               p.fit_score || stratScore,
               p.intent_score || Math.round(stratScore * 0.8),
@@ -1933,14 +1933,14 @@ export default {
           const title = `${p.name} — ${p.trade || "service"} (${p.city || ""})`;
           await env.RADAR_DB.prepare(`
             INSERT INTO opportunities (
-              id, prospect_id, tenant_id, title, strategic_score, fit_score, intent_score,
+              id, prospect_id, tenant_id, mode, title, strategic_score, fit_score, intent_score,
               pain_score, ability_to_pay_score, contactability_score, timing_score,
               evidence_score, signal_freshness_score, expected_value, decision_state,
               why_now_json, priority_tier, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO NOTHING
           `).bind(
-            oppId, p.id, p.tenant_id || "founder", title, stratScore,
+            oppId, p.id, p.tenant_id || "founder", ((p.tenant_id || "founder") === "founder" ? "founder" : "tenant"), title, stratScore,
             p.fit_score || stratScore, p.intent_score || Math.round(stratScore * 0.8),
             p.pain_score || 50, 60, 70, 50, 50, 80,
             p.expected_value || 0, p.decision_state || "identified",
@@ -3092,7 +3092,7 @@ async function bootstrapBveltTenant(
   try {
     const { businesses } = await fetchLocalBusinessesWithDiagnostics(cityLabel, searchTrade, env);
     const ranked = (businesses || [])
-      .filter((b: any) => b && b.name)
+      .filter((b: any) => b && b.name && tenantBuyerNameFits(b.name, searchTrade))
       .map((b: any) => {
         const name = String(b.name);
         const isChain = /walmart|home depot|lowes|costco|mcdonald|starbucks|cvs|walgreens/i.test(name);
@@ -3335,6 +3335,35 @@ export async function startProspectingRun(
   };
 }
 
+
+/** Tenant ICP: name must look like a real buyer for the niche (not random OSM noise). */
+export function tenantBuyerNameFits(name: string, nicheOrTrade: string): boolean {
+  if (!name) return false;
+  const n = name.toLowerCase();
+  const niche = (nicheOrTrade || "").toLowerCase();
+
+  // Hard reject obvious non-buyers for property/commercial ICP
+  if (/wig|scuba|diving|fence|metal fabricat|iron works|moving|attorney|lawyer|law office|criminal|church|ministry|school district|university|college\b|museum|florist|nursery\b|auto (repair|body|parts)|plumbing parts|marketing firm/i.test(n)) {
+    return false;
+  }
+
+  if (/property|management|manager|hoa|condo|apartment|realty|real estate|property mgmt|prop management|facility|building management|community management|hotel|motel|inn\b|resort|hospitality|extended stay|senior living|assisted living|nursing home|office park|industrial park|warehouse/i.test(n)) {
+    return true;
+  }
+
+  // Soft allow if niche is hotel/hospitality and name has lodging cues
+  if (/hotel|hospitality|extended/.test(niche) && /hotel|inn|suites|lodge|motel|resort/i.test(n)) {
+    return true;
+  }
+
+  // Default: for strict property management search, reject weak names
+  if (/property management|property manager|hoa|real estate/.test(niche)) {
+    return false;
+  }
+
+  return true; // other niches: allow through, Clef will refine
+}
+
 export function isNonBusinessEntity(name: string, website: string | undefined, mode: string): boolean {
   if (website) {
     try {
@@ -3379,6 +3408,7 @@ export function isNonBusinessEntity(name: string, website: string | undefined, m
 async function ensureOpportunitiesSchema(db: D1Database): Promise<void> {
   const cols = [
     "title TEXT",
+    "mode TEXT DEFAULT 'founder'",
     "strategic_score INTEGER DEFAULT 0",
     "fit_score INTEGER DEFAULT 0",
     "intent_score INTEGER DEFAULT 0",
@@ -3397,6 +3427,10 @@ async function ensureOpportunitiesSchema(db: D1Database): Promise<void> {
     "tenant_id TEXT DEFAULT 'founder'",
     "prospect_id TEXT",
   ];
+  // Production DBs may have mode NOT NULL without default — backfill nulls
+  try {
+    await db.prepare("UPDATE opportunities SET mode = 'founder' WHERE mode IS NULL OR mode = ''").run();
+  } catch { /* ok */ }
   for (const col of cols) {
     try {
       await db.prepare(`ALTER TABLE opportunities ADD COLUMN ${col}`).run();
@@ -3411,6 +3445,7 @@ async function ensureOpportunitiesSchema(db: D1Database): Promise<void> {
         id TEXT PRIMARY KEY,
         prospect_id TEXT,
         tenant_id TEXT DEFAULT 'founder',
+        mode TEXT DEFAULT 'founder',
         title TEXT,
         strategic_score INTEGER DEFAULT 0,
         fit_score INTEGER DEFAULT 0,
@@ -3670,6 +3705,13 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
 
     // 1. Hard-rejected chain & non-business entity check
     if (isHardRejectedChain(candidate.name) || isNonBusinessEntity(candidate.name, candidate.website, job.mode)) {
+      await releaseBudget(env.RADAR_DB, tenantId, 'discovery_units', 1);
+      filteredCount++;
+      continue;
+    }
+
+    // Tenant: drop OSM noise that is not a plausible buyer for this ICP
+    if (job.mode === "tenant" && !tenantBuyerNameFits(candidate.name, trade)) {
       await releaseBudget(env.RADAR_DB, tenantId, 'discovery_units', 1);
       filteredCount++;
       continue;
@@ -4356,11 +4398,11 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
 
     await env.RADAR_DB.prepare(`
       INSERT INTO opportunities (
-        id, prospect_id, tenant_id, title, strategic_score, fit_score, intent_score,
+        id, prospect_id, tenant_id, mode, title, strategic_score, fit_score, intent_score,
         pain_score, ability_to_pay_score, contactability_score, timing_score,
         evidence_score, signal_freshness_score, expected_value, decision_state,
         why_now_json, priority_tier, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         title = excluded.title,
         strategic_score = excluded.strategic_score,
@@ -4378,7 +4420,7 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
         priority_tier = excluded.priority_tier,
         updated_at = excluded.updated_at
     `).bind(
-      oppId, prospect_id, tenantId, title,
+      oppId, prospect_id, tenantId, (tenantId === "founder" ? "founder" : "tenant"), title,
       stratScore, strat.fit_score || stratScore, strat.intent_score || Math.round(stratScore * 0.8),
       strat.pain_score || Math.round(stratScore * 0.7), strat.ability_to_pay_score || 60,
       strat.contactability_score || 70, strat.timing_score || 50,
