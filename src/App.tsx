@@ -1467,21 +1467,33 @@ const submitDecision = async (prospectId: string, action: string) => {
                       <button
                         onClick={async () => {
                           try {
-                            const tid =
+                            const base =
                               currentMode === "tenant" && selectedTenantId && selectedTenantId !== "founder"
-                                ? `?tenant_id=${encodeURIComponent(selectedTenantId)}`
-                                : "";
-                            const res = await fetch(`${apiUrl}/api/opportunities/backfill${tid}`, {
-                              method: "POST",
-                              credentials: "include"
-                            });
-                            const data = await res.json().catch(() => ({}));
-                            if (res.ok) {
-                              alert(`✓ ${data.opportunities_created || 0} oportunidades de ${data.prospects_scanned || 0} prospectos.`);
-                              fetchTelemetry();
-                            } else {
-                              alert("Error: " + (data.error || res.status));
+                                ? `?tenant_id=${encodeURIComponent(selectedTenantId)}&`
+                                : "?";
+                            let offset = 0;
+                            let total = 0;
+                            let rounds = 0;
+                            let lastMsg = "";
+                            // Max 5 × 15 = 75 opps / click (Free D1 safe)
+                            while (rounds < 5) {
+                              const res = await fetch(
+                                `${apiUrl}/api/opportunities/backfill${base}limit=15&offset=${offset}`,
+                                { method: "POST", credentials: "include" }
+                              );
+                              const data = await res.json().catch(() => ({}));
+                              if (!res.ok) {
+                                alert("Error: " + (data.error || res.status) + (data.hint ? "\n" + data.hint : ""));
+                                break;
+                              }
+                              total += data.opportunities_created || 0;
+                              lastMsg = data.message || "";
+                              rounds++;
+                              if (!data.has_more) break;
+                              offset = data.next_offset ?? offset + 15;
                             }
+                            alert(`✓ ${total} oportunidades en ${rounds} lote(s).\n${lastMsg}`);
+                            fetchTelemetry();
                           } catch (e: any) {
                             alert("Error de red: " + e.message);
                           }

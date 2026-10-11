@@ -911,42 +911,43 @@ export default {
       if ((path === "/opportunities" || path === "/api/opportunities") && method === "GET") {
         const limit = parseInt(url.searchParams.get("limit") || "100", 10);
         const tenantId = url.searchParams.get("tenant_id");
-        const priority = url.searchParams.get("priority");
-        const decisionState = url.searchParams.get("decision_state");
         const minScore = parseInt(url.searchParams.get("min_score") || "0", 10);
+        // Founder UI omits tenant_id → scope founder only (never mix tenants)
+        const scopeTenant = tenantId || "founder";
 
-        let query = `
-          SELECT o.*, p.name as prospect_name, p.city as prospect_city, p.trade as prospect_trade,
-                 p.website as prospect_website, p.phone as prospect_phone, p.email as prospect_email,
-                 p.status as prospect_status, p.draft_subject, p.draft_body
-          FROM opportunities o
-          LEFT JOIN prospects p ON o.prospect_id = p.id
-          WHERE o.strategic_score >= ?
-        `;
-        const params: any[] = [minScore];
-
-        if (tenantId) {
-          query += " AND o.tenant_id = ?";
-          params.push(tenantId);
+        const attempts: { sql: string; binds: any[] }[] = [
+          {
+            sql: `SELECT o.*, p.name as prospect_name, p.city as prospect_city, p.trade as prospect_trade,
+                         p.website as prospect_website, p.phone as prospect_phone, p.email as prospect_email,
+                         p.status as prospect_status, p.draft_subject, p.draft_body
+                  FROM opportunities o
+                  LEFT JOIN prospects p ON o.prospect_id = p.id
+                  WHERE COALESCE(o.strategic_score, 0) >= ?
+                    AND COALESCE(o.tenant_id, 'founder') = ?
+                  ORDER BY COALESCE(o.strategic_score, 0) DESC, o.created_at DESC LIMIT ?`,
+            binds: [minScore, scopeTenant, limit],
+          },
+          {
+            sql: `SELECT * FROM opportunities
+                  WHERE COALESCE(strategic_score, 0) >= ?
+                    AND COALESCE(tenant_id, 'founder') = ?
+                  ORDER BY COALESCE(strategic_score, 0) DESC LIMIT ?`,
+            binds: [minScore, scopeTenant, limit],
+          },
+          {
+            sql: `SELECT * FROM opportunities ORDER BY rowid DESC LIMIT ?`,
+            binds: [limit],
+          },
+        ];
+        for (const a of attempts) {
+          try {
+            const res = await env.RADAR_DB.prepare(a.sql).bind(...a.binds).all();
+            return Response.json(res.results || [], { headers: corsHeaders });
+          } catch (e: any) {
+            console.warn("[GET /opportunities]", e?.message || e);
+          }
         }
-        if (priority) {
-          query += " AND o.priority_tier = ?";
-          params.push(priority);
-        }
-        if (decisionState) {
-          query += " AND o.decision_state = ?";
-          params.push(decisionState);
-        }
-
-        query += " ORDER BY o.strategic_score DESC, o.created_at DESC LIMIT ?";
-        params.push(limit);
-
-        try {
-          const res = await env.RADAR_DB.prepare(query).bind(...params).all();
-          return Response.json(res.results || [], { headers: corsHeaders });
-        } catch (e: any) {
-          return Response.json([], { headers: corsHeaders });
-        }
+        return Response.json([], { headers: corsHeaders });
       }
 
       if ((path.startsWith("/opportunities/") || path.startsWith("/api/opportunities/")) && method === "GET") {
@@ -980,83 +981,170 @@ export default {
         }
       }
 
-      // 8c-bis. Backfill opportunities from existing scored prospects (one-shot repair)
+      // 8c-bis. Backfill opportunities — FREE PLAN SAFE (≤50 D1 ops / invocation)
+      // Lotes de 15; la UI puede pedir varios offsets seguidos.
       if ((path === "/api/opportunities/backfill" || path === "/opportunities/backfill") && method === "POST") {
         try {
           await ensureOpportunitiesSchema(env.RADAR_DB);
           const tenantFilter = url.searchParams.get("tenant_id");
-          let q = `SELECT id, name, city, trade, score, opportunity_score, confidence_score,
-                          fit_score, intent_score, pain_score, ability_to_pay_score,
-                          contactability_score, timing_score, evidence_score, signal_freshness_score,
-                          expected_value, decision_state, why_now_json, tenant_id, status
-                   FROM prospects
-                   WHERE COALESCE(score, opportunity_score, 0) >= 40
-                     AND status NOT IN ('discarded','suppressed','blocked','disqualified')`;
-          const binds: any[] = [];
-          if (tenantFilter) {
-            q += ` AND COALESCE(tenant_id,'founder') = ?`;
-            binds.push(tenantFilter);
+          const batchSize = Math.min(parseInt(url.searchParams.get("limit") || "15", 10), 20);
+          const offset = Math.max(parseInt(url.searchParams.get("offset") || "0", 10), 0);
+
+          let prospects: any[] = [];
+          try {
+            let q = `SELECT p.id, p.name, p.city, p.trade, p.score, p.opportunity_score,
+                            p.fit_score, p.intent_score, p.pain_score, p.ability_to_pay_score,
+                            p.contactability_score, p.timing_score, p.evidence_score,
+                            p.signal_freshness_score, p.expected_value, p.decision_state,
+                            p.why_now_json, p.tenant_id, p.status
+                     FROM prospects p
+                     WHERE COALESCE(p.score, p.opportunity_score, 0) >= 40
+                       AND p.status NOT IN ('discarded','suppressed','blocked','disqualified')
+                       AND NOT EXISTS (
+                         SELECT 1 FROM opportunities o
+                         WHERE o.id = 'opp_' || p.id OR o.prospect_id = p.id
+                       )`;
+            const binds: any[] = [];
+            if (tenantFilter) {
+              q += ` AND COALESCE(p.tenant_id,'founder') = ?`;
+              binds.push(tenantFilter);
+            }
+            q += ` ORDER BY COALESCE(p.score, p.opportunity_score, 0) DESC LIMIT ? OFFSET ?`;
+            binds.push(batchSize, offset);
+            const rows = await env.RADAR_DB.prepare(q).bind(...binds).all();
+            prospects = rows.results || [];
+          } catch (qe: any) {
+            console.warn("[backfill] NOT EXISTS failed:", qe?.message || qe);
+            let q2 = `SELECT id, name, city, trade, score, opportunity_score,
+                             fit_score, intent_score, pain_score, ability_to_pay_score,
+                             contactability_score, timing_score, evidence_score,
+                             signal_freshness_score, expected_value, decision_state,
+                             why_now_json, tenant_id, status
+                      FROM prospects
+                      WHERE COALESCE(score, opportunity_score, 0) >= 40
+                        AND status NOT IN ('discarded','suppressed','blocked','disqualified')`;
+            const b2: any[] = [];
+            if (tenantFilter) {
+              q2 += ` AND COALESCE(tenant_id,'founder') = ?`;
+              b2.push(tenantFilter);
+            }
+            q2 += ` ORDER BY COALESCE(score, opportunity_score, 0) DESC LIMIT ? OFFSET ?`;
+            b2.push(batchSize, offset);
+            const rows = await env.RADAR_DB.prepare(q2).bind(...b2).all();
+            prospects = rows.results || [];
           }
-          q += ` ORDER BY COALESCE(score, opportunity_score, 0) DESC LIMIT 200`;
-          const rows = await env.RADAR_DB.prepare(q).bind(...binds).all();
-          const prospects = rows.results || [];
-          let created = 0;
+
           const nowIso = new Date().toISOString();
+          let created = 0;
+          let failed = 0;
+          const errors: string[] = [];
 
-          for (const p of prospects as any[]) {
+          for (const p of prospects) {
             const oppId = `opp_${p.id}`;
-            const existing = await env.RADAR_DB.prepare("SELECT id FROM opportunities WHERE id = ?").bind(oppId).first();
-            if (existing) continue;
-
             const stratScore = Math.round(p.opportunity_score || p.score || 50);
-            const title = `${p.name} — ${p.trade || 'service'} (${p.city || ''})`;
             const tenantId = p.tenant_id || "founder";
-            const ok = await upsertOpportunity(env.RADAR_DB, {
-              id: oppId,
-              prospect_id: p.id,
-              tenant_id: tenantId,
-              title,
-              strategic_score: stratScore,
-              fit_score: p.fit_score || stratScore,
-              intent_score: p.intent_score || Math.round(stratScore * 0.8),
-              pain_score: p.pain_score || Math.round(stratScore * 0.7),
-              ability_to_pay_score: p.ability_to_pay_score || 60,
-              contactability_score: p.contactability_score || 70,
-              timing_score: p.timing_score || 50,
-              evidence_score: p.evidence_score || 50,
-              signal_freshness_score: p.signal_freshness_score || 80,
-              expected_value: p.expected_value || 0,
-              decision_state: p.decision_state || "open",
-              why_now_json: p.why_now_json || null,
-              priority_tier: stratScore >= 80 ? "high" : stratScore >= 55 ? "medium" : "low"
-            });
-            if (ok) created++;
+            const mode = tenantId === "founder" ? "founder" : "tenant";
+            const title = `${p.name} — ${p.trade || "service"} (${p.city || ""})`;
+            const priority = stratScore >= 80 ? "high" : stratScore >= 55 ? "medium" : "low";
+            try {
+              await env.RADAR_DB.prepare(`
+                INSERT OR IGNORE INTO opportunities (
+                  id, prospect_id, tenant_id, mode, title,
+                  first_seen_at, last_seen_at, status,
+                  strategic_score, fit_score, intent_score, pain_score,
+                  ability_to_pay_score, contactability_score, timing_score,
+                  evidence_score, signal_freshness_score, expected_value,
+                  decision_state, why_now_json, priority_tier, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              `).bind(
+                oppId, p.id, tenantId, mode, title,
+                nowIso, nowIso,
+                stratScore,
+                p.fit_score || stratScore,
+                p.intent_score || Math.round(stratScore * 0.8),
+                p.pain_score || Math.round(stratScore * 0.7),
+                p.ability_to_pay_score || 60,
+                p.contactability_score || 70,
+                p.timing_score || 50,
+                p.evidence_score || 50,
+                p.signal_freshness_score || 80,
+                p.expected_value || 0,
+                p.decision_state || "identified",
+                p.why_now_json || null,
+                priority,
+                nowIso, nowIso
+              ).run();
+              created++;
+            } catch (ie: any) {
+              failed++;
+              if (errors.length < 3) errors.push(String(ie?.message || ie).slice(0, 140));
+              try {
+                await env.RADAR_DB.prepare(`
+                  INSERT OR IGNORE INTO opportunities
+                    (id, prospect_id, tenant_id, mode, title, first_seen_at, last_seen_at, strategic_score, created_at, updated_at)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                `).bind(oppId, p.id, tenantId, mode, title, nowIso, nowIso, stratScore, nowIso, nowIso).run();
+                created++;
+                failed--;
+              } catch { /* keep failed */ }
+            }
           }
 
+          const hasMore = prospects.length >= batchSize;
           return Response.json({
             success: true,
             prospects_scanned: prospects.length,
             opportunities_created: created,
-            message: `Backfilled ${created} opportunities from ${prospects.length} scored prospects.`
+            failed,
+            offset,
+            batch_size: batchSize,
+            next_offset: hasMore ? offset + batchSize : null,
+            has_more: hasMore,
+            errors: errors.length ? errors : undefined,
+            message: hasMore
+              ? `Lote OK: ${created} creadas. Siguiente offset ${offset + batchSize}.`
+              : `Listo: ${created} en este lote. Fallos: ${failed}.`
           }, { headers: corsHeaders });
         } catch (e: any) {
-          return Response.json({ error: e.message }, { status: 500, headers: corsHeaders });
+          return Response.json({
+            error: e.message || String(e),
+            hint: "Si dice Too many API requests: lotes de 15. Vuelve a pulsar Regenerar."
+          }, { status: 500, headers: corsHeaders });
         }
       }
 
       // 8c. Missions System Endpoints
       if ((path === "/missions" || path === "/api/missions") && method === "GET") {
         const tenantId = url.searchParams.get("tenant_id") || "founder";
+        let missions: any[] = [];
+        let daily: any[] = [];
         try {
-          const customMissions = await env.RADAR_DB.prepare("SELECT * FROM missions WHERE tenant_id = ? ORDER BY created_at DESC").bind(tenantId).all();
-          const dailyMissions = await env.RADAR_DB.prepare("SELECT * FROM daily_missions WHERE tenant_id = ? ORDER BY day DESC LIMIT 30").bind(tenantId).all();
-          return Response.json({
-            missions: customMissions.results || [],
-            daily_missions: dailyMissions.results || []
-          }, { headers: corsHeaders });
-        } catch (e: any) {
-          return Response.json({ missions: [], daily_missions: [] }, { headers: corsHeaders });
+          const customMissions = await env.RADAR_DB.prepare(
+            "SELECT * FROM missions WHERE COALESCE(tenant_id,'founder') = ? ORDER BY created_at DESC"
+          ).bind(tenantId).all();
+          missions = customMissions.results || [];
+        } catch {
+          try {
+            const all = await env.RADAR_DB.prepare("SELECT * FROM missions ORDER BY created_at DESC LIMIT 50").all();
+            missions = all.results || [];
+          } catch { /* ok */ }
         }
+        try {
+          const dailyMissions = await env.RADAR_DB.prepare(
+            "SELECT * FROM daily_missions WHERE COALESCE(tenant_id,'founder') = ? ORDER BY day DESC LIMIT 30"
+          ).bind(tenantId).all();
+          daily = dailyMissions.results || [];
+        } catch {
+          try {
+            const dailyMissions = await env.RADAR_DB.prepare(
+              "SELECT * FROM daily_missions ORDER BY day DESC LIMIT 30"
+            ).all();
+            daily = dailyMissions.results || [];
+          } catch (e2: any) {
+            console.warn("[GET /missions]", e2?.message || e2);
+          }
+        }
+        return Response.json({ missions, daily_missions: daily }, { headers: corsHeaders });
       }
 
       if ((path === "/missions" || path === "/api/missions") && method === "POST") {
@@ -1909,31 +1997,34 @@ export default {
           FROM prospects
           WHERE COALESCE(score, opportunity_score, 0) >= 45
             AND status NOT IN ('discarded','suppressed','blocked','disqualified')
-          ORDER BY COALESCE(score, opportunity_score, 0) DESC LIMIT 80
+          ORDER BY COALESCE(score, opportunity_score, 0) DESC LIMIT 12
         `).all();
         const nowIso = new Date().toISOString();
         let n = 0;
         for (const p of (rows.results || []) as any[]) {
           const oppId = `opp_${p.id}`;
-          const exists = await env.RADAR_DB.prepare("SELECT id FROM opportunities WHERE id = ?").bind(oppId).first();
-          if (exists) continue;
           const stratScore = Math.round(p.opportunity_score || p.score || 50);
+          const tenantId = p.tenant_id || "founder";
           const title = `${p.name} — ${p.trade || "service"} (${p.city || ""})`;
-          const ok = await upsertOpportunity(env.RADAR_DB, {
-            id: oppId,
-            prospect_id: p.id,
-            tenant_id: p.tenant_id || "founder",
-            title,
-            strategic_score: stratScore,
-            fit_score: p.fit_score || stratScore,
-            intent_score: p.intent_score || Math.round(stratScore * 0.8),
-            pain_score: p.pain_score || 50,
-            expected_value: p.expected_value || 0,
-            decision_state: p.decision_state || "identified",
-            why_now_json: p.why_now_json || null,
-            priority_tier: stratScore >= 80 ? "high" : stratScore >= 55 ? "medium" : "low"
-          });
-          if (ok) n++;
+          try {
+            await env.RADAR_DB.prepare(`
+              INSERT OR IGNORE INTO opportunities (
+                id, prospect_id, tenant_id, mode, title,
+                first_seen_at, last_seen_at, status, strategic_score,
+                fit_score, intent_score, pain_score, expected_value,
+                decision_state, why_now_json, priority_tier, created_at, updated_at
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `).bind(
+              oppId, p.id, tenantId, tenantId === "founder" ? "founder" : "tenant", title,
+              nowIso, nowIso, stratScore,
+              p.fit_score || stratScore, p.intent_score || Math.round(stratScore * 0.8),
+              p.pain_score || 50, p.expected_value || 0,
+              p.decision_state || "identified", p.why_now_json || null,
+              stratScore >= 80 ? "high" : stratScore >= 55 ? "medium" : "low",
+              nowIso, nowIso
+            ).run();
+            n++;
+          } catch { /* skip */ }
         }
         console.log(`[Radar Cron] Self-heal opportunities created: ${n}`);
       } catch (e) {
@@ -3471,6 +3562,8 @@ async function ensureOpportunitiesSchema(db: D1Database): Promise<void> {
  * Production-safe opportunity upsert. Always fills mode + first_seen_at + last_seen_at
  * so NOT NULL constraints on drifted prod schemas never fail.
  */
+let _oppSchemaReady = false;
+
 async function upsertOpportunity(
   db: D1Database,
   opts: {
@@ -3494,7 +3587,10 @@ async function upsertOpportunity(
     priority_tier?: string;
   }
 ): Promise<boolean> {
-  await ensureOpportunitiesSchema(db);
+  if (!_oppSchemaReady) {
+    await ensureOpportunitiesSchema(db);
+    _oppSchemaReady = true;
+  }
   const nowIso = new Date().toISOString();
   const mode = opts.mode || (opts.tenant_id === "founder" ? "founder" : "tenant");
   const s = Math.round(opts.strategic_score || 50);
@@ -3526,42 +3622,48 @@ async function upsertOpportunity(
         priority_tier = excluded.priority_tier,
         updated_at = excluded.updated_at
     `).bind(
-      opts.id,
-      opts.prospect_id,
-      opts.tenant_id || "founder",
-      mode,
-      opts.title,
-      nowIso,
-      nowIso,
-      "open",
-      s,
-      opts.fit_score ?? s,
-      opts.intent_score ?? Math.round(s * 0.8),
-      opts.pain_score ?? Math.round(s * 0.7),
-      opts.ability_to_pay_score ?? 60,
-      opts.contactability_score ?? 70,
-      opts.timing_score ?? 50,
-      opts.evidence_score ?? 50,
-      opts.signal_freshness_score ?? 80,
-      opts.expected_value ?? 0,
-      opts.decision_state || "identified",
+      opts.id, opts.prospect_id, opts.tenant_id || "founder", mode, opts.title,
+      nowIso, nowIso, "open", s,
+      opts.fit_score ?? s, opts.intent_score ?? Math.round(s * 0.8),
+      opts.pain_score ?? Math.round(s * 0.7), opts.ability_to_pay_score ?? 60,
+      opts.contactability_score ?? 70, opts.timing_score ?? 50,
+      opts.evidence_score ?? 50, opts.signal_freshness_score ?? 80,
+      opts.expected_value ?? 0, opts.decision_state || "identified",
       opts.why_now_json ?? null,
       opts.priority_tier || (s >= 80 ? "high" : s >= 55 ? "medium" : "low"),
-      nowIso,
-      nowIso
+      nowIso, nowIso
     ).run();
     return true;
   } catch (e: any) {
     console.warn("[upsertOpportunity] failed:", e?.message || e);
-    // Last-resort minimal insert if extra columns unknown
     try {
-      await db.prepare(`
-        INSERT OR IGNORE INTO opportunities (id, prospect_id, tenant_id, mode, title, first_seen_at, last_seen_at, created_at, updated_at, strategic_score)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).bind(opts.id, opts.prospect_id, opts.tenant_id || "founder", mode, opts.title, nowIso, nowIso, nowIso, nowIso, s).run();
+      const info = await db.prepare("PRAGMA table_info(opportunities)").all();
+      const cols = new Set((info.results || []).map((r: any) => String(r.name)));
+      const row: Record<string, any> = {
+        id: opts.id, prospect_id: opts.prospect_id,
+        tenant_id: opts.tenant_id || "founder", mode, title: opts.title,
+        first_seen_at: nowIso, last_seen_at: nowIso, status: "open",
+        strategic_score: s, fit_score: opts.fit_score ?? s,
+        intent_score: opts.intent_score ?? Math.round(s * 0.8),
+        pain_score: opts.pain_score ?? Math.round(s * 0.7),
+        ability_to_pay_score: opts.ability_to_pay_score ?? 60,
+        contactability_score: opts.contactability_score ?? 70,
+        timing_score: opts.timing_score ?? 50,
+        evidence_score: opts.evidence_score ?? 50,
+        signal_freshness_score: opts.signal_freshness_score ?? 80,
+        expected_value: opts.expected_value ?? 0,
+        decision_state: opts.decision_state || "identified",
+        why_now_json: opts.why_now_json ?? null,
+        priority_tier: opts.priority_tier || (s >= 80 ? "high" : s >= 55 ? "medium" : "low"),
+        created_at: nowIso, updated_at: nowIso,
+      };
+      const useCols = Object.keys(row).filter((k) => cols.has(k));
+      if (useCols.length < 2) return false;
+      const sql = `INSERT OR REPLACE INTO opportunities (${useCols.join(",")}) VALUES (${useCols.map(() => "?").join(",")})`;
+      await db.prepare(sql).bind(...useCols.map((k) => row[k])).run();
       return true;
     } catch (e2: any) {
-      console.warn("[upsertOpportunity] minimal also failed:", e2?.message || e2);
+      console.warn("[upsertOpportunity] pragma failed:", e2?.message || e2);
       return false;
     }
   }
@@ -5527,14 +5629,63 @@ export async function getPriorityTargets(
         finalize_units: 10
       });
 
-      const prep = env.RADAR_DB.prepare(`
-        INSERT OR IGNORE INTO daily_missions (tenant_id, day, goal, markets, icp, budget, target_qualified, target_outreach, status, qualified_count, outreach_count)
-        VALUES (?, ?, ?, ?, ?, ?, 3, 3, 'active', 0, 0)
-      `);
-      if (prep && typeof prep.bind === "function") {
-        const bound = prep.bind(targetTenant, today, goal, marketsJson, icpJson, budgetJson);
-        if (bound && typeof bound.run === "function") {
-          await bound.run();
+      for (const alter of [
+        "ALTER TABLE daily_missions ADD COLUMN tenant_id TEXT DEFAULT 'founder'",
+        "ALTER TABLE daily_missions ADD COLUMN status TEXT DEFAULT 'active'",
+        "ALTER TABLE daily_missions ADD COLUMN qualified_count INTEGER DEFAULT 0",
+        "ALTER TABLE daily_missions ADD COLUMN outreach_count INTEGER DEFAULT 0",
+      ]) {
+        try { await env.RADAR_DB.prepare(alter).run(); } catch { /* exists */ }
+      }
+
+      let seeded = false;
+      try {
+        await env.RADAR_DB.prepare(`
+          INSERT OR IGNORE INTO daily_missions
+            (tenant_id, day, goal, markets, icp, budget, target_qualified, target_outreach, status, qualified_count, outreach_count)
+          VALUES (?, ?, ?, ?, ?, ?, 3, 3, 'active', 0, 0)
+        `).bind(targetTenant, today, goal, marketsJson, icpJson, budgetJson).run();
+        seeded = true;
+      } catch (e1: any) {
+        console.warn("[Daily Mission] tenant insert:", e1?.message || e1);
+      }
+      if (!seeded) {
+        try {
+          await env.RADAR_DB.prepare(`
+            INSERT OR IGNORE INTO daily_missions
+              (day, goal, markets, icp, budget, target_qualified, target_outreach, status, qualified_count, outreach_count)
+            VALUES (?, ?, ?, ?, ?, 3, 3, 'active', 0, 0)
+          `).bind(today, goal, marketsJson, icpJson, budgetJson).run();
+          seeded = true;
+        } catch (e2: any) {
+          console.warn("[Daily Mission] legacy insert:", e2?.message || e2);
+        }
+      }
+      if (!seeded) {
+        try {
+          await env.RADAR_DB.prepare(`
+            CREATE TABLE IF NOT EXISTS daily_missions (
+              tenant_id TEXT DEFAULT 'founder',
+              day TEXT NOT NULL,
+              goal TEXT,
+              markets TEXT,
+              icp TEXT,
+              budget TEXT,
+              target_qualified INTEGER DEFAULT 3,
+              target_outreach INTEGER DEFAULT 3,
+              qualified_count INTEGER DEFAULT 0,
+              outreach_count INTEGER DEFAULT 0,
+              status TEXT DEFAULT 'active',
+              PRIMARY KEY (tenant_id, day)
+            )
+          `).run();
+          await env.RADAR_DB.prepare(`
+            INSERT OR IGNORE INTO daily_missions
+              (tenant_id, day, goal, markets, icp, budget, target_qualified, target_outreach, status, qualified_count, outreach_count)
+            VALUES (?, ?, ?, ?, ?, ?, 3, 3, 'active', 0, 0)
+          `).bind(targetTenant, today, goal, marketsJson, icpJson, budgetJson).run();
+        } catch (e3: any) {
+          console.warn("[Daily Mission] create failed:", e3?.message || e3);
         }
       }
     } catch (e) {
