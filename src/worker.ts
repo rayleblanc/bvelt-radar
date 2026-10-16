@@ -4206,12 +4206,8 @@ async function handleEnrichJob(job: RadarJobMessage, env: Env): Promise<void> {
     hasValidMx = await checkDomainMxRecords(domain);
   }
 
-  // Step c: Fallback patterns contact@, info@, hello@, office@, admin@ ONLY if MX exists
-  if (!emailCandidate && domain && hasValidMx) {
-    emailCandidate = `contact@${domain}`;
-  }
-
-  // Step d: Hunter Domain Search ONLY if quota available and MX exists
+  // Step c: Hunter Domain Search BEFORE guessing patterns (bounce killer)
+  // Prefer Hunter / scrape over inventing contact@
   if (domain && hasValidMx && env.HUNTER_API_KEY) {
     try {
       const reserved = await reserveBudget(env.RADAR_DB, tenantId, 'hunter_units', 1);
@@ -4228,22 +4224,50 @@ async function handleEnrichJob(job: RadarJobMessage, env: Env): Promise<void> {
     } catch (e: any) {}
   }
 
-  // Step e: Abstract API verification if key present and candidate exists
+  // Step d: NEVER invent contact@ (primary bounce driver in Resend metrics).
+  let emailSource: 'scrape' | 'hunter' | 'pattern' | 'existing' | 'none' = 'none';
+  if (prospect.email && emailCandidate === prospect.email) emailSource = 'existing';
+  else if (websiteEmail && emailCandidate === websiteEmail) emailSource = 'scrape';
+  else if (emailCandidate) emailSource = 'hunter'; // filled by Hunter step above
+  if (!emailCandidate && domain && hasValidMx) {
+    emailCandidate = `info@${domain}`;
+    emailSource = 'pattern';
+  }
+
+  // Step e: Deliverability gate — Abstract when available; pattern emails MUST validate
   let isEmailValidated = false;
+  let emailQuality = 0;
   if (emailCandidate) {
     if (env.ABSTRACT_API_KEY) {
       try {
         const ver = await verifyEmail(emailCandidate, env);
-        if (!ver.valid) {
+        emailQuality = Number(ver.quality_score || 0);
+        // Stricter: undeliverable/disposable out; pattern needs quality >= 0.7
+        const minQ = emailSource === 'pattern' ? 0.72 : 0.55;
+        if (!ver.valid || emailQuality < minQ || ver.deliverability === 'UNDELIVERABLE') {
           emailCandidate = null;
+          isEmailValidated = false;
         } else {
           isEmailValidated = true;
         }
       } catch (e: any) {
-        isEmailValidated = true;
+        // API failure: keep scrape/hunter emails, DROP pattern guesses (bounce risk)
+        if (emailSource === 'pattern') {
+          emailCandidate = null;
+          isEmailValidated = false;
+        } else {
+          isEmailValidated = emailSource === 'hunter' || emailSource === 'scrape' || emailSource === 'existing';
+        }
       }
     } else {
-      isEmailValidated = true;
+      // No Abstract: reject pattern guesses entirely; accept scrape/hunter/existing only
+      if (emailSource === 'pattern') {
+        emailCandidate = null;
+        isEmailValidated = false;
+      } else {
+        isEmailValidated = true;
+        emailQuality = emailSource === 'hunter' ? 0.75 : 0.65;
+      }
     }
   }
 
@@ -4258,6 +4282,8 @@ async function handleEnrichJob(job: RadarJobMessage, env: Env): Promise<void> {
     scraped_phone: websitePhone,
     scraped_email: emailCandidate,
     is_email_validated: isEmailValidated,
+    email_source: emailSource,
+    email_quality: emailQuality,
     permits_90d: effectivePermits,
     signals,
     technical_audits: {
@@ -4788,6 +4814,21 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
 
   // Quality gate check
   if ((prospect.score || 0) < 45 || !prospect.email) {
+    return;
+  }
+
+  // Deliverability gate — do not burn Resend reputation on guessed contact@
+  let signalsMeta: any = {};
+  try { signalsMeta = JSON.parse(prospect.signals_json || "{}"); } catch {}
+  const emailLocal = String(prospect.email).split("@")[0].toLowerCase();
+  const isRiskyLocal = /^(contact|admin|webmaster|mail)$/.test(emailLocal);
+  if (signalsMeta.is_email_validated === false || (isRiskyLocal && signalsMeta.is_email_validated !== true)) {
+    console.warn(`[Outreach] Skip ${prospect.id} — email not validated or risky local-part ${emailLocal}`);
+    try {
+      await env.RADAR_DB.prepare(
+        "UPDATE prospects SET outcome = 'skipped_unverified_email', updated_at = ? WHERE id = ?"
+      ).bind(new Date().toISOString(), prospect_id).run();
+    } catch {}
     return;
   }
 
@@ -7945,15 +7986,35 @@ async function scrapeWebsiteContact(url: string): Promise<{
  */
 async function fetchHunterEmail(domain: string, apiKey: string): Promise<string | null> {
   const url = `https://api.hunter.io/v2/domain-search?domain=${encodeURIComponent(domain)}&api_key=${apiKey}`;
-  const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
-  if (res.ok) {
-    const body: any = await res.json();
-    if (body.data?.emails?.length > 0) {
-      const best = body.data.emails.find((e: any) => e.type === "generic") || body.data.emails[0];
-      return best ? best.value : null;
-    }
-  }
-  return null;
+  const res = await fetch(url, { signal: AbortSignal.timeout(6000) });
+  if (!res.ok) return null;
+  const body: any = await res.json();
+  const emails: any[] = body.data?.emails || [];
+  if (!emails.length) return null;
+
+  // Prefer higher confidence; prefer personal over generic contact@
+  const scored = emails
+    .map((e: any) => {
+      const value = String(e.value || "").toLowerCase();
+      const conf = typeof e.confidence === "number" ? e.confidence : 0;
+      const local = value.split("@")[0] || "";
+      const isContact = /^(contact|admin|office|mail|webmaster)$/i.test(local);
+      const isInfo = /^(info|hello|hi|support|sales)$/i.test(local);
+      const isPersonal = e.type === "personal" || (local.includes(".") && !isContact);
+      let rank = conf;
+      if (isPersonal) rank += 15;
+      if (isInfo) rank += 5;
+      if (isContact) rank -= 25; // contact@ drives permanent bounces
+      return { value: e.value as string, conf, rank };
+    })
+    .filter((e: any) => e.conf >= 40 || e.rank >= 50)
+    .sort((a: any, b: any) => b.rank - a.rank);
+
+  if (!scored.length) return null;
+  // Absolute floor: confidence 50+ preferred; allow 40+ only if personal-shaped
+  const pick = scored.find((e: any) => e.conf >= 50) || scored[0];
+  if (pick.conf < 40) return null;
+  return pick.value;
 }
 
 /**
@@ -8024,7 +8085,8 @@ export async function verifyEmail(email: string, env: Env): Promise<EmailVerific
         const isCatchall = data.is_catchall_email?.value === true;
         const qualityScore = data.quality_score || 0.8;
 
-        const isValid = !isUndeliverable && !isDisposable && (qualityScore >= 0.5);
+        // 0.65 floor reduces permanent bounces (Resend ~38% was driven by weak guesses)
+        const isValid = !isUndeliverable && !isDisposable && (qualityScore >= 0.65);
         const reason = isUndeliverable 
           ? "Abstract API marked as UNDELIVERABLE" 
           : isDisposable 
