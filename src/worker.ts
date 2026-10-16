@@ -112,12 +112,12 @@ export interface Env {
 
 export function getBudgetLimit(unitType: string): number {
   switch (unitType) {
-    case 'discovery_units': return 45;
-    case 'enrichment_units': return 40;
-    case 'ai_units': return 15;
-    case 'hunter_units': return 8;
-    case 'outreach_units': return 3;
-    case 'finalize_units': return 10;
+    case 'discovery_units': return 55;
+    case 'enrichment_units': return 45;
+    case 'ai_units': return 20;
+    case 'hunter_units': return 10;
+    case 'outreach_units': return 5;
+    case 'finalize_units': return 12;
     default: return 0;
   }
 }
@@ -283,54 +283,58 @@ export interface MissionConfig {
 export const DEFAULT_FOUNDER_MISSION: MissionConfig = {
   mode: "founder",
   target: "bvelt_customers",
-  niches: ["landscaping", "lawn_care", "hvac", "plumbing", "house_cleaning", "pool_cleaning", "handyman", "roofing", "pest_control"],
+  niches: [
+    "landscaping", "lawn_care", "hvac", "plumbing", "house_cleaning", "pool_cleaning",
+    "handyman", "roofing", "pest_control", "electrical", "painting", "garage_door",
+    "appliance_repair", "junk_removal", "moving", "fencing", "concrete", "flooring"
+  ],
   subniches: ["residential_contractors", "commercial_contractors", "emergency_service_providers"],
   services: ["repair", "maintenance", "installation", "cleaning"],
-  geographies: ["Tampa, FL", "Austin, TX", "Orlando, FL", "Houston, TX", "Atlanta, GA", "Nashville, TN"],
-  countries: ["US", "MX", "ES", "CO", "CA", "GB", "AU"],
+  geographies: [
+    "Tampa, FL", "Orlando, FL", "Jacksonville, FL", "Miami, FL", "Fort Lauderdale, FL",
+    "Austin, TX", "Houston, TX", "Dallas, TX", "San Antonio, TX", "Fort Worth, TX",
+    "Atlanta, GA", "Charlotte, NC", "Raleigh, NC", "Nashville, TN", "Birmingham, AL",
+    "Phoenix, AZ", "Tucson, AZ", "Las Vegas, NV", "Denver, CO", "Salt Lake City, UT",
+    "Columbus, OH", "Indianapolis, IN", "Kansas City, MO", "Oklahoma City, OK",
+    "Richmond, VA", "Virginia Beach, VA", "Louisville, KY", "Memphis, TN",
+    "Sacramento, CA", "Riverside, CA", "San Diego, CA", "Portland, OR", "Seattle, WA"
+  ],
+  countries: ["US", "CA"],
   languages: ["en", "es"],
   icp: {
-    description: "Local service businesses with visible phone lines, websites, high-margin jobs, and lead-capture or emergency response friction across any market.",
-    keywords: ["plumber", "hvac", "electrician", "contractor", "cleaning", "landscaping"]
+    description: "Local service businesses with visible phone lines, websites, high-margin jobs, and lead-capture friction across US/CA markets.",
+    keywords: ["plumber", "hvac", "electrician", "contractor", "cleaning", "landscaping", "roofer", "handyman"]
   },
   min_score: 0,
-  max_daily_outreach: 10
+  max_daily_outreach: 12
 };
 
-// Hard daily execution limits
+// Hard daily execution limits (respect free-tier API ceilings)
 const LIMITS = {
-  max_discover_per_day: 30,
-  max_finalize_per_day: 10,
-  max_ai_calls_per_day: 15,
-  max_hunter_credits_per_day: 8, // Strict budget conservation
+  max_discover_per_day: 40,
+  max_finalize_per_day: 12,
+  max_ai_calls_per_day: 20,
+  max_hunter_credits_per_day: 10,
 };
 
-// Priority Target Pool: High demand, high contractor density, lower SaaS saturation
+// National rotation pool — founder must not stay stuck in 6 metros
 const PRIORITY_CITIES = [
-  "Tampa, FL",
-  "Orlando, FL",
-  "Jacksonville, FL",
-  "Austin, TX",
-  "Houston, TX",
-  "San Antonio, TX",
-  "Phoenix, AZ",
-  "Charlotte, NC",
-  "Raleigh, NC",
-  "Nashville, TN",
-  "Atlanta, GA",
-  "Birmingham, AL",
+  "Tampa, FL", "Orlando, FL", "Jacksonville, FL", "Miami, FL", "Fort Lauderdale, FL", "St. Petersburg, FL",
+  "Austin, TX", "Houston, TX", "Dallas, TX", "San Antonio, TX", "Fort Worth, TX", "El Paso, TX",
+  "Atlanta, GA", "Charlotte, NC", "Raleigh, NC", "Nashville, TN", "Memphis, TN", "Knoxville, TN",
+  "Birmingham, AL", "Phoenix, AZ", "Tucson, AZ", "Las Vegas, NV", "Denver, CO", "Colorado Springs, CO",
+  "Salt Lake City, UT", "Columbus, OH", "Cincinnati, OH", "Indianapolis, IN", "Kansas City, MO", "St. Louis, MO",
+  "Oklahoma City, OK", "Tulsa, OK", "Richmond, VA", "Virginia Beach, VA", "Louisville, KY", "New Orleans, LA",
+  "Sacramento, CA", "Fresno, CA", "Riverside, CA", "San Diego, CA", "Bakersfield, CA",
+  "Portland, OR", "Seattle, WA", "Boise, ID", "Albuquerque, NM", "Omaha, NE", "Des Moines, IA",
+  "Minneapolis, MN", "Milwaukee, WI", "Detroit, MI", "Grand Rapids, MI", "Pittsburgh, PA", "Philadelphia, PA",
+  "Buffalo, NY", "Rochester, NY", "Hartford, CT", "Providence, RI", "Baltimore, MD", "Washington, DC"
 ];
 
 const PRIORITY_TRADES = [
-  "landscaping",
-  "lawn_care",
-  "hvac",
-  "plumbing",
-  "house_cleaning",
-  "pool_cleaning",
-  "handyman",
-  "roofing",
-  "pest_control",
+  "landscaping", "lawn_care", "hvac", "plumbing", "house_cleaning", "pool_cleaning",
+  "handyman", "roofing", "pest_control", "electrical", "painting", "garage_door",
+  "appliance_repair", "junk_removal", "fencing", "flooring"
 ];
 
 // Mapping of contractor trades to their ideal B2B target niches
@@ -355,6 +359,12 @@ const TENANT_TARGET_MAP: Record<string, string[]> = {
   painting: ["property management", "real estate", "hotel", "apartment complex"],
   flooring: ["property management", "real estate", "hotel", "apartment complex"],
   "water damage": ["property management", "insurance agency", "real estate", "hotel"],
+  garage_door: ["property management", "real estate", "facility manager", "apartment complex", "hoa"],
+  appliance_repair: ["property management", "apartment complex", "hotel", "facility manager"],
+  junk_removal: ["property management", "real estate", "construction company", "facility manager"],
+  fencing: ["property management", "real estate", "hoa", "apartment complex"],
+  concrete: ["general contractor", "property management", "real estate", "commercial developer"],
+  moving: ["property management", "real estate", "apartment complex"],
 };
 
 // OSM Tag mappings by trade for high-precision Overpass queries (contractor field operators, not retail stores)
@@ -4843,10 +4853,21 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
     return; // DO NOT SEND / DO NOT DISPATCH!
   }
 
-  // Only ELITE can qualify for automatic founder outreach
-  const isElite = (prospect.opportunity_score >= 80 && prospect.confidence_score >= 75) || 
-    (!prospect.opportunity_score && (prospect.score || 0) >= 80);
-  const isAutoOutreachEnabled = job.mode === 'founder' && String(env.FOUNDER_AUTO_OUTREACH).toLowerCase() === 'true' && isElite;
+  // Autonomous founder outreach (when FOUNDER_AUTO_OUTREACH=true):
+  // - Elite (≥80/75) always auto
+  // - Strong (≥ FOUNDER_AUTO_MIN_SCORE, default 70) also auto so pipeline does not stall offline
+  // - Cap sends/day via FOUNDER_AUTO_MAX_PER_DAY (default 8, hard max 12)
+  const autoMinScore = Math.min(90, Math.max(55, parseInt(String((env as any).FOUNDER_AUTO_MIN_SCORE || "70"), 10) || 70));
+  const autoMaxPerDay = Math.min(12, Math.max(3, parseInt(String((env as any).FOUNDER_AUTO_MAX_PER_DAY || "8"), 10) || 8));
+  const scoreVal = Number(prospect.opportunity_score || prospect.score || 0);
+  const confVal = Number(prospect.confidence_score || 0);
+  const isElite = (scoreVal >= 80 && confVal >= 75) || (scoreVal >= 80 && !prospect.confidence_score);
+  const isStrongAuto = scoreVal >= autoMinScore && Boolean(prospect.email);
+  const autoFlag = String(env.FOUNDER_AUTO_OUTREACH || "").toLowerCase();
+  const isAutoOutreachEnabled =
+    job.mode === "founder" &&
+    (autoFlag === "true" || autoFlag === "1" || autoFlag === "yes") &&
+    (isElite || isStrongAuto);
 
   const todayDate = new Date().toISOString().split('T')[0];
   const idempotencyKey = `idempotency:${prospect.id}:${(prospect.email || '').toLowerCase().trim()}:${todayDate}`;
@@ -4871,12 +4892,12 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
       // Ensure sender governor state is reset for today if needed
       await checkSenderGovernor(env);
 
-      // Atomic D1 slot check & reservation (enforces MAX_AUTO_OUTREACH_PER_DAY = 5)
+      // Atomic D1 slot check & reservation (FOUNDER_AUTO_MAX_PER_DAY, default 8)
       const updateRes = await env.RADAR_DB.prepare(`
         UPDATE sender_governor_state
         SET sends_today = sends_today + 1, updated_at = ?
-        WHERE id = 'global_governor' AND sends_today < 5 AND status = 'active' AND last_reset_day = ?
-      `).bind(timestamp, todayDate).run() as any;
+        WHERE id = 'global_governor' AND sends_today < ? AND status = 'active' AND last_reset_day = ?
+      `).bind(timestamp, autoMaxPerDay, todayDate).run() as any;
 
       if (updateRes && updateRes.meta && updateRes.meta.changes > 0) {
         slotReserved = true;
