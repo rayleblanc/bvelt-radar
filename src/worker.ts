@@ -92,6 +92,9 @@ export interface Env {
   FOUNDING_CITIES?: string; // e.g. "Tampa, FL;Austin, TX"
   FOUNDING_TRADES?: string; // e.g. "landscaping;hvac;plumbing"
   FOUNDER_AUTO_OUTREACH?: string;
+  FOUNDER_AUTO_MIN_SCORE?: string;
+  FOUNDER_AUTO_MAX_PER_DAY?: string;
+  TELEGRAM_OPS_NOTIFY?: string; // "true" (default) = run status digests to Telegram
   TELEGRAM_WEBHOOK_SECRET?: string;
   SENDER_NAME?: string;
   SENDER_POSTAL_ADDRESS?: string;
@@ -2051,7 +2054,20 @@ export default {
     // After discovery wave, repair opportunities table from scored prospects (guerrilla self-heal)
     const heal = (async () => {
       try {
-        await run;
+        const runResult = await run;
+        // Delayed ops digest: queue work continues async; snapshot ~current state for founder dashboard
+        try {
+          const digest = await buildRadarStatusDigest(env, {
+            run_id: runResult?.run_id,
+            mode: "founder (cron)",
+            jobs: runResult?.jobs_enqueued,
+            cities: runResult?.active_cities,
+            trades: runResult?.active_trades
+          });
+          await notifyRadarOps(env, `⏰ <b>Cron Radar</b>\n${digest}`);
+        } catch (digErr) {
+          console.warn("[Radar Cron] ops digest failed:", digErr);
+        }
         await ensureOpportunitiesSchema(env.RADAR_DB);
         const rows = await env.RADAR_DB.prepare(`
           SELECT id, name, city, trade, score, opportunity_score, tenant_id, expected_value,
@@ -3361,6 +3377,7 @@ export async function startProspectingRun(
 ): Promise<{ run_id: string; jobs_enqueued: number; active_cities: string[]; active_trades: string[]; diagnostics: any }> {
   if (env.RADAR_GLOBAL_PAUSE === "true" || env.RADAR_GLOBAL_PAUSE === "1") {
     console.log("[startProspectingRun] RADAR_GLOBAL_PAUSE active. Prospecting run aborted.");
+    await notifyRadarOps(env, "⏸ <b>Radar PAUSADO</b>\n<code>RADAR_GLOBAL_PAUSE</code> activo. No se encolaron jobs.");
     return {
       run_id: "paused",
       jobs_enqueued: 0,
@@ -3408,6 +3425,7 @@ export async function startProspectingRun(
       ? `Tenant "${tId}" no tiene ciudades configuradas. Configura cities_json en Tenant Mode antes de correr el Radar.`
       : "No hay ciudades activas para discovery. Revisa FOUNDING_CITIES.";
     console.warn(`[startProspectingRun] ${reason}`);
+    await notifyRadarOps(env, `⚠️ <b>Radar no inició</b>\nMode: <code>${mode}</code> tenant=<code>${tId}</code>\n${reason}`);
     return {
       run_id: "no_cities",
       jobs_enqueued: 0,
@@ -3461,6 +3479,20 @@ export async function startProspectingRun(
   }
 
   console.log(`[Queue Run Initiated] Run ${runId} enqueued ${jobsEnqueued} discovery jobs for cities=[${activeCities.join(', ')}] trades=[${activeTrades.join(', ')}]`);
+
+  // Ops dashboard: founder always sees that Radar is working (even tenant runs)
+  try {
+    const digest = await buildRadarStatusDigest(env, {
+      run_id: runId,
+      mode: `${mode}${tenantId ? ":" + tenantId : ""}`,
+      jobs: jobsEnqueued,
+      cities: activeCities,
+      trades: activeTrades
+    });
+    await notifyRadarOps(env, `🚀 <b>Radar RUN iniciado</b>\n${digest}`);
+  } catch (opsErr) {
+    console.warn("[startProspectingRun] ops notify failed:", opsErr);
+  }
 
   return {
     run_id: runId,
@@ -5122,17 +5154,20 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
     }
   }
 
-  // Fallback / Interactive Approval Flow (when FOUNDER_AUTO_OUTREACH is false or cap reached)
+  // Fallback / Interactive Approval Flow (when FOUNDER_AUTO_OUTREACH is false or daily auto cap reached)
   await env.RADAR_DB.prepare(`
     UPDATE prospects
     SET draft_subject = ?, draft_body = ?, status = 'queued', updated_at = ?
     WHERE id = ?
   `).bind(draft.subject, draft.body, new Date().toISOString(), prospect_id).run();
 
-  const actionableMsg = formatProspectTelegramMessage({ ...prospect, status: 'queued' }, env);
+  const capNote = isAutoOutreachEnabled
+    ? `\n\n⏳ <b>Cupo auto-outreach del día alcanzado</b> — este lead queda en cola para tu decisión.`
+    : `\n\n🖐 <b>Auto-outreach desactivado</b> — requiere aprobación manual.`;
+  const actionableMsg = formatProspectTelegramMessage({ ...prospect, status: 'queued' }, env) + capNote;
   const inlineButtons = [
     [
-      { text: "✅ Approve", callback_data: `approve:${prospect_id}` },
+      { text: "✅ Approve & Send", callback_data: `approve:${prospect_id}` },
       { text: "❌ Discard", callback_data: `discard:${prospect_id}` }
     ]
   ];
@@ -5744,25 +5779,39 @@ export async function getPriorityTargets(
       if (tenantConfig) {
         try {
           config.geographies = JSON.parse(tenantConfig.cities_json || '[]');
-          config.niches = JSON.parse(tenantConfig.trades_json || '[]');
+          // tenant_config has niche / subniches_json / services_json — NOT trades_json
+          let resolvedNiches: string[] = [];
+          try {
+            const sub = JSON.parse(tenantConfig.subniches_json || '[]');
+            if (Array.isArray(sub) && sub.length) resolvedNiches = sub.map((s: any) => String(s).trim()).filter(Boolean);
+          } catch {}
+          if (resolvedNiches.length === 0) {
+            try {
+              const svc = JSON.parse(tenantConfig.services_json || '[]');
+              if (Array.isArray(svc) && svc.length) resolvedNiches = svc.map((s: any) => String(s).trim()).filter(Boolean);
+            } catch {}
+          }
+          config.niches = resolvedNiches;
           config.mode = "tenant";
           config.target = `tenant_${tenantId}_customers`;
           if (tenantConfig.countries_json) config.countries = JSON.parse(tenantConfig.countries_json);
           if (tenantConfig.languages_json) config.languages = JSON.parse(tenantConfig.languages_json);
-          
-          // If niches are empty, use expandTenantIcp or fallback to TENANT_TARGET_MAP
+
+          // If niches still empty: expand ICP or map contractor niche → B2B buyer targets
           if (config.niches.length === 0) {
             if (!skipPicks) {
-              const expanded = await expandTenantIcp(env, tenantConfig);
-              if (expanded && expanded.segments && expanded.segments.length > 0) {
-                config.niches = expanded.segments.map(s => s.label);
-              } else if (tenantConfig.niche) {
-                const trade = tenantConfig.niche.toLowerCase();
-                config.niches = TENANT_TARGET_MAP[trade] || ["property management", "real estate"];
+              try {
+                const expanded = await expandTenantIcp(env, tenantConfig);
+                if (expanded && expanded.segments && expanded.segments.length > 0) {
+                  config.niches = expanded.segments.map((s: any) => s.label).filter(Boolean);
+                }
+              } catch (expErr) {
+                console.warn("[getPriorityTargets] expandTenantIcp failed:", expErr);
               }
-            } else if (tenantConfig.niche) {
-              const trade = tenantConfig.niche.toLowerCase();
-              config.niches = TENANT_TARGET_MAP[trade] || ["property management", "real estate"];
+            }
+            if (config.niches.length === 0 && tenantConfig.niche) {
+              const trade = String(tenantConfig.niche).toLowerCase().trim();
+              config.niches = TENANT_TARGET_MAP[trade] || TENANT_TARGET_MAP[trade.replace(/\s+/g, '_')] || ["property management", "real estate", "facility manager"];
             }
           }
         } catch (e) {
@@ -7808,6 +7857,87 @@ export function buildLegalFooter(env: Env): string {
 /**
  * Centralized Outbound Telegram Notification Engine
  */
+
+/**
+ * Operational status notifications to Telegram (dashboard-style).
+ * Not for approval — keeps founder informed that Radar is alive and what it did.
+ * Controlled by TELEGRAM_OPS_NOTIFY (default enabled unless set to "0"/"false").
+ */
+export async function notifyRadarOps(env: Env, text: string): Promise<void> {
+  const flag = String(env.TELEGRAM_OPS_NOTIFY ?? "true").toLowerCase();
+  if (flag === "0" || flag === "false" || flag === "off" || flag === "no") return;
+  try {
+    await notifyFounder(env, text);
+  } catch (e) {
+    console.warn("[notifyRadarOps] failed:", e);
+  }
+}
+
+/**
+ * Build a short daily status digest from D1 for Telegram ops dashboard.
+ */
+export async function buildRadarStatusDigest(env: Env, runHint?: { run_id?: string; mode?: string; jobs?: number; cities?: string[]; trades?: string[] }): Promise<string> {
+  const today = new Date().toISOString().split("T")[0];
+  let lines: string[] = [`<b>📡 Bvelt Radar — Status</b>`, `<code>${new Date().toISOString()}</code>`, ``];
+  try {
+    if (runHint?.run_id) {
+      lines.push(`🆔 <b>Run:</b> <code>${runHint.run_id.slice(0, 8)}</code>`);
+      if (runHint.mode) lines.push(`🧭 <b>Mode:</b> ${runHint.mode}`);
+      if (typeof runHint.jobs === "number") lines.push(`📦 <b>Jobs enqueued:</b> ${runHint.jobs}`);
+      if (runHint.cities?.length) lines.push(`📍 <b>Cities:</b> ${runHint.cities.slice(0, 4).join(", ")}`);
+      if (runHint.trades?.length) lines.push(`🛠 <b>Trades:</b> ${runHint.trades.slice(0, 4).join(", ")}`);
+      lines.push(``);
+    }
+    const db = env.RADAR_DB;
+    const statusRows = await db.prepare(`
+      SELECT status, COUNT(*) as c FROM prospects
+      WHERE date(created_at) = date(?) OR date(updated_at) = date(?)
+      GROUP BY status
+    `).bind(today, today).all().catch(() => ({ results: [] as any[] }));
+    const byStatus: Record<string, number> = {};
+    for (const r of (statusRows.results || []) as any[]) {
+      byStatus[r.status || "unknown"] = Number(r.c || 0);
+    }
+    const sent = byStatus["sent"] || 0;
+    const queued = byStatus["queued"] || byStatus["hold"] || 0;
+    const qualified = byStatus["qualified"] || byStatus["scored"] || byStatus["enriched"] || 0;
+    const discovered = Object.values(byStatus).reduce((a, b) => a + b, 0);
+
+    const runRow = await db.prepare(`SELECT * FROM runs WHERE day = ? ORDER BY created_at DESC LIMIT 1`).bind(today).first() as any;
+    const jobStats = await db.prepare(`
+      SELECT status, COUNT(*) as c FROM queue_jobs
+      WHERE date(created_at) = date(?) GROUP BY status
+    `).bind(today).all().catch(() => ({ results: [] as any[] }));
+    const jobs: Record<string, number> = {};
+    for (const r of (jobStats.results || []) as any[]) jobs[r.status || "?"] = Number(r.c || 0);
+
+    lines.push(`📅 <b>Hoy (${today})</b>`);
+    lines.push(`• Prospects tocados: <b>${discovered}</b>`);
+    lines.push(`• Qualified/scored: <b>${qualified}</b>`);
+    lines.push(`• Auto-sent: <b>${sent}</b>`);
+    lines.push(`• En cola / HOLD (aprueba o descarta): <b>${(byStatus["queued"] || 0) + (byStatus["hold"] || 0)}</b>`);
+    if (runRow) {
+      lines.push(`• Run: disc=${runRow.discovered || 0} fin=${runRow.finalized || 0} ai=${runRow.ai_calls || 0} hunter=${runRow.hunter_calls || 0}`);
+    }
+    lines.push(`• Queue: pending=${jobs["pending"] || 0} done=${jobs["completed"] || 0} fail=${jobs["failed"] || 0}`);
+    if (runRow?.errors_json && runRow.errors_json !== "[]") {
+      try {
+        const errs = JSON.parse(runRow.errors_json);
+        if (Array.isArray(errs) && errs.length) {
+          const last = errs[errs.length - 1];
+          lines.push(``);
+          lines.push(`⚠️ <b>Último error:</b> ${String(last.source || "err")}: ${String(last.description || last.error || "").slice(0, 160)}`);
+        }
+      } catch {}
+    }
+    lines.push(``);
+    lines.push(`<i>Telegram = dashboard operativo. Aprueba solo los que llegan con botones cuando el cupo auto se llenó.</i>`);
+  } catch (e: any) {
+    lines.push(`(digest parcial) ${e?.message || e}`);
+  }
+  return lines.join("\n");
+}
+
 export async function notifyFounder(
   env: Env,
   text: string,
