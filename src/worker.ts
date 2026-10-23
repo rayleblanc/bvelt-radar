@@ -107,6 +107,8 @@ export interface Env {
   OUTBOUND_EMAIL_FROM?: string;
   PAGESPEED_API_KEY?: string;
   RADAR_JOBS_PER_RUN?: string;
+  GEOAPIFY_API_KEY?: string;
+  FOUNDER_WA_MAX_PER_DAY?: string;
   AI?: { run(model: string, input: any): Promise<any> };
 }
 
@@ -4902,7 +4904,7 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
           ? `https://bvelt.app/demo?p=${prospect.demo_token}`
           : "https://bvelt.app/demo";
 
-        const hotMsg = `🔥 <b>BVELT HOT OPPORTUNITY</b>\n\n` +
+        let hotMsg = `🔥 <b>BVELT HOT OPPORTUNITY</b>\n\n` +
           `🏢 <b>Business:</b> ${escapeHtml(prospect.name)}\n` +
           `📍 <b>Market:</b> ${escapeHtml(prospect.city)}\n` +
           `🛠 <b>Trade:</b> ${escapeHtml(prospect.trade)}\n\n` +
@@ -7326,6 +7328,64 @@ export async function fetchLocalBusinessesWithDiagnostics(
 export async function fetchLocalBusinesses(city: string, trade: string, env: Env): Promise<any[]> {
   const res = await fetchLocalBusinessesWithDiagnostics(city, trade, env);
   return res.businesses;
+}
+
+export async function fetchGeoapifyPlaces(
+  city: string,
+  trade: string,
+  env: Env
+): Promise<{ businesses: any[]; status: string }> {
+  const key = env.GEOAPIFY_API_KEY ? String(env.GEOAPIFY_API_KEY).trim() : "";
+  if (!key) return { businesses: [], status: "skipped_no_key" };
+  const tradeMap: Record<string, string> = {
+    hvac: "service.building.plumber,service.building.electrician,service.construction",
+    plumbing: "service.building.plumber",
+    electrical: "service.building.electrician",
+    landscaping: "service.beauty,leisure.park",
+    lawn_care: "service.beauty",
+    roofing: "service.construction",
+    cleaning: "service.cleaning",
+    pool: "leisure.spa",
+    handyman: "service.construction",
+    pest_control: "service.cleaning",
+  };
+  const tkey = (trade || "").toLowerCase().replace(/\s+/g, "_");
+  const categories = tradeMap[tkey] || "service.construction,service.building.plumber,service.building.electrician";
+  try {
+    const geoUrl = `https://api.geoapify.com/v1/geocode/search?text=${encodeURIComponent(city)}&limit=1&apiKey=${encodeURIComponent(key)}`;
+    const geoRes = await fetch(geoUrl, { signal: AbortSignal.timeout(12000) });
+    if (!geoRes.ok) return { businesses: [], status: `geocode_http_${geoRes.status}` };
+    const geoJson: any = await geoRes.json();
+    const feat = geoJson?.features?.[0];
+    if (!feat?.geometry?.coordinates) return { businesses: [], status: "geocode_empty" };
+    const [lon, lat] = feat.geometry.coordinates;
+    const placesUrl = `https://api.geoapify.com/v2/places?categories=${encodeURIComponent(categories)}&filter=circle:${lon},${lat},12000&limit=20&apiKey=${encodeURIComponent(key)}`;
+    const placesRes = await fetch(placesUrl, { signal: AbortSignal.timeout(15000) });
+    if (!placesRes.ok) return { businesses: [], status: `places_http_${placesRes.status}` };
+    const placesJson: any = await placesRes.json();
+    const out: any[] = [];
+    for (const f of placesJson?.features || []) {
+      const p = f.properties || {};
+      const name = p.name || p.address_line1;
+      if (!name) continue;
+      out.push({
+        name,
+        city: p.city || city,
+        trade,
+        phone: p.contact?.phone || p.phone || "",
+        website: p.website || p.contact?.website || "",
+        email: p.email || p.contact?.email || "",
+        lat: f.geometry?.coordinates?.[1],
+        lon: f.geometry?.coordinates?.[0],
+        source: "geoapify",
+        address: p.formatted || p.address_line1 || "",
+      });
+    }
+    return { businesses: out, status: out.length ? `ok_${out.length}` : "empty" };
+  } catch (err: any) {
+    console.warn(`[Geoapify] ${city}/${trade}:`, err?.message || err);
+    return { businesses: [], status: `error_${String(err?.message || err).slice(0, 40)}` };
+  }
 }
 
 /**
