@@ -161,6 +161,131 @@ export interface TenantConfig {
   messaging_angle?: string;
 }
 
+export interface TenantValidationResult {
+  isValid: boolean;
+  hasErrors: boolean;
+  hasWarnings: boolean;
+  fieldErrors: {
+    niche?: string;
+    icp_description?: string;
+    cities?: string;
+  };
+  alignmentStatus: 'aligned' | 'misaligned' | 'missing_fields';
+  messages: { text: string; severity: 'error' | 'warning' | 'success' }[];
+  suggestedIcp?: string;
+}
+
+export function validateTenantAlignment(
+  tenantForm: Partial<TenantConfig>,
+  tenantCitiesText: string
+): TenantValidationResult {
+  const niche = (tenantForm.niche || '').trim().toLowerCase();
+  const icp = (tenantForm.icp_description || '').trim();
+  const cities = (tenantCitiesText || '').trim();
+
+  const fieldErrors: { niche?: string; icp_description?: string; cities?: string } = {};
+  const messages: { text: string; severity: 'error' | 'warning' | 'success' }[] = [];
+
+  // 1. Check Missing Fields
+  if (!niche) {
+    fieldErrors.niche = "El Nicho Objetivo es obligatorio.";
+    messages.push({ text: "Falta el Nicho Objetivo (ej: property_management, hvac, roofing, solar).", severity: 'error' });
+  }
+
+  if (!icp) {
+    fieldErrors.icp_description = "La Descripción del ICP es obligatoria.";
+    messages.push({ text: "Falta la Descripción del ICP (Perfil de Cliente Ideal).", severity: 'error' });
+  } else if (icp.length < 15) {
+    fieldErrors.icp_description = "La descripción del ICP es demasiado corta (mínimo 15 caracteres).";
+    messages.push({ text: "La Descripción del ICP es demasiado breve para guiar al Radar adecuadamente.", severity: 'warning' });
+  }
+
+  const parsedCities = cities.split(/[;,\n]/).map(c => c.trim()).filter(Boolean);
+  if (!cities || parsedCities.length === 0) {
+    fieldErrors.cities = "Las Ciudades de servicio son obligatorias.";
+    messages.push({ text: "Faltan las Ciudades de Servicio (Service Areas). El Radar no puede realizar búsquedas sin ciudades.", severity: 'error' });
+  }
+
+  // 2. Alignment Check (Niche vs ICP Description)
+  let isAligned = true;
+  if (niche && icp) {
+    const nicheKeywordsMap: Record<string, string[]> = {
+      property_management: ['property', 'properties', 'propiedad', 'fincas', 'manager', 'administrador', 'inmueble', 'hoa', 'condominio', 'edificio', 'real estate', 'alquiler', 'facility', 'facilities', 'mantenimiento', 'contractor', 'comercial', 'residencial'],
+      hvac: ['hvac', 'aire', 'acondicionado', 'climatizacion', 'calefaccion', 'cooling', 'heating', 'ducto', 'refrigeracion', 'tecnico', 'mantenimiento', 'residencia', 'comercial', 'contractor'],
+      roofing: ['roof', 'roofing', 'tejado', 'cubierta', 'gotera', 'shingle', 'techo', 'tormenta', 'contratista', 'comercial', 'residencial'],
+      plumbing: ['plumb', 'fontaneria', 'plomeria', 'tuberia', 'averia', 'fuga', 'drenaje', 'agua', 'emergencia', 'comercial', 'residencial'],
+      solar: ['solar', 'panel', 'fotovoltaica', 'energia', 'renovable', 'inversor', 'instalacion', 'ahorro', 'comercial', 'residencial'],
+      commercial_facilities: ['facility', 'facilities', 'comercial', 'oficina', 'edificio', 'mantenimiento', 'gerente', 'operaciones', 'planta'],
+      landscaping: ['landscape', 'jardineria', 'riego', 'poda', 'jardin', 'verde', 'terreno'],
+      cleaning: ['clean', 'limpieza', 'janitorial', 'desinfeccion', 'oficina', 'mantenimiento', 'comercial']
+    };
+
+    const normalizedNicheKey = niche.replace(/\s+/g, '_').replace(/-/g, '_');
+    let expectedKeywords = nicheKeywordsMap[normalizedNicheKey] || nicheKeywordsMap[niche];
+
+    if (!expectedKeywords) {
+      expectedKeywords = niche.split(/[\s_\-]+/).filter(w => w.length > 2);
+    }
+
+    const icpLower = icp.toLowerCase();
+    const matchedCount = expectedKeywords.filter(kw => icpLower.includes(kw.toLowerCase())).length;
+
+    if (matchedCount === 0) {
+      isAligned = false;
+      fieldErrors.icp_description = `El ICP no parece alineado con el nicho '${niche}'.`;
+      messages.push({
+        text: `⚠️ Posible desalineación: La descripción del ICP no contiene términos clave del nicho '${niche}'.`,
+        severity: 'warning'
+      });
+    } else {
+      messages.push({
+        text: `✓ ICP alineado correctamente con el nicho '${niche}' (${matchedCount} coincidencias clave).`,
+        severity: 'success'
+      });
+    }
+  }
+
+  if (parsedCities.length > 0) {
+    messages.push({
+      text: `✓ Ciudades de servicio configuradas: ${parsedCities.length} ubicación(es) definida(s).`,
+      severity: 'success'
+    });
+  }
+
+  // Generate Suggested ICP if missing or misaligned
+  let suggestedIcp = undefined;
+  if (niche) {
+    const sugMap: Record<string, string> = {
+      property_management: 'Administradores de propiedades comerciales y residenciales que requieren contratistas de respuesta rápida para mantenimiento preventivo y reparación urgente de instalaciones.',
+      hvac: 'Propietarios comerciales y residenciales con sistemas de climatización HVAC que requieren mantenimiento técnico y solución de averías.',
+      roofing: 'Empresas comerciales y propietarios residenciales con techos antiguos o dañados por eventos climáticos que buscan presupuestos de reparación de tejados.',
+      plumbing: 'Instalaciones comerciales, restaurantes y administradores con necesidades de mantenimiento hidráulico, desatascos y fontanería de urgencia.',
+      solar: 'Propietarios residenciales y naves industriales con alto consumo eléctrico interesados en instalar paneles solares fotovoltaicos.',
+      commercial_facilities: 'Directores de operaciones y facilidades en búsqueda de proveedores de mantenimiento integral para edificios comerciales.'
+    };
+    const key = niche.toLowerCase().replace(/\s+/g, '_');
+    suggestedIcp = sugMap[key] || `Clientes comerciales y residenciales del sector ${niche} que buscan contratistas locales especializados con respuesta en menos de 24h.`;
+  }
+
+  const hasErrors = Boolean(fieldErrors.niche || fieldErrors.cities || (fieldErrors.icp_description && !icp));
+  const hasWarnings = messages.some(m => m.severity === 'warning');
+  const isValid = !hasErrors;
+
+  let alignmentStatus: 'aligned' | 'misaligned' | 'missing_fields' = 'aligned';
+  if (hasErrors) alignmentStatus = 'missing_fields';
+  else if (!isAligned || hasWarnings) alignmentStatus = 'misaligned';
+
+  return {
+    isValid,
+    hasErrors,
+    hasWarnings,
+    fieldErrors,
+    alignmentStatus,
+    messages,
+    suggestedIcp
+  };
+}
+
 interface Health {
   status: string;
   telegram_configured?: boolean;
@@ -2073,97 +2198,217 @@ const submitDecision = async (prospectId: string, action: string) => {
                 </div>
 
                 <form onSubmit={saveTenantConfig} className="space-y-3">
-                  <div>
-                    <label className="text-[10px] text-slate-500 block mb-1">Tenant ID</label>
-                    <input 
-                      type="text" 
-                      value={tenantForm.tenant_id || ''} 
-                      onChange={(e) => setTenantForm(prev => ({ ...prev, tenant_id: e.target.value }))}
-                      className="w-full bg-slate-950 border border-slate-800 rounded px-2.5 py-1.5 text-slate-200"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-[10px] text-slate-500 block mb-1">Nombre Comercial del Tenant</label>
-                    <input 
-                      type="text" 
-                      value={tenantForm.tenant_name || ''} 
-                      onChange={(e) => setTenantForm(prev => ({ ...prev, tenant_name: e.target.value }))}
-                      className="w-full bg-slate-950 border border-slate-800 rounded px-2.5 py-1.5 text-slate-200"
-                    />
-                  </div>
-                  <div className="grid grid-cols-2 gap-2">
-                    <div>
-                      <label className="text-[10px] text-slate-500 block mb-1">Industria</label>
-                      <input 
-                        type="text" 
-                        value={tenantForm.industry || ''} 
-                        onChange={(e) => setTenantForm(prev => ({ ...prev, industry: e.target.value }))}
-                        className="w-full bg-slate-950 border border-slate-800 rounded px-2.5 py-1.5 text-slate-200"
-                      />
-                    </div>
-                    <div>
-                      <label className="text-[10px] text-slate-500 block mb-1">Nicho Objetivo</label>
-                      <input 
-                        type="text" 
-                        value={tenantForm.niche || ''} 
-                        onChange={(e) => setTenantForm(prev => ({ ...prev, niche: e.target.value }))}
-                        className="w-full bg-slate-950 border border-slate-800 rounded px-2.5 py-1.5 text-slate-200"
-                      />
-                    </div>
-                  </div>
-                  <div>
-                    <label className="text-[10px] text-slate-500 block mb-1">Descripción del ICP</label>
-                    <textarea 
-                      value={tenantForm.icp_description || ''} 
-                      onChange={(e) => setTenantForm(prev => ({ ...prev, icp_description: e.target.value }))}
-                      rows={2}
-                      className="w-full bg-slate-950 border border-slate-800 rounded px-2.5 py-1.5 text-slate-200"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-[10px] text-amber-500 block mb-1">Ciudades de servicio (separadas por ;)</label>
-                    <input
-                      type="text"
-                      value={tenantCitiesText}
-                      onChange={(e) => setTenantCitiesText(e.target.value)}
-                      placeholder="Austin, TX; Round Rock, TX"
-                      className="w-full bg-slate-950 border border-amber-800/60 rounded px-2.5 py-1.5 text-amber-100"
-                    />
-                    <p className="text-[9px] text-amber-500/80 mt-1">Obligatorio. Sin ciudades el Radar Tenant no busca.</p>
-                  </div>
-                  <div className="grid grid-cols-2 gap-2">
-                    <div>
-                      <label className="text-[10px] text-slate-500 block mb-1">Score Mínimo</label>
-                      <input 
-                        type="number" 
-                        value={tenantForm.minimum_score || 50} 
-                        onChange={(e) => setTenantForm(prev => ({ ...prev, minimum_score: parseInt(e.target.value, 10) }))}
-                        className="w-full bg-slate-950 border border-slate-800 rounded px-2.5 py-1.5 text-slate-200"
-                      />
-                    </div>
-                    <div>
-                      <label className="text-[10px] text-slate-500 block mb-1">Límite Diario de Outreach</label>
-                      <input 
-                        type="number" 
-                        value={tenantForm.daily_outreach_limit || 10} 
-                        onChange={(e) => setTenantForm(prev => ({ ...prev, daily_outreach_limit: parseInt(e.target.value, 10) }))}
-                        className="w-full bg-slate-950 border border-slate-800 rounded px-2.5 py-1.5 text-slate-200"
-                      />
-                    </div>
-                  </div>
+                  {/* COMPUTED VALIDATION RESULTS FOR LIVE UI HIGHLIGHTS */}
+                  {(() => {
+                    const tenantVal = validateTenantAlignment(tenantForm, tenantCitiesText);
+                    return (
+                      <>
+                        <div>
+                          <label className="text-[10px] text-slate-500 block mb-1">Tenant ID</label>
+                          <input 
+                            type="text" 
+                            value={tenantForm.tenant_id || ''} 
+                            onChange={(e) => setTenantForm(prev => ({ ...prev, tenant_id: e.target.value }))}
+                            className="w-full bg-slate-950 border border-slate-800 rounded px-2.5 py-1.5 text-slate-200"
+                          />
+                        </div>
+                        <div>
+                          <label className="text-[10px] text-slate-500 block mb-1">Nombre Comercial del Tenant</label>
+                          <input 
+                            type="text" 
+                            value={tenantForm.tenant_name || ''} 
+                            onChange={(e) => setTenantForm(prev => ({ ...prev, tenant_name: e.target.value }))}
+                            className="w-full bg-slate-950 border border-slate-800 rounded px-2.5 py-1.5 text-slate-200"
+                          />
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
+                          <div>
+                            <label className="text-[10px] text-slate-500 block mb-1">Industria</label>
+                            <input 
+                              type="text" 
+                              value={tenantForm.industry || ''} 
+                              onChange={(e) => setTenantForm(prev => ({ ...prev, industry: e.target.value }))}
+                              className="w-full bg-slate-950 border border-slate-800 rounded px-2.5 py-1.5 text-slate-200"
+                            />
+                          </div>
+                          <div>
+                            <div className="flex items-center justify-between mb-1">
+                              <label className={`text-[10px] block ${tenantVal.fieldErrors.niche ? 'text-red-400 font-bold' : 'text-slate-500'}`}>
+                                Nicho Objetivo
+                              </label>
+                              {tenantVal.fieldErrors.niche && (
+                                <span className="text-[9px] text-red-400 font-bold uppercase">Faltante</span>
+                              )}
+                            </div>
+                            <input 
+                              type="text" 
+                              value={tenantForm.niche || ''} 
+                              onChange={(e) => setTenantForm(prev => ({ ...prev, niche: e.target.value }))}
+                              placeholder="property_management, hvac, roofing..."
+                              className={`w-full bg-slate-950 border rounded px-2.5 py-1.5 text-slate-200 transition-all ${
+                                tenantVal.fieldErrors.niche 
+                                  ? 'border-red-500/90 bg-red-950/30 text-red-100 ring-1 ring-red-500/50' 
+                                  : 'border-slate-800'
+                              }`}
+                            />
+                          </div>
+                        </div>
+                        <div>
+                          <div className="flex items-center justify-between mb-1">
+                            <label className={`text-[10px] block ${tenantVal.fieldErrors.icp_description ? 'text-red-400 font-bold' : 'text-slate-500'}`}>
+                              Descripción del ICP (Perfil de Cliente Ideal)
+                            </label>
+                            {tenantVal.fieldErrors.icp_description && (
+                              <span className="text-[9px] text-red-400 font-bold uppercase">{tenantVal.fieldErrors.icp_description}</span>
+                            )}
+                          </div>
+                          <textarea 
+                            value={tenantForm.icp_description || ''} 
+                            onChange={(e) => setTenantForm(prev => ({ ...prev, icp_description: e.target.value }))}
+                            rows={2}
+                            placeholder="Describe el cliente ideal que busca tu tenant..."
+                            className={`w-full bg-slate-950 border rounded px-2.5 py-1.5 text-slate-200 transition-all ${
+                              tenantVal.fieldErrors.icp_description 
+                                ? 'border-red-500/90 bg-red-950/30 text-red-100 ring-1 ring-red-500/50' 
+                                : 'border-slate-800'
+                            }`}
+                          />
+                        </div>
+                        <div>
+                          <div className="flex items-center justify-between mb-1">
+                            <label className={`text-[10px] block ${tenantVal.fieldErrors.cities ? 'text-red-400 font-bold' : 'text-amber-500'}`}>
+                              Ciudades de servicio / Service Areas (separadas por ;)
+                            </label>
+                            {tenantVal.fieldErrors.cities && (
+                              <span className="text-[9px] text-red-400 font-bold uppercase">Obligatorio</span>
+                            )}
+                          </div>
+                          <input
+                            type="text"
+                            value={tenantCitiesText}
+                            onChange={(e) => setTenantCitiesText(e.target.value)}
+                            placeholder="Austin, TX; Round Rock, TX"
+                            className={`w-full bg-slate-950 border rounded px-2.5 py-1.5 transition-all ${
+                              tenantVal.fieldErrors.cities 
+                                ? 'border-red-500/90 bg-red-950/30 text-red-100 ring-1 ring-red-500/50' 
+                                : 'border-amber-800/60 text-amber-100'
+                            }`}
+                          />
+                          <p className={`text-[9px] mt-1 ${tenantVal.fieldErrors.cities ? 'text-red-400 font-bold' : 'text-amber-500/80'}`}>
+                            {tenantVal.fieldErrors.cities ? '🔴 Obligatorio. Sin ciudades el Radar Tenant no puede realizar búsquedas.' : 'Obligatorio. Sin ciudades el Radar Tenant no busca.'}
+                          </p>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
+                          <div>
+                            <label className="text-[10px] text-slate-500 block mb-1">Score Mínimo</label>
+                            <input 
+                              type="number" 
+                              value={tenantForm.minimum_score || 50} 
+                              onChange={(e) => setTenantForm(prev => ({ ...prev, minimum_score: parseInt(e.target.value, 10) }))}
+                              className="w-full bg-slate-950 border border-slate-800 rounded px-2.5 py-1.5 text-slate-200"
+                            />
+                          </div>
+                          <div>
+                            <label className="text-[10px] text-slate-500 block mb-1">Límite Diario de Outreach</label>
+                            <input 
+                              type="number" 
+                              value={tenantForm.daily_outreach_limit || 10} 
+                              onChange={(e) => setTenantForm(prev => ({ ...prev, daily_outreach_limit: parseInt(e.target.value, 10) }))}
+                              className="w-full bg-slate-950 border border-slate-800 rounded px-2.5 py-1.5 text-slate-200"
+                            />
+                          </div>
+                        </div>
 
-                  {tenantSaveStatus && (
-                    <div className="p-2 rounded bg-blue-950/40 border border-blue-800 text-blue-300 text-[11px]">
-                      {tenantSaveStatus}
-                    </div>
-                  )}
+                        {/* HELPER CARD DE VALIDACIÓN Y ALINEACIÓN */}
+                        <div className={`p-3 rounded-xl border text-xs font-mono transition-all space-y-2.5 ${
+                          tenantVal.alignmentStatus === 'missing_fields' 
+                            ? 'bg-red-950/30 border-red-800/80 text-red-200'
+                            : tenantVal.alignmentStatus === 'misaligned'
+                              ? 'bg-amber-950/30 border-amber-800/80 text-amber-200'
+                              : 'bg-emerald-950/20 border-emerald-800/80 text-emerald-200'
+                        }`}>
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-1.5 font-bold uppercase text-[11px]">
+                              <CheckCircle2 className={`w-4 h-4 ${
+                                tenantVal.alignmentStatus === 'missing_fields' ? 'text-red-400' :
+                                tenantVal.alignmentStatus === 'misaligned' ? 'text-amber-400' : 'text-emerald-400'
+                              }`} />
+                              <span>Alineación de Nicho, ICP y Service Areas</span>
+                            </div>
+                            <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                              tenantVal.alignmentStatus === 'missing_fields' ? 'bg-red-900/60 text-red-200 border border-red-700' :
+                              tenantVal.alignmentStatus === 'misaligned' ? 'bg-amber-900/60 text-amber-200 border border-amber-700' :
+                              'bg-emerald-900/60 text-emerald-200 border border-emerald-700'
+                            }`}>
+                              {tenantVal.alignmentStatus === 'missing_fields' ? 'Campos Faltantes' :
+                               tenantVal.alignmentStatus === 'misaligned' ? 'Revisar Alineación' : 'Alineado Correctamente'}
+                            </span>
+                          </div>
 
-                  <button
-                    type="submit"
-                    className="w-full py-2.5 bg-blue-600 hover:bg-blue-500 font-bold rounded-xl text-white transition-all shadow-md shadow-blue-600/20"
-                  >
-                    Guardar Configuración del Tenant
-                  </button>
+                          <div className="grid grid-cols-3 gap-1.5 text-[10px] font-bold">
+                            <div className={`p-1.5 rounded border text-center ${
+                              tenantVal.fieldErrors.niche ? 'bg-red-900/40 border-red-700 text-red-200' : 'bg-slate-900/60 border-slate-700 text-slate-300'
+                            }`}>
+                              Nicho: {tenantForm.niche ? <span className="text-emerald-400">✓ Definido</span> : <span className="text-red-400 font-bold">✕ Faltante</span>}
+                            </div>
+                            <div className={`p-1.5 rounded border text-center ${
+                              tenantVal.fieldErrors.icp_description ? 'bg-red-900/40 border-red-700 text-red-200' : 'bg-slate-900/60 border-slate-700 text-slate-300'
+                            }`}>
+                              ICP: {tenantForm.icp_description ? (tenantVal.fieldErrors.icp_description ? <span className="text-amber-400 font-bold">⚠ Desalineado</span> : <span className="text-emerald-400">✓ Alineado</span>) : <span className="text-red-400 font-bold">✕ Faltante</span>}
+                            </div>
+                            <div className={`p-1.5 rounded border text-center ${
+                              tenantVal.fieldErrors.cities ? 'bg-red-900/40 border-red-700 text-red-200' : 'bg-slate-900/60 border-slate-700 text-slate-300'
+                            }`}>
+                              Ciudades: {tenantCitiesText.trim() ? <span className="text-emerald-400">✓ Definidas</span> : <span className="text-red-400 font-bold">✕ Faltante</span>}
+                            </div>
+                          </div>
+
+                          <div className="space-y-1 text-[11px]">
+                            {tenantVal.messages.map((m, idx) => (
+                              <div key={idx} className="flex items-start gap-1.5">
+                                <span className="mt-0.5">{m.severity === 'error' ? '🔴' : m.severity === 'warning' ? '🟡' : '🟢'}</span>
+                                <span className={m.severity === 'error' ? 'text-red-300 font-semibold' : m.severity === 'warning' ? 'text-amber-300 font-semibold' : 'text-emerald-300'}>
+                                  {m.text}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+
+                          {tenantVal.suggestedIcp && (tenantVal.fieldErrors.icp_description || tenantVal.alignmentStatus === 'misaligned') && (
+                            <div className="pt-2 border-t border-slate-800 flex items-center justify-between gap-2">
+                              <div className="text-[10px] text-slate-300">
+                                💡 <span className="font-semibold text-amber-200">Sugerencia ICP para {tenantForm.niche}:</span> "{tenantVal.suggestedIcp.slice(0, 60)}…"
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (tenantVal.suggestedIcp) {
+                                    setTenantForm(prev => ({ ...prev, icp_description: tenantVal.suggestedIcp }));
+                                  }
+                                }}
+                                className="px-2.5 py-1 bg-amber-500 hover:bg-amber-400 font-bold text-slate-950 rounded text-[10px] whitespace-nowrap transition-all shadow"
+                              >
+                                Auto-Alinear
+                              </button>
+                            </div>
+                          )}
+                        </div>
+
+                        {tenantSaveStatus && (
+                          <div className="p-2 rounded bg-blue-950/40 border border-blue-800 text-blue-300 text-[11px]">
+                            {tenantSaveStatus}
+                          </div>
+                        )}
+
+                        <button
+                          type="submit"
+                          className="w-full py-2.5 bg-blue-600 hover:bg-blue-500 font-bold rounded-xl text-white transition-all shadow-md shadow-blue-600/20"
+                        >
+                          Guardar Configuración del Tenant
+                        </button>
+                      </>
+                    );
+                  })()}
                 </form>
 
                 <div className="pt-4 border-t border-slate-800 space-y-2">
