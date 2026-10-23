@@ -1683,6 +1683,10 @@ export default {
 
       // 16c. Poll first leads after bootstrap
       if ((path === "/api/bvelt/leads" || path === "/bvelt/leads") && method === "GET") {
+        // Antes era público: cualquiera con un tenant_id leía leads, emails y teléfonos.
+        if (!isAuthorized(request, env, serviceKey, validSessionHash)) {
+          return Response.json({ error: "Unauthorized" }, { status: 401, headers: corsHeaders });
+        }
         const tenantId = url.searchParams.get("tenant_id");
         const limit = Math.min(20, Math.max(1, parseInt(url.searchParams.get("limit") || "10", 10) || 10));
         if (!tenantId) {
@@ -2093,10 +2097,42 @@ export default {
         console.warn("[Radar Cron] opportunity heal failed:", e);
       }
     })();
+    // Refresco de tenants: antes el cron solo corría el modo founder, y los clientes de Bvelt
+    // dejaban de recibir leads nuevos después del primer bootstrap.
+    const tenantRefresh = (async () => {
+      try {
+        await run;
+        const maxTenants = Math.max(0, Math.min(10, parseInt((env as any).TENANT_REFRESH_PER_CRON || "3", 10) || 3));
+        if (maxTenants === 0) return;
+        const since = new Date(Date.now() - 14 * 24 * 3600 * 1000).toISOString();
+        const rows = await env.RADAR_DB.prepare(`
+          SELECT tenant_id, niche, cities_json FROM tenant_config
+          WHERE tenant_id LIKE 'bvelt_%' AND updated_at >= ?
+          ORDER BY updated_at DESC LIMIT ?
+        `).bind(since, maxTenants).all();
+        for (const t of (rows.results || []) as any[]) {
+          let city = "";
+          try { city = String((JSON.parse(t.cities_json || "[]") as any[])[0] || ""); } catch { /* ignore */ }
+          if (!city) continue;
+          const trade = String(t.niche || "").toLowerCase().includes("hotel") ? "hotel" : "property management";
+          try {
+            await startProspectingRun(env, "tenant", t.tenant_id, {
+              cities: city, trades: trade, countries: null, languages: null, min_score: null
+            });
+          } catch (e) {
+            console.warn("[Radar Cron] tenant refresh failed for", t.tenant_id, e);
+          }
+        }
+      } catch (e) {
+        console.warn("[Radar Cron] tenant refresh error:", e);
+      }
+    })();
     if (ctx && typeof ctx.waitUntil === "function") {
       ctx.waitUntil(heal);
+      ctx.waitUntil(tenantRefresh);
     } else {
       await heal;
+      await tenantRefresh;
     }
   },
 
