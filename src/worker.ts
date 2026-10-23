@@ -106,9 +106,10 @@ export interface Env {
   BREVO_API_KEY?: string;
   OUTBOUND_EMAIL_FROM?: string;
   PAGESPEED_API_KEY?: string;
-  RADAR_JOBS_PER_RUN?: string;
   GEOAPIFY_API_KEY?: string;
-  FOUNDER_WA_MAX_PER_DAY?: string;
+  TENANT_REFRESH_PER_CRON?: string;
+  TENANT_REFRESH_EVERY_CRON?: string;
+  RADAR_JOBS_PER_RUN?: string;
   AI?: { run(model: string, input: any): Promise<any> };
 }
 
@@ -367,6 +368,20 @@ const TENANT_TARGET_MAP: Record<string, string[]> = {
   fencing: ["property management", "real estate", "hoa", "apartment complex"],
   concrete: ["general contractor", "property management", "real estate", "commercial developer"],
   moving: ["property management", "real estate", "apartment complex"],
+  commercial_cleaning: ["property management", "office building", "hotel", "gym", "school", "facility manager"],
+  janitorial: ["property management", "office building", "hotel", "gym", "school", "facility manager"],
+  window_cleaning: ["property management", "office building", "hotel", "retail store", "apartment complex"],
+  pressure_washing: ["property management", "hoa", "apartment complex", "retail store", "hotel", "restaurant"],
+  tree_service: ["property management", "hoa", "apartment complex", "golf course", "school"],
+  paving: ["property management", "general contractor", "commercial developer", "hoa", "retail store"],
+  asphalt: ["property management", "general contractor", "commercial developer", "hoa", "retail store"],
+  security: ["property management", "hotel", "retail store", "industrial plant", "apartment complex", "school"],
+  it_services: ["insurance agency", "real estate", "general contractor", "retail store", "school", "gym"],
+  solar: ["property management", "real estate", "general contractor", "commercial developer", "school"],
+  fire_protection: ["property management", "hotel", "restaurant", "school", "industrial plant", "apartment complex"],
+  carpet_cleaning: ["property management", "hotel", "office building", "apartment complex", "school"],
+  signage: ["retail store", "restaurant", "gym", "real estate", "general contractor"],
+  locksmith: ["property management", "apartment complex", "hotel", "real estate", "facility manager"],
 };
 
 // OSM Tag mappings by trade for high-precision Overpass queries (contractor field operators, not retail stores)
@@ -2063,9 +2078,9 @@ export default {
           SELECT id, name, city, trade, score, opportunity_score, tenant_id, expected_value,
                  fit_score, intent_score, pain_score, decision_state, why_now_json
           FROM prospects
-          WHERE COALESCE(score, opportunity_score, 0) >= 40
+          WHERE COALESCE(score, opportunity_score, 0) >= 45
             AND status NOT IN ('discarded','suppressed','blocked','disqualified')
-          ORDER BY COALESCE(score, opportunity_score, 0) DESC LIMIT 40
+          ORDER BY COALESCE(score, opportunity_score, 0) DESC LIMIT 12
         `).all();
         const nowIso = new Date().toISOString();
         let n = 0;
@@ -2103,7 +2118,12 @@ export default {
     // dejaban de recibir leads nuevos después del primer bootstrap.
     const tenantRefresh = (async () => {
       try {
+        await pruneRadarCache(env);
         await run;
+        // El cron corre 3 veces al día; los tenants se refrescan una sola vez (12:00 UTC) para no triplicar
+        // trabajo en cola ni gasto de APIs. TENANT_REFRESH_EVERY_CRON=1 lo fuerza en todas.
+        const cronHourUtc = new Date((event as any)?.scheduledTime || Date.now()).getUTCHours();
+        if (cronHourUtc !== 12 && !(env as any).TENANT_REFRESH_EVERY_CRON) return;
         const maxTenants = Math.max(0, Math.min(10, parseInt((env as any).TENANT_REFRESH_PER_CRON || "3", 10) || 3));
         if (maxTenants === 0) return;
         const since = new Date(Date.now() - 14 * 24 * 3600 * 1000).toISOString();
@@ -3284,9 +3304,13 @@ async function bootstrapBveltTenant(
       })
       .filter((b: any) => b._score >= 45)
       .sort((a: any, b: any) => b._score - a._score)
-      .slice(0, 2);
+      .slice(0, 40);
 
+    // BUG CORREGIDO: antes se tomaban solo los 2 primeros ANTES de ver cuáles ya existían, así que el cliente veía
+    // siempre los mismos 2 leads. Ahora se insertan hasta 5 NUEVOS por llamada (y se muestran máx. 8 en total).
+    let newInserted = 0;
     for (const b of ranked) {
+      if (newInserted >= 5 || leads.length >= 8) break;
       const prospectId = crypto.randomUUID();
       const demoToken = crypto.randomUUID().replace(/-/g, "");
       const identityKey = `${String(b.name).toLowerCase()}_${cityLabel.toLowerCase()}`.replace(/\s+/g, "_");
@@ -3339,6 +3363,7 @@ async function bootstrapBveltTenant(
         bvelt_angle: "tenant_buyer_opportunity",
         demo_token: demoToken
       };
+      newInserted++;
       leads.push({ ...row, attack_kit: buildAttackKit(row) });
     }
   } catch (e: any) {
@@ -3499,24 +3524,6 @@ export async function startProspectingRun(
   }
 
   console.log(`[Queue Run Initiated] Run ${runId} enqueued ${jobsEnqueued} discovery jobs for cities=[${activeCities.join(', ')}] trades=[${activeTrades.join(', ')}]`);
-
-  if (mode === "founder" && jobsEnqueued > 0 && env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID) {
-    try {
-      const chatId = String(env.TELEGRAM_CHAT_ID).trim().replace(/^["']|["']$/g, "");
-      const text =
-        `🛰️ <b>Radar run iniciado</b>\n` +
-        `Jobs discovery: <b>${jobsEnqueued}</b>\n` +
-        `Ciudades: ${(activeCities || []).slice(0, 6).join(", ")}\n` +
-        `Trades: ${(activeTrades || []).slice(0, 8).join(", ")}`;
-      await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ chat_id: chatId, text, parse_mode: "HTML", disable_web_page_preview: true }),
-      });
-    } catch (e) {
-      console.warn("[startProspectingRun] Telegram run ping failed:", e);
-    }
-  }
 
   return {
     run_id: runId,
@@ -4003,12 +4010,33 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
   });
 
   const perJobCap = 3;
-  const bounded = ranked.slice(0, Math.min(remainingBudget, perJobCap));
+  // BUG CORREGIDO: antes se cortaba la lista a los 3 primeros ANTES de filtrar duplicados. Cuando esos 3 ya eran
+  // prospectos (lo normal desde la segunda corrida de una ciudad+oficio), el job daba 0 leads y los demás
+  // candidatos nunca se miraban. Ahora se revisan hasta maxScan candidatos y se corta al llegar a perJobCap aceptados.
+  const maxScan = 40;
+  const acceptCap = Math.min(remainingBudget, perJobCap);
+  const bounded = ranked.slice(0, maxScan);
   let enqueuedEnrich = 0;
   let filteredCount = 0;
   let aiClassifyCalls = 0;
 
   for (const candidate of bounded) {
+    if (enqueuedEnrich >= acceptCap) break;
+
+    // Descartes baratos ANTES de reservar presupuesto (evita 3 escrituras a D1 por cada candidato que se rechaza)
+    const preName = (candidate.name || "").toLowerCase();
+    if (
+      (candidate.email || "").toLowerCase().includes("example.com") ||
+      (candidate.website || "").toLowerCase().includes("example.com") ||
+      preName.includes("test business") ||
+      isHardRejectedChain(candidate.name) ||
+      isNonBusinessEntity(candidate.name, candidate.website, job.mode) ||
+      (job.mode === "tenant" && !tenantBuyerNameFits(candidate.name, trade))
+    ) {
+      filteredCount++;
+      continue;
+    }
+
     // Atomically reserve a discovery unit before processing the candidate
     const reserved = await reserveBudget(env.RADAR_DB, tenantId, 'discovery_units', 1);
     if (!reserved) {
@@ -4888,8 +4916,7 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
   const isHotLead = (finalScore >= 90 && confidence >= 80) || 
     (detectedCount >= 3 && !!prospect.signal_event && bveltFitScore >= 15);
 
-  const isHotLeadRelaxed = isHotLead || (finalScore >= 75 && confidence >= 60);
-  if (isHotLeadRelaxed && !isHardRejectedChain(prospect.name)) {
+  if (isHotLead && prospect.email) {
     try {
       const alreadyAlerted = await env.RADAR_DB.prepare(
         "SELECT COUNT(*) as c FROM prospect_events WHERE prospect_id = ? AND event_type = 'hot_lead_alert_sent'"
@@ -4904,7 +4931,7 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
           ? `https://bvelt.app/demo?p=${prospect.demo_token}`
           : "https://bvelt.app/demo";
 
-        let hotMsg = `🔥 <b>BVELT HOT OPPORTUNITY</b>\n\n` +
+        const hotMsg = `🔥 <b>BVELT HOT OPPORTUNITY</b>\n\n` +
           `🏢 <b>Business:</b> ${escapeHtml(prospect.name)}\n` +
           `📍 <b>Market:</b> ${escapeHtml(prospect.city)}\n` +
           `🛠 <b>Trade:</b> ${escapeHtml(prospect.trade)}\n\n` +
@@ -4922,44 +4949,23 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
           `🔗 <b>Personalized Demo Link:</b>\n` +
           `<a href="${demoLink}">${demoLink}</a>`;
 
-        // Prefer email path; if no email but phone, offer manual WhatsApp deep-link (quota)
-        let waButtons: any[] | undefined;
-        if (!prospect.email && prospect.phone) {
-          const slot = await tryReserveWhatsAppSlot(env);
-          if (slot.ok) {
-            const waMsg = buildFounderWhatsAppMessage(prospect);
-            const waUrl = buildWhatsAppDeepLink(prospect.phone, waMsg);
-            if (waUrl) {
-              hotMsg += `\n\n📱 WhatsApp manual (${slot.used}/${slot.max} hoy): abre el chat y envía tú (no automático).`;
-              waButtons = [[{ text: "Abrir WhatsApp", url: waUrl }]];
-            }
-          }
-        }
-        await notifyFounder(env, hotMsg, waButtons).catch(() => {});
+        await notifyFounder(env, hotMsg).catch(() => {});
       }
     } catch (e) {
       console.warn("Error triggering Hot Lead alert:", e);
     }
   }
 
-  // Approve only with email; without email stay qualified for console
-  if (finalScore >= 45 && !isHardRejectedChain(prospect.name)) {
-    if (prospect.email) {
-      await enqueueJob(env, {
-        run_id: job.run_id,
-        job_id: `approve_${prospect_id}`,
-        type: 'approve',
-        mode: job.mode,
-        tenant_id: job.tenant_id,
-        payload: { prospect_id, overrides }
-      });
-    } else {
-      try {
-        await env.RADAR_DB.prepare(
-          "UPDATE prospects SET status = 'qualified', updated_at = ? WHERE id = ? AND status NOT IN ('sent','approved','queued','notified')"
-        ).bind(new Date().toISOString(), prospect_id).run();
-      } catch (_) {}
-    }
+  // Rule: "Pending approve" / QUEUED / HOLD only if: score >= 45 AND email present AND not hard-rejected
+  if (finalScore >= 45 && prospect.email && !isHardRejectedChain(prospect.name)) {
+    await enqueueJob(env, {
+      run_id: job.run_id,
+      job_id: `approve_${prospect_id}`,
+      type: 'approve',
+      mode: job.mode,
+      tenant_id: job.tenant_id,
+      payload: { prospect_id, overrides }
+    });
   }
 }
 
@@ -6973,14 +6979,14 @@ export async function fetchOverpassBusinesses(
       (
         ${tagQueries}
       );
-      out body 35;
+      out tags 150;
     ` : `
       [out:json][timeout:25];
       area["name"="${cityClean}"]->.searchArea;
       (
         ${tagQueries}
       );
-      out body 35;
+      out tags 150;
     `;
 
     let lastStatus = "unattempted";
@@ -7021,6 +7027,9 @@ export async function fetchOverpassBusinesses(
             }
           }
 
+          results.sort((a, b) =>
+            ((b.website ? 2 : 0) + (b.email ? 2 : 0) + (b.phone ? 1 : 0)) - ((a.website ? 2 : 0) + (a.email ? 2 : 0) + (a.phone ? 1 : 0)));
+          if (results.length > 60) results.length = 60;
           if (results.length > 0) {
             const suffix = isWidened ? " (widened radius)" : "";
             console.log(`[Overpass Mirror Success] Found ${results.length} businesses for ${city} - ${trade} via ${hostname}${suffix}`);
@@ -7121,11 +7130,111 @@ export interface DiscoveryDiagnostics {
   filtered: number;
   reason: string;
   permits_found?: number;
+  geoapify_status?: string;
 }
 
 /**
  * Multi-Source Discovery Cascade (Nominatim + Overpass Mirrors + BizData Safe Filter)
  */
+// ---------------------------------------------------------------------------
+// Caché en D1 (reemplaza al KV "CACHE", que NUNCA estuvo enlazado en wrangler.toml, así que no funcionaba).
+// D1 gratis: sin tarjeta y con ~100k escrituras/día, frente a las 1.000 escrituras/día de KV para toda la cuenta.
+// La tabla se crea sola la primera vez.
+// ---------------------------------------------------------------------------
+let radarCacheReady = false;
+async function ensureRadarCacheTable(db: D1Database): Promise<void> {
+  if (radarCacheReady) return;
+  await db.prepare("CREATE TABLE IF NOT EXISTS radar_cache (key TEXT PRIMARY KEY, value TEXT NOT NULL, expires_at INTEGER NOT NULL)").run();
+  await db.prepare("CREATE INDEX IF NOT EXISTS idx_radar_cache_exp ON radar_cache(expires_at)").run();
+  radarCacheReady = true;
+}
+export async function cacheGet(env: Env, key: string): Promise<string | null> {
+  try {
+    await ensureRadarCacheTable(env.RADAR_DB);
+    const row = await env.RADAR_DB.prepare("SELECT value FROM radar_cache WHERE key = ? AND expires_at > ?").bind(key, Date.now()).first() as any;
+    return row?.value ?? null;
+  } catch { return null; }
+}
+export async function cachePut(env: Env, key: string, value: string, ttlSeconds: number): Promise<void> {
+  try {
+    await ensureRadarCacheTable(env.RADAR_DB);
+    await env.RADAR_DB.prepare("INSERT OR REPLACE INTO radar_cache (key, value, expires_at) VALUES (?, ?, ?)").bind(key, value, Date.now() + ttlSeconds * 1000).run();
+  } catch { /* la caché nunca debe romper el flujo */ }
+}
+export async function pruneRadarCache(env: Env): Promise<void> {
+  try {
+    await ensureRadarCacheTable(env.RADAR_DB);
+    await env.RADAR_DB.prepare("DELETE FROM radar_cache WHERE expires_at < ?").bind(Date.now()).run();
+  } catch { /* ignore */ }
+}
+
+// ---------------------------------------------------------------------------
+// Geoapify Places (opcional: solo si existe GEOAPIFY_API_KEY). OSM es escaso para contratistas de EE. UU.
+// Se usan categorías PADRE (siempre válidas) y se filtra por nombre en el código para no traer ruido.
+// ---------------------------------------------------------------------------
+const GEOAPIFY_PROFILES: Array<{ match: RegExp; categories: string; name?: RegExp }> = [
+  { match: /property|real estate|hoa|apartment|facility|condo/, categories: "office", name: /property|management|realty|real estate|apartment|hoa|association|condo|leasing|rental|residential|communit/i },
+  { match: /hotel|vacation|rental|lodging|motel|resort/, categories: "accommodation" },
+  { match: /restaurant|cafe|food|catering/, categories: "catering" },
+  { match: /gym|fitness|aquatic|pool/, categories: "sport,leisure", name: /gym|fitness|crossfit|yoga|aquatic|swim|pool|athletic|health club/i },
+  { match: /school|education/, categories: "education" },
+  { match: /plumb/, categories: "service,office,commercial", name: /plumb|drain|rooter|pipe/i },
+  { match: /hvac|heating|cooling|air/, categories: "service,office,commercial", name: /hvac|heating|cooling|air cond|a\/c|\bac\b|furnace/i },
+  { match: /landscap|lawn|garden|tree|irrigat/, categories: "service,office,commercial", name: /landscap|lawn|garden|tree|mow|irrigat|turf|sod/i },
+  { match: /roof/, categories: "service,office,commercial", name: /roof|shingle/i },
+  { match: /electric/, categories: "service,office,commercial", name: /electric/i },
+  { match: /paint/, categories: "service,office,commercial", name: /paint/i },
+  { match: /pest|exterminat/, categories: "service,office,commercial", name: /pest|exterminat|termite|rodent/i },
+  { match: /clean|maid|janitor/, categories: "service,office,commercial", name: /clean|maid|janitor|wash/i },
+  { match: /floor|carpet|tile/, categories: "service,office,commercial", name: /floor|carpet|tile/i },
+  { match: /fenc/, categories: "service,office,commercial", name: /fenc/i },
+  { match: /concrete|paving|asphalt|mason/, categories: "service,office,commercial", name: /concrete|paving|asphalt|mason|cement/i },
+  { match: /garage|door/, categories: "service,office,commercial", name: /garage|door/i },
+  { match: /handyman|repair|appliance/, categories: "service,office,commercial", name: /handyman|repair|appliance|fix/i },
+  { match: /moving|junk|haul/, categories: "service,office,commercial", name: /moving|mover|junk|haul|relocat/i },
+  { match: /general contractor|construction|builder/, categories: "service,office,commercial", name: /construction|contractor|builder|remodel|build/i },
+];
+
+export async function fetchGeoapifyBusinesses(
+  city: string,
+  trade: string,
+  geo: { bbox: number[] } | null,
+  apiKey: string | undefined
+): Promise<{ businesses: any[]; status: string }> {
+  if (!apiKey || !apiKey.trim()) return { businesses: [], status: "skipped (no GEOAPIFY_API_KEY)" };
+  if (!geo || !geo.bbox || geo.bbox.length < 4) return { businesses: [], status: "skipped (no bbox)" };
+  const t = trade.toLowerCase();
+  const profile = GEOAPIFY_PROFILES.find(p => p.match.test(t));
+  if (!profile) return { businesses: [], status: "skipped (trade not mapped)" };
+  try {
+    const rect = `${geo.bbox[2]},${geo.bbox[0]},${geo.bbox[3]},${geo.bbox[1]}`; // lonMin,latMin,lonMax,latMax
+    const url = `https://api.geoapify.com/v2/places?categories=${encodeURIComponent(profile.categories)}&filter=rect:${rect}&limit=100&apiKey=${encodeURIComponent(apiKey.trim())}`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(9000) });
+    if (!res.ok) return { businesses: [], status: `HTTP ${res.status} (skipped)` };
+    const data: any = await res.json();
+    const out: any[] = [];
+    for (const f of (data?.features || [])) {
+      const p = f?.properties || {};
+      const name = String(p.name || "").trim();
+      if (!name) continue;
+      if (profile.name && !profile.name.test(name)) continue;
+      const raw = p.datasource?.raw || {};
+      out.push({
+        name,
+        city,
+        trade,
+        website: p.website || p.contact?.website || raw.website || raw["contact:website"] || null,
+        phone: p.contact?.phone || p.phone || raw.phone || raw["contact:phone"] || null,
+        email: p.contact?.email || p.email || raw.email || raw["contact:email"] || null,
+        source: "geoapify"
+      });
+    }
+    return { businesses: out, status: out.length ? `success (${out.length})` : "0 matches after name filter" };
+  } catch (e: any) {
+    return { businesses: [], status: `error: ${e.message} (skipped)` };
+  }
+}
+
 export async function fetchLocalBusinessesWithDiagnostics(
   city: string, 
   trade: string, 
@@ -7134,9 +7243,9 @@ export async function fetchLocalBusinessesWithDiagnostics(
 ): Promise<{ businesses: any[]; diagnostics: DiscoveryDiagnostics }> {
   const cacheKey = `radar_cache_${city.replace(/[^a-z0-9]/gi, "_")}_${trade}_v3`.toLowerCase();
   
-  if (env.CACHE) {
+  if (env.RADAR_DB) {
     try {
-      const cached = await env.CACHE.get(cacheKey);
+      const cached = await cacheGet(env, cacheKey);
       if (cached) {
         const parsed = JSON.parse(cached);
         return {
@@ -7154,7 +7263,7 @@ export async function fetchLocalBusinessesWithDiagnostics(
         };
       }
     } catch (e) {
-      console.warn("KV Cache read error: ", e);
+      console.warn("Cache read error: ", e);
     }
   }
 
@@ -7257,29 +7366,25 @@ export async function fetchLocalBusinessesWithDiagnostics(
   overpassStatus = overpassRes.status;
   rawBusinesses.push(...overpassRes.businesses);
 
-  // 3. Geoapify Places — when Overpass is weak (free tier ~3k credits/day)
-  let geoapifyStatus = "unattempted";
-  if (rawBusinesses.length < 5 && env.GEOAPIFY_API_KEY) {
-    const geoRes = await fetchGeoapifyPlaces(city, trade, env);
+  // 2.5 Geoapify Places (opcional, solo con GEOAPIFY_API_KEY): rescata zonas donde OSM está vacío
+  let geoapifyStatus = "skipped (no GEOAPIFY_API_KEY)";
+  if (env.GEOAPIFY_API_KEY && rawBusinesses.length < 15) {
+    const geoRes = await fetchGeoapifyBusinesses(city, trade, nominatimGeo, env.GEOAPIFY_API_KEY);
     geoapifyStatus = geoRes.status;
     rawBusinesses.push(...geoRes.businesses);
-  } else if (!env.GEOAPIFY_API_KEY) {
-    geoapifyStatus = "skipped_no_key";
-  } else {
-    geoapifyStatus = `skipped (have ${rawBusinesses.length})`;
   }
 
-  // 4. BizData Scraper — last fallback (tolerate HTTP 400)
-  // ENABLE_BIZDATA=0 → never use; ENABLE_BIZDATA=1 or unset → use when <5 results
+  // 3. BizData Scraper — auto-fallback when Overpass is weak unless explicitly disabled
+  // ENABLE_BIZDATA=0 → never use; ENABLE_BIZDATA=1 or unset → use when <5 Overpass results
   const bizDataExplicitlyOff = env.ENABLE_BIZDATA === "0" || env.ENABLE_BIZDATA === "false";
   if (rawBusinesses.length < 5 && !bizDataExplicitlyOff) {
     const bizDataRes = await fetchBizDataBusinesses(city, trade);
-    bizdataStatus = bizDataRes.status + `|geo=${geoapifyStatus}`;
+    bizdataStatus = bizDataRes.status;
     rawBusinesses.push(...bizDataRes.businesses);
   } else {
-    bizdataStatus = (rawBusinesses.length >= 5
+    bizdataStatus = rawBusinesses.length >= 5
       ? `skipped (have ${rawBusinesses.length} results)`
-      : "disabled (ENABLE_BIZDATA=0)") + `|geo=${geoapifyStatus}`;
+      : "disabled (ENABLE_BIZDATA=0)";
   }
 
   // Deduplicate: permit candidates go first
@@ -7298,7 +7403,7 @@ export async function fetchLocalBusinessesWithDiagnostics(
   const filtered = discoveredRaw - deduped.length;
   const reason = deduped.length > 0 
     ? `Discovered ${deduped.length} businesses for ${city} - ${trade} across discovery cascade`
-    : `Zero businesses discovered for ${city} - ${trade}. Nominatim: ${nominatimStatus}, Overpass: ${overpassStatus}, BizData: ${bizdataStatus}`;
+    : `Zero businesses discovered for ${city} - ${trade}. Nominatim: ${nominatimStatus}, Overpass: ${overpassStatus}, Geoapify: ${geoapifyStatus}, BizData: ${bizdataStatus}`;
 
   const diagnostics: DiscoveryDiagnostics = {
     city,
@@ -7309,14 +7414,13 @@ export async function fetchLocalBusinessesWithDiagnostics(
     discovered_raw: discoveredRaw,
     filtered,
     reason,
-    permits_found: permitsFound
+    permits_found: permitsFound,
+    geoapify_status: geoapifyStatus
   };
 
-  // Cache in KV for 24h
-  if (env.CACHE && deduped.length > 0) {
-    try {
-      await env.CACHE.put(cacheKey, JSON.stringify(deduped), { expirationTtl: 86400 });
-    } catch (e) {}
+  // Caché en D1: 24 h si hubo resultados; 30 min si salió vacío (evita martillar los espejos de Overpass).
+  if (env.RADAR_DB) {
+    await cachePut(env, cacheKey, JSON.stringify(deduped), deduped.length > 0 ? 86400 : 1800);
   }
 
   return { businesses: deduped, diagnostics };
@@ -7328,64 +7432,6 @@ export async function fetchLocalBusinessesWithDiagnostics(
 export async function fetchLocalBusinesses(city: string, trade: string, env: Env): Promise<any[]> {
   const res = await fetchLocalBusinessesWithDiagnostics(city, trade, env);
   return res.businesses;
-}
-
-export async function fetchGeoapifyPlaces(
-  city: string,
-  trade: string,
-  env: Env
-): Promise<{ businesses: any[]; status: string }> {
-  const key = env.GEOAPIFY_API_KEY ? String(env.GEOAPIFY_API_KEY).trim() : "";
-  if (!key) return { businesses: [], status: "skipped_no_key" };
-  const tradeMap: Record<string, string> = {
-    hvac: "service.building.plumber,service.building.electrician,service.construction",
-    plumbing: "service.building.plumber",
-    electrical: "service.building.electrician",
-    landscaping: "service.beauty,leisure.park",
-    lawn_care: "service.beauty",
-    roofing: "service.construction",
-    cleaning: "service.cleaning",
-    pool: "leisure.spa",
-    handyman: "service.construction",
-    pest_control: "service.cleaning",
-  };
-  const tkey = (trade || "").toLowerCase().replace(/\s+/g, "_");
-  const categories = tradeMap[tkey] || "service.construction,service.building.plumber,service.building.electrician";
-  try {
-    const geoUrl = `https://api.geoapify.com/v1/geocode/search?text=${encodeURIComponent(city)}&limit=1&apiKey=${encodeURIComponent(key)}`;
-    const geoRes = await fetch(geoUrl, { signal: AbortSignal.timeout(12000) });
-    if (!geoRes.ok) return { businesses: [], status: `geocode_http_${geoRes.status}` };
-    const geoJson: any = await geoRes.json();
-    const feat = geoJson?.features?.[0];
-    if (!feat?.geometry?.coordinates) return { businesses: [], status: "geocode_empty" };
-    const [lon, lat] = feat.geometry.coordinates;
-    const placesUrl = `https://api.geoapify.com/v2/places?categories=${encodeURIComponent(categories)}&filter=circle:${lon},${lat},12000&limit=20&apiKey=${encodeURIComponent(key)}`;
-    const placesRes = await fetch(placesUrl, { signal: AbortSignal.timeout(15000) });
-    if (!placesRes.ok) return { businesses: [], status: `places_http_${placesRes.status}` };
-    const placesJson: any = await placesRes.json();
-    const out: any[] = [];
-    for (const f of placesJson?.features || []) {
-      const p = f.properties || {};
-      const name = p.name || p.address_line1;
-      if (!name) continue;
-      out.push({
-        name,
-        city: p.city || city,
-        trade,
-        phone: p.contact?.phone || p.phone || "",
-        website: p.website || p.contact?.website || "",
-        email: p.email || p.contact?.email || "",
-        lat: f.geometry?.coordinates?.[1],
-        lon: f.geometry?.coordinates?.[0],
-        source: "geoapify",
-        address: p.formatted || p.address_line1 || "",
-      });
-    }
-    return { businesses: out, status: out.length ? `ok_${out.length}` : "empty" };
-  } catch (err: any) {
-    console.warn(`[Geoapify] ${city}/${trade}:`, err?.message || err);
-    return { businesses: [], status: `error_${String(err?.message || err).slice(0, 40)}` };
-  }
 }
 
 /**
@@ -7956,55 +8002,6 @@ export function buildLegalFooter(env: Env): string {
 /**
  * Centralized Outbound Telegram Notification Engine
  */
-
-/** Build wa.me deep link (user taps → WhatsApp opens with draft). Does NOT auto-send. */
-export function buildWhatsAppDeepLink(phone: string, message: string): string | null {
-  const digits = String(phone || "").replace(/\D/g, "");
-  if (digits.length < 10) return null;
-  // US default: if 10 digits, prefix 1
-  const e164 = digits.length === 10 ? `1${digits}` : digits;
-  return `https://wa.me/${e164}?text=${encodeURIComponent(message)}`;
-}
-
-/** Daily quota for offering WhatsApp links (D1). Default 5/day. */
-async function tryReserveWhatsAppSlot(env: Env): Promise<{ ok: boolean; used: number; max: number }> {
-  const max = Math.max(1, parseInt(String(env.FOUNDER_WA_MAX_PER_DAY || "5"), 10) || 5);
-  const day = new Date().toISOString().slice(0, 10);
-  const db = env.RADAR_DB;
-  try {
-    await db.prepare(`
-      CREATE TABLE IF NOT EXISTS founder_wa_daily (
-        day TEXT PRIMARY KEY,
-        sent_count INTEGER NOT NULL DEFAULT 0,
-        updated_at TEXT NOT NULL
-      )
-    `).run();
-    await db.prepare(
-      `INSERT OR IGNORE INTO founder_wa_daily (day, sent_count, updated_at) VALUES (?, 0, ?)`
-    ).bind(day, new Date().toISOString()).run();
-    const row = await db.prepare(`SELECT sent_count FROM founder_wa_daily WHERE day = ?`).bind(day).first() as any;
-    const used = row?.sent_count || 0;
-    if (used >= max) return { ok: false, used, max };
-    await db.prepare(
-      `UPDATE founder_wa_daily SET sent_count = sent_count + 1, updated_at = ? WHERE day = ? AND sent_count < ?`
-    ).bind(new Date().toISOString(), day, max).run();
-    return { ok: true, used: used + 1, max };
-  } catch (e) {
-    console.warn("[WA quota]", e);
-    return { ok: false, used: 0, max };
-  }
-}
-
-export function buildFounderWhatsAppMessage(prospect: any): string {
-  const name = prospect.name || "there";
-  const city = prospect.city || "";
-  const trade = (prospect.trade || "service").replace(/_/g, " ");
-  return (
-    `Hi ${name}, I help ${trade} businesses in ${city} recover missed calls and quote requests that never get a reply. ` +
-    `Would a quick 2-min look at a free gap check for your area be useful? — Bvelt`
-  );
-}
-
 export async function notifyFounder(
   env: Env,
   text: string,
