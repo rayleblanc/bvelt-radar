@@ -2061,9 +2061,9 @@ export default {
           SELECT id, name, city, trade, score, opportunity_score, tenant_id, expected_value,
                  fit_score, intent_score, pain_score, decision_state, why_now_json
           FROM prospects
-          WHERE COALESCE(score, opportunity_score, 0) >= 45
+          WHERE COALESCE(score, opportunity_score, 0) >= 40
             AND status NOT IN ('discarded','suppressed','blocked','disqualified')
-          ORDER BY COALESCE(score, opportunity_score, 0) DESC LIMIT 12
+          ORDER BY COALESCE(score, opportunity_score, 0) DESC LIMIT 40
         `).all();
         const nowIso = new Date().toISOString();
         let n = 0;
@@ -3498,6 +3498,24 @@ export async function startProspectingRun(
 
   console.log(`[Queue Run Initiated] Run ${runId} enqueued ${jobsEnqueued} discovery jobs for cities=[${activeCities.join(', ')}] trades=[${activeTrades.join(', ')}]`);
 
+  if (mode === "founder" && jobsEnqueued > 0 && env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID) {
+    try {
+      const chatId = String(env.TELEGRAM_CHAT_ID).trim().replace(/^["']|["']$/g, "");
+      const text =
+        `🛰️ <b>Radar run iniciado</b>\n` +
+        `Jobs discovery: <b>${jobsEnqueued}</b>\n` +
+        `Ciudades: ${(activeCities || []).slice(0, 6).join(", ")}\n` +
+        `Trades: ${(activeTrades || []).slice(0, 8).join(", ")}`;
+      await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chat_id: chatId, text, parse_mode: "HTML", disable_web_page_preview: true }),
+      });
+    } catch (e) {
+      console.warn("[startProspectingRun] Telegram run ping failed:", e);
+    }
+  }
+
   return {
     run_id: runId,
     jobs_enqueued: jobsEnqueued,
@@ -4868,7 +4886,8 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
   const isHotLead = (finalScore >= 90 && confidence >= 80) || 
     (detectedCount >= 3 && !!prospect.signal_event && bveltFitScore >= 15);
 
-  if (isHotLead && prospect.email) {
+  const isHotLeadRelaxed = isHotLead || (finalScore >= 75 && confidence >= 60);
+  if (isHotLeadRelaxed && !isHardRejectedChain(prospect.name)) {
     try {
       const alreadyAlerted = await env.RADAR_DB.prepare(
         "SELECT COUNT(*) as c FROM prospect_events WHERE prospect_id = ? AND event_type = 'hot_lead_alert_sent'"
@@ -4901,23 +4920,44 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
           `🔗 <b>Personalized Demo Link:</b>\n` +
           `<a href="${demoLink}">${demoLink}</a>`;
 
-        await notifyFounder(env, hotMsg).catch(() => {});
+        // Prefer email path; if no email but phone, offer manual WhatsApp deep-link (quota)
+        let waButtons: any[] | undefined;
+        if (!prospect.email && prospect.phone) {
+          const slot = await tryReserveWhatsAppSlot(env);
+          if (slot.ok) {
+            const waMsg = buildFounderWhatsAppMessage(prospect);
+            const waUrl = buildWhatsAppDeepLink(prospect.phone, waMsg);
+            if (waUrl) {
+              hotMsg += `\n\n📱 WhatsApp manual (${slot.used}/${slot.max} hoy): abre el chat y envía tú (no automático).`;
+              waButtons = [[{ text: "Abrir WhatsApp", url: waUrl }]];
+            }
+          }
+        }
+        await notifyFounder(env, hotMsg, waButtons).catch(() => {});
       }
     } catch (e) {
       console.warn("Error triggering Hot Lead alert:", e);
     }
   }
 
-  // Rule: "Pending approve" / QUEUED / HOLD only if: score >= 45 AND email present AND not hard-rejected
-  if (finalScore >= 45 && prospect.email && !isHardRejectedChain(prospect.name)) {
-    await enqueueJob(env, {
-      run_id: job.run_id,
-      job_id: `approve_${prospect_id}`,
-      type: 'approve',
-      mode: job.mode,
-      tenant_id: job.tenant_id,
-      payload: { prospect_id, overrides }
-    });
+  // Approve only with email; without email stay qualified for console
+  if (finalScore >= 45 && !isHardRejectedChain(prospect.name)) {
+    if (prospect.email) {
+      await enqueueJob(env, {
+        run_id: job.run_id,
+        job_id: `approve_${prospect_id}`,
+        type: 'approve',
+        mode: job.mode,
+        tenant_id: job.tenant_id,
+        payload: { prospect_id, overrides }
+      });
+    } else {
+      try {
+        await env.RADAR_DB.prepare(
+          "UPDATE prospects SET status = 'qualified', updated_at = ? WHERE id = ? AND status NOT IN ('sent','approved','queued','notified')"
+        ).bind(new Date().toISOString(), prospect_id).run();
+      } catch (_) {}
+    }
   }
 }
 
@@ -7215,17 +7255,29 @@ export async function fetchLocalBusinessesWithDiagnostics(
   overpassStatus = overpassRes.status;
   rawBusinesses.push(...overpassRes.businesses);
 
-  // 3. BizData Scraper — auto-fallback when Overpass is weak unless explicitly disabled
-  // ENABLE_BIZDATA=0 → never use; ENABLE_BIZDATA=1 or unset → use when <5 Overpass results
+  // 3. Geoapify Places — when Overpass is weak (free tier ~3k credits/day)
+  let geoapifyStatus = "unattempted";
+  if (rawBusinesses.length < 5 && env.GEOAPIFY_API_KEY) {
+    const geoRes = await fetchGeoapifyPlaces(city, trade, env);
+    geoapifyStatus = geoRes.status;
+    rawBusinesses.push(...geoRes.businesses);
+  } else if (!env.GEOAPIFY_API_KEY) {
+    geoapifyStatus = "skipped_no_key";
+  } else {
+    geoapifyStatus = `skipped (have ${rawBusinesses.length})`;
+  }
+
+  // 4. BizData Scraper — last fallback (tolerate HTTP 400)
+  // ENABLE_BIZDATA=0 → never use; ENABLE_BIZDATA=1 or unset → use when <5 results
   const bizDataExplicitlyOff = env.ENABLE_BIZDATA === "0" || env.ENABLE_BIZDATA === "false";
   if (rawBusinesses.length < 5 && !bizDataExplicitlyOff) {
     const bizDataRes = await fetchBizDataBusinesses(city, trade);
-    bizdataStatus = bizDataRes.status;
+    bizdataStatus = bizDataRes.status + `|geo=${geoapifyStatus}`;
     rawBusinesses.push(...bizDataRes.businesses);
   } else {
-    bizdataStatus = rawBusinesses.length >= 5
+    bizdataStatus = (rawBusinesses.length >= 5
       ? `skipped (have ${rawBusinesses.length} results)`
-      : "disabled (ENABLE_BIZDATA=0)";
+      : "disabled (ENABLE_BIZDATA=0)") + `|geo=${geoapifyStatus}`;
   }
 
   // Deduplicate: permit candidates go first
@@ -7844,6 +7896,55 @@ export function buildLegalFooter(env: Env): string {
 /**
  * Centralized Outbound Telegram Notification Engine
  */
+
+/** Build wa.me deep link (user taps → WhatsApp opens with draft). Does NOT auto-send. */
+export function buildWhatsAppDeepLink(phone: string, message: string): string | null {
+  const digits = String(phone || "").replace(/\D/g, "");
+  if (digits.length < 10) return null;
+  // US default: if 10 digits, prefix 1
+  const e164 = digits.length === 10 ? `1${digits}` : digits;
+  return `https://wa.me/${e164}?text=${encodeURIComponent(message)}`;
+}
+
+/** Daily quota for offering WhatsApp links (D1). Default 5/day. */
+async function tryReserveWhatsAppSlot(env: Env): Promise<{ ok: boolean; used: number; max: number }> {
+  const max = Math.max(1, parseInt(String(env.FOUNDER_WA_MAX_PER_DAY || "5"), 10) || 5);
+  const day = new Date().toISOString().slice(0, 10);
+  const db = env.RADAR_DB;
+  try {
+    await db.prepare(`
+      CREATE TABLE IF NOT EXISTS founder_wa_daily (
+        day TEXT PRIMARY KEY,
+        sent_count INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL
+      )
+    `).run();
+    await db.prepare(
+      `INSERT OR IGNORE INTO founder_wa_daily (day, sent_count, updated_at) VALUES (?, 0, ?)`
+    ).bind(day, new Date().toISOString()).run();
+    const row = await db.prepare(`SELECT sent_count FROM founder_wa_daily WHERE day = ?`).bind(day).first() as any;
+    const used = row?.sent_count || 0;
+    if (used >= max) return { ok: false, used, max };
+    await db.prepare(
+      `UPDATE founder_wa_daily SET sent_count = sent_count + 1, updated_at = ? WHERE day = ? AND sent_count < ?`
+    ).bind(new Date().toISOString(), day, max).run();
+    return { ok: true, used: used + 1, max };
+  } catch (e) {
+    console.warn("[WA quota]", e);
+    return { ok: false, used: 0, max };
+  }
+}
+
+export function buildFounderWhatsAppMessage(prospect: any): string {
+  const name = prospect.name || "there";
+  const city = prospect.city || "";
+  const trade = (prospect.trade || "service").replace(/_/g, " ");
+  return (
+    `Hi ${name}, I help ${trade} businesses in ${city} recover missed calls and quote requests that never get a reply. ` +
+    `Would a quick 2-min look at a free gap check for your area be useful? — Bvelt`
+  );
+}
+
 export async function notifyFounder(
   env: Env,
   text: string,
