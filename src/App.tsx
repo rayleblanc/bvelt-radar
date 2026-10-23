@@ -7,6 +7,9 @@
 
 import React, { useState, useEffect } from 'react';
 import { 
+  BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid
+} from 'recharts';
+import { 
   Radar, 
   Settings, 
   ShieldAlert, 
@@ -1563,6 +1566,34 @@ const submitDecision = async (prospectId: string, action: string) => {
                   </div>
                 )}
 
+                {/* HISTORICAL CONVERSION FUNNEL CHART (RECHARTS) */}
+                <div className="bg-slate-900/40 border border-slate-800 rounded-2xl p-4 space-y-3 font-mono">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-slate-300 uppercase">Tasa de Conversión Histórica (Funnel)</span>
+                    <span className="text-[10px] text-slate-500 font-sans">Prospects → Contacted → Replied → Won</span>
+                  </div>
+                  <div className="w-full h-48 pt-2">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={[
+                        { name: 'Prospects', count: roiStats?.total ?? prospects.length, fill: '#3b82f6' },
+                        { name: 'Contacted', count: roiStats?.outreach ?? prospects.filter(p => p.status === 'sent' || p.status === 'delivered' || p.status === 'opened' || p.status === 'clicked' || p.status === 'replied' || p.status === 'won').length, fill: '#6366f1' },
+                        { name: 'Replied', count: prospects.filter(p => p.status === 'replied' || p.status === 'positive' || p.status === 'question' || p.status === 'won').length, fill: '#f59e0b' },
+                        { name: 'Won', count: prospects.filter(p => p.status === 'won' || p.outcome === 'won').length, fill: '#10b981' }
+                      ]} margin={{ top: 5, right: 10, left: -20, bottom: 0 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
+                        <XAxis dataKey="name" stroke="#64748b" fontSize={10} tickLine={false} />
+                        <YAxis stroke="#64748b" fontSize={10} tickLine={false} />
+                        <Tooltip 
+                          contentStyle={{ backgroundColor: '#0f172a', borderColor: '#334155', borderRadius: '0.75rem', fontSize: '11px', fontFamily: 'monospace' }}
+                          itemStyle={{ color: '#e2e8f0' }}
+                          cursor={{ fill: 'rgba(51, 65, 85, 0.2)' }}
+                        />
+                        <Bar dataKey="count" radius={[6, 6, 0, 0]} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+
                 {/* Priority filter pills */}
                 <div className="flex items-center gap-1.5 overflow-x-auto pb-1 no-scrollbar text-[10px] font-mono font-bold">
                   {(['ALL', 'high', 'medium', 'low']).map(pTier => (
@@ -2112,6 +2143,48 @@ const submitDecision = async (prospectId: string, action: string) => {
                                     className="h-9 text-[10px] font-bold rounded-lg bg-emerald-950/40 border border-emerald-800 text-emerald-300">Ganado $</button>
                                 </div>
                               )}
+
+                              {/* TIMELINE SECTION (STATUS / EVENT HISTORY) */}
+                              <div className="bg-slate-950 border border-slate-900 rounded-xl p-3 space-y-2 mt-2 font-mono">
+                                <div className="flex items-center justify-between text-[10px] text-slate-400 border-b border-slate-900 pb-1.5 font-bold uppercase">
+                                  <span>⏱ Historial de Estado (Timeline)</span>
+                                  <span>Fechas y Eventos</span>
+                                </div>
+                                <div className="space-y-2 pt-1 text-[11px]">
+                                  <div className="flex items-center justify-between text-slate-300">
+                                    <div className="flex items-center gap-2">
+                                      <span className="w-2 h-2 rounded-full bg-blue-500"></span>
+                                      <span className="font-semibold uppercase text-[10px]">Scouted / Creado</span>
+                                    </div>
+                                    <span className="text-slate-500 text-[10px]">{new Date(p.created_at).toLocaleString()}</span>
+                                  </div>
+                                  {p.status && p.status !== 'scouted' && (
+                                    <div className="flex items-center justify-between text-slate-300">
+                                      <div className="flex items-center gap-2">
+                                        <span className={`w-2 h-2 rounded-full ${
+                                          p.status === 'sent' ? 'bg-blue-400' :
+                                          p.status === 'delivered' ? 'bg-indigo-400' :
+                                          p.status === 'opened' ? 'bg-purple-400' :
+                                          p.status === 'clicked' ? 'bg-amber-400' :
+                                          p.status === 'replied' ? 'bg-amber-500' :
+                                          p.status === 'won' ? 'bg-emerald-400' : 'bg-slate-400'
+                                        }`}></span>
+                                        <span className="font-semibold uppercase text-[10px]">Estado: {p.status}</span>
+                                      </div>
+                                      <span className="text-slate-500 text-[10px]">Actualizado</span>
+                                    </div>
+                                  )}
+                                  {p.outcome && (
+                                    <div className="flex items-center justify-between text-slate-300">
+                                      <div className="flex items-center gap-2">
+                                        <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
+                                        <span className="font-semibold uppercase text-[10px]">Resultado: {p.outcome}</span>
+                                      </div>
+                                      <span className="text-slate-500 text-[10px]">Registrado</span>
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
                             </div>
                           )}
                         </div>
