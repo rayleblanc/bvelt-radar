@@ -490,15 +490,25 @@ export default function App() {
         setProspects(sorted);
         setIsAuthenticated(true);
 
-        // Fetch Opportunity Intelligence data
+        // Fetch Opportunity Intelligence data (founder sin tenant_id; tenant siempre con tenant_id)
         try {
-          const oppUrl = `${apiUrl}/opportunities${queryParam}`;
-          const oppRes = await fetch(oppUrl, { credentials: 'include' });
+          let oppRes = await fetch(`${apiUrl}/opportunities${queryParam}`, { credentials: 'include' }).catch(() => null);
+          if (!oppRes || !oppRes.ok) {
+            oppRes = await fetch(`${apiUrl}/api/opportunities${queryParam}`, { credentials: 'include' }).catch(() => null);
+          }
           if (oppRes && oppRes.ok) {
             const oppList = await oppRes.json();
-            if (Array.isArray(oppList)) setOpportunities(oppList);
+            if (Array.isArray(oppList)) {
+              setOpportunities(oppList);
+            } else if (oppList && Array.isArray((oppList as any).opportunities)) {
+              setOpportunities((oppList as any).opportunities);
+            } else {
+              setOpportunities([]);
+            }
           }
-        } catch (e) {}
+        } catch (e) {
+          console.warn("[fetchTelemetry] opportunities:", e);
+        }
 
         // Fetch Missions data
         try {
@@ -1629,6 +1639,7 @@ const submitDecision = async (prospectId: string, action: string) => {
                                 : "?";
                             let offset = 0;
                             let total = 0;
+                            let skipped = 0;
                             let rounds = 0;
                             let lastMsg = "";
                             // Max 5 × 15 = 75 opps / click (Free D1 safe)
@@ -1643,13 +1654,18 @@ const submitDecision = async (prospectId: string, action: string) => {
                                 break;
                               }
                               total += data.opportunities_created || 0;
+                              skipped += data.skipped_existing || 0;
                               lastMsg = data.message || "";
                               rounds++;
                               if (!data.has_more) break;
                               offset = data.next_offset ?? offset + 15;
                             }
-                            alert(`✓ ${total} oportunidades en ${rounds} lote(s).\n${lastMsg}`);
-                            fetchTelemetry();
+                            alert(
+                              `✓ ${total} nuevas en ${rounds} lote(s)` +
+                              (skipped ? ` (${skipped} ya existían)` : "") +
+                              `.\n${lastMsg}`
+                            );
+                            await fetchTelemetry();
                           } catch (e: any) {
                             alert("Error de red: " + e.message);
                           }

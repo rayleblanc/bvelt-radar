@@ -1066,16 +1066,19 @@ export default {
 
       // 8c-bis. Backfill opportunities — FREE PLAN SAFE (≤50 D1 ops / invocation)
       // Lotes de 15; la UI puede pedir varios offsets seguidos.
+      // Founder sin tenant_id => SOLO founder. Tenant con tenant_id => SOLO ese tenant.
+      // Contador real vía meta.changes (INSERT OR IGNORE no debe inflar "creadas").
       if ((path === "/api/opportunities/backfill" || path === "/opportunities/backfill") && method === "POST") {
         try {
           await ensureOpportunitiesSchema(env.RADAR_DB);
-          const tenantFilter = url.searchParams.get("tenant_id");
+          // Sin tenant_id => founder (nunca mezclar tenants en backfill founder)
+          const scopeTenant = (url.searchParams.get("tenant_id") || "founder").trim() || "founder";
           const batchSize = Math.min(parseInt(url.searchParams.get("limit") || "15", 10), 20);
           const offset = Math.max(parseInt(url.searchParams.get("offset") || "0", 10), 0);
 
           let prospects: any[] = [];
           try {
-            let q = `SELECT p.id, p.name, p.city, p.trade, p.score, p.opportunity_score,
+            const q = `SELECT p.id, p.name, p.city, p.trade, p.score, p.opportunity_score,
                             p.fit_score, p.intent_score, p.pain_score, p.ability_to_pay_score,
                             p.contactability_score, p.timing_score, p.evidence_score,
                             p.signal_freshness_score, p.expected_value, p.decision_state,
@@ -1083,54 +1086,59 @@ export default {
                      FROM prospects p
                      WHERE COALESCE(p.score, p.opportunity_score, 0) >= 40
                        AND p.status NOT IN ('discarded','suppressed','blocked','disqualified')
+                       AND COALESCE(p.tenant_id,'founder') = ?
                        AND NOT EXISTS (
                          SELECT 1 FROM opportunities o
                          WHERE o.id = 'opp_' || p.id OR o.prospect_id = p.id
-                       )`;
-            const binds: any[] = [];
-            if (tenantFilter) {
-              q += ` AND COALESCE(p.tenant_id,'founder') = ?`;
-              binds.push(tenantFilter);
-            }
-            q += ` ORDER BY COALESCE(p.score, p.opportunity_score, 0) DESC LIMIT ? OFFSET ?`;
-            binds.push(batchSize, offset);
-            const rows = await env.RADAR_DB.prepare(q).bind(...binds).all();
+                       )
+                     ORDER BY COALESCE(p.score, p.opportunity_score, 0) DESC LIMIT ? OFFSET ?`;
+            const rows = await env.RADAR_DB.prepare(q).bind(scopeTenant, batchSize, offset).all();
             prospects = rows.results || [];
           } catch (qe: any) {
             console.warn("[backfill] NOT EXISTS failed:", qe?.message || qe);
-            let q2 = `SELECT id, name, city, trade, score, opportunity_score,
+            const q2 = `SELECT id, name, city, trade, score, opportunity_score,
                              fit_score, intent_score, pain_score, ability_to_pay_score,
                              contactability_score, timing_score, evidence_score,
                              signal_freshness_score, expected_value, decision_state,
                              why_now_json, tenant_id, status
                       FROM prospects
                       WHERE COALESCE(score, opportunity_score, 0) >= 40
-                        AND status NOT IN ('discarded','suppressed','blocked','disqualified')`;
-            const b2: any[] = [];
-            if (tenantFilter) {
-              q2 += ` AND COALESCE(tenant_id,'founder') = ?`;
-              b2.push(tenantFilter);
-            }
-            q2 += ` ORDER BY COALESCE(score, opportunity_score, 0) DESC LIMIT ? OFFSET ?`;
-            b2.push(batchSize, offset);
-            const rows = await env.RADAR_DB.prepare(q2).bind(...b2).all();
-            prospects = rows.results || [];
+                        AND status NOT IN ('discarded','suppressed','blocked','disqualified')
+                        AND COALESCE(tenant_id,'founder') = ?
+                      ORDER BY COALESCE(score, opportunity_score, 0) DESC LIMIT ? OFFSET ?`;
+            const rows = await env.RADAR_DB.prepare(q2).bind(scopeTenant, batchSize, offset).all();
+            // Fallback sin NOT EXISTS: filtrar en memoria los que ya tienen oportunidad
+            const raw = rows.results || [];
+            const existing = new Set<string>();
+            try {
+              const ex = await env.RADAR_DB.prepare(
+                `SELECT id, prospect_id FROM opportunities WHERE COALESCE(tenant_id,'founder') = ? LIMIT 500`
+              ).bind(scopeTenant).all();
+              for (const r of (ex.results || []) as any[]) {
+                if (r.id) existing.add(String(r.id));
+                if (r.prospect_id) existing.add(`opp_${r.prospect_id}`);
+                if (r.prospect_id) existing.add(String(r.prospect_id));
+              }
+            } catch { /* ok */ }
+            prospects = raw.filter((p: any) => !existing.has(`opp_${p.id}`) && !existing.has(String(p.id)));
           }
 
           const nowIso = new Date().toISOString();
           let created = 0;
+          let skippedExisting = 0;
           let failed = 0;
           const errors: string[] = [];
 
           for (const p of prospects) {
             const oppId = `opp_${p.id}`;
             const stratScore = Math.round(p.opportunity_score || p.score || 50);
-            const tenantId = p.tenant_id || "founder";
+            // Respetar scope: forzar tenant del backfill (no heredar null raro de otro tenant)
+            const tenantId = scopeTenant;
             const mode = tenantId === "founder" ? "founder" : "tenant";
             const title = `${p.name} — ${p.trade || "service"} (${p.city || ""})`;
             const priority = stratScore >= 80 ? "high" : stratScore >= 55 ? "medium" : "low";
             try {
-              await env.RADAR_DB.prepare(`
+              const ins = await env.RADAR_DB.prepare(`
                 INSERT OR IGNORE INTO opportunities (
                   id, prospect_id, tenant_id, mode, title,
                   first_seen_at, last_seen_at, status,
@@ -1157,18 +1165,26 @@ export default {
                 priority,
                 nowIso, nowIso
               ).run();
-              created++;
+              const changes = Number((ins as any)?.meta?.changes ?? 0);
+              if (changes > 0) created++;
+              else skippedExisting++;
             } catch (ie: any) {
               failed++;
               if (errors.length < 3) errors.push(String(ie?.message || ie).slice(0, 140));
               try {
-                await env.RADAR_DB.prepare(`
+                const ins2 = await env.RADAR_DB.prepare(`
                   INSERT OR IGNORE INTO opportunities
-                    (id, prospect_id, tenant_id, mode, title, first_seen_at, last_seen_at, strategic_score, created_at, updated_at)
-                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                `).bind(oppId, p.id, tenantId, mode, title, nowIso, nowIso, stratScore, nowIso, nowIso).run();
-                created++;
-                failed--;
+                    (id, prospect_id, tenant_id, mode, title, first_seen_at, last_seen_at, strategic_score, priority_tier, created_at, updated_at)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                `).bind(oppId, p.id, tenantId, mode, title, nowIso, nowIso, stratScore, priority, nowIso, nowIso).run();
+                const changes2 = Number((ins2 as any)?.meta?.changes ?? 0);
+                if (changes2 > 0) {
+                  created++;
+                  failed--;
+                } else {
+                  skippedExisting++;
+                  failed--;
+                }
               } catch { /* keep failed */ }
             }
           }
@@ -1176,8 +1192,10 @@ export default {
           const hasMore = prospects.length >= batchSize;
           return Response.json({
             success: true,
+            scope_tenant: scopeTenant,
             prospects_scanned: prospects.length,
             opportunities_created: created,
+            skipped_existing: skippedExisting,
             failed,
             offset,
             batch_size: batchSize,
@@ -1185,8 +1203,8 @@ export default {
             has_more: hasMore,
             errors: errors.length ? errors : undefined,
             message: hasMore
-              ? `Lote OK: ${created} creadas. Siguiente offset ${offset + batchSize}.`
-              : `Listo: ${created} en este lote. Fallos: ${failed}.`
+              ? `Lote OK: ${created} nuevas, ${skippedExisting} ya existían. Siguiente offset ${offset + batchSize}.`
+              : `Listo: ${created} nuevas, ${skippedExisting} ya existían. Fallos: ${failed}.`
           }, { headers: corsHeaders });
         } catch (e: any) {
           return Response.json({
@@ -4352,6 +4370,31 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
       candidates: scraped.length,
       qualified: enqueuedEnrich
     });
+  }
+
+  // Aviso operativo a Telegram: solo cuando el autónomo ENCONTRÓ algo nuevo.
+  // Founder = clientes para Bvelt. Tenant = clientes potenciales para un cliente Bvelt.
+  // No es outreach ni aprobación: es heartbeat de que el radar está trabajando.
+  if (enqueuedEnrich > 0) {
+    try {
+      const isTenant = job.mode === "tenant" && !!job.tenant_id;
+      const scopeLabel = isTenant
+        ? `Tenant <code>${escapeHtml(String(job.tenant_id))}</code>`
+        : "Founder (Bvelt)";
+      const purpose = isTenant
+        ? "Clientes potenciales para tu cliente Bvelt"
+        : "Prospectos para Bvelt";
+      const msg =
+        `<b>📡 Radar discovery OK</b>\n` +
+        `<b>Modo:</b> ${scopeLabel}\n` +
+        `<b>Mercado:</b> ${escapeHtml(String(city))} · ${escapeHtml(String(trade))}\n` +
+        `<b>Raw:</b> ${scraped.length} · <b>Nuevos en cola:</b> ${enqueuedEnrich}\n` +
+        `<b>Objetivo:</b> ${purpose}\n` +
+        `<b>run:</b> <code>${escapeHtml(String(job.run_id || "").slice(0, 13))}…</code>`;
+      await notifyFounder(env, msg).catch(() => {});
+    } catch (tgDiscErr) {
+      console.warn("[discovery] telegram summary failed:", tgDiscErr);
+    }
   }
 }
 
