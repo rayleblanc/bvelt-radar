@@ -89,6 +89,7 @@ export interface Env {
   TRUST_STACK_URL?: string;
   TRUST_SERVICE_KEY?: string;
   TRUST_STACK_KEY?: string;
+  WEBHOOK_SECRET?: string; // token para webhooks de correo (?token=...)
   FOUNDING_CITIES?: string; // e.g. "Tampa, FL;Austin, TX"
   FOUNDING_TRADES?: string; // e.g. "landscaping;hvac;plumbing"
   FOUNDER_AUTO_OUTREACH?: string;
@@ -877,7 +878,13 @@ export default {
       }
 
       // Enforce authorization for remaining admin endpoints (/stats, /decision, /suppression, /api/telegram-test)
-      if (!authorized) {
+      // Webhooks de correo (Resend/Brevo) no pueden enviar "Authorization: Bearer": se validan con un token secreto en la URL.
+      // Opcional (tiempo real): registra el webhook como https://TU-WORKER/webhook/resend?token=<TELEGRAM_WEBHOOK_SECRET>. Sin esto, el cron consulta a Resend igualmente.
+      const isWebhookPath = method === "POST" && ["/api/events", "/events", "/api/reply", "/webhook/events", "/webhook/resend", "/webhook/brevo"].includes(path);
+      const webhookSecret = (((env as any).WEBHOOK_SECRET || env.TELEGRAM_WEBHOOK_SECRET || "") as string).trim() || undefined;
+      const webhookOk = isWebhookPath && !!webhookSecret && url.searchParams.get("token") === webhookSecret;
+
+      if (!authorized && !webhookOk) {
         return Response.json({ error: "Unauthorized. Missing or invalid service key." }, { status: 401, headers: corsHeaders });
       }
 
@@ -2120,27 +2127,37 @@ export default {
       try {
         await pruneRadarCache(env);
         await run;
-        // El cron corre 3 veces al día; los tenants se refrescan una sola vez (12:00 UTC) para no triplicar
-        // trabajo en cola ni gasto de APIs. TENANT_REFRESH_EVERY_CRON=1 lo fuerza en todas.
-        const cronHourUtc = new Date((event as any)?.scheduledTime || Date.now()).getUTCHours();
-        if (cronHourUtc !== 12 && !(env as any).TENANT_REFRESH_EVERY_CRON) return;
-        const maxTenants = Math.max(0, Math.min(10, parseInt((env as any).TENANT_REFRESH_PER_CRON || "3", 10) || 3));
+        // Reparto justo (round-robin): se refresca primero al tenant que lleva más tiempo sin refresco.
+        // Antes: siempre los 3 más recientes => con 200 clientes, el resto nunca se actualizaba.
+        const maxTenants = Math.max(0, Math.min(10, parseInt((env as any).TENANT_REFRESH_PER_CRON || "2", 10) || 2));
         if (maxTenants === 0) return;
-        const since = new Date(Date.now() - 14 * 24 * 3600 * 1000).toISOString();
+        await env.RADAR_DB.prepare(`CREATE TABLE IF NOT EXISTS tenant_refresh_log (tenant_id TEXT PRIMARY KEY, last_at TEXT NOT NULL)`).run();
+        const since = new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString();
         const rows = await env.RADAR_DB.prepare(`
-          SELECT tenant_id, niche, cities_json FROM tenant_config
-          WHERE tenant_id LIKE 'bvelt_%' AND updated_at >= ?
-          ORDER BY updated_at DESC LIMIT ?
+          SELECT c.tenant_id, c.niche, c.subniches_json, c.cities_json
+          FROM tenant_config c
+          LEFT JOIN tenant_refresh_log l ON l.tenant_id = c.tenant_id
+          WHERE c.tenant_id LIKE 'bvelt_%' AND c.updated_at >= ?
+          ORDER BY COALESCE(l.last_at, '') ASC, c.updated_at DESC
+          LIMIT ?
         `).bind(since, maxTenants).all();
+        const dayOfYear = Math.floor((Date.now() - Date.UTC(new Date().getUTCFullYear(), 0, 0)) / 86400000);
         for (const t of (rows.results || []) as any[]) {
           let city = "";
           try { city = String((JSON.parse(t.cities_json || "[]") as any[])[0] || ""); } catch { /* ignore */ }
           if (!city) continue;
-          const trade = String(t.niche || "").toLowerCase().includes("hotel") ? "hotel" : "property management";
+          // Rota entre TODOS los compradores del cliente (administradores, HOA, hoteles...), no solo uno
+          let pool: string[] = [];
+          try { pool = (JSON.parse(t.subniches_json || "[]") as any[]).map(x => String(x).toLowerCase()); } catch { /* ignore */ }
+          if (!pool.length && t.niche) pool = [String(t.niche).toLowerCase()];
+          const pick = pool.length ? pool[dayOfYear % pool.length] : "property management";
+          const trade = /hotel|motel|resort|inn\b/.test(pick) ? "hotel" : /hoa|homeowner/.test(pick) ? "hoa" : "property management";
           try {
             await startProspectingRun(env, "tenant", t.tenant_id, {
               cities: city, trades: trade, countries: null, languages: null, min_score: null
             });
+            await env.RADAR_DB.prepare(`INSERT OR REPLACE INTO tenant_refresh_log (tenant_id, last_at) VALUES (?, ?)`)
+              .bind(t.tenant_id, new Date().toISOString()).run();
           } catch (e) {
             console.warn("[Radar Cron] tenant refresh failed for", t.tenant_id, e);
           }
@@ -2149,12 +2166,15 @@ export default {
         console.warn("[Radar Cron] tenant refresh error:", e);
       }
     })();
+    const reconcile = reconcileResendDeliveries(env).catch(e => console.warn("[Radar Cron] resend reconcile failed:", e));
     if (ctx && typeof ctx.waitUntil === "function") {
       ctx.waitUntil(heal);
       ctx.waitUntil(tenantRefresh);
+      ctx.waitUntil(reconcile);
     } else {
       await heal;
       await tenantRefresh;
+      await reconcile;
     }
   },
 
@@ -3818,50 +3838,12 @@ export async function classifyWithClef(
   name: string,
   website: string | null | undefined,
   trade: string,
-  city: string,
-  mode: string
+  _city: string,
+  _mode: string
 ): Promise<{ ok: boolean; reason: string }> {
-  if (!env.AI || typeof env.AI.run !== "function") {
-    return { ok: true, reason: "no_ai_binding" };
-  }
-  try {
-    const response: any = await env.AI.run("@cf/cloudflare/clef-flash", {
-      model: "clef-flash",
-      state: {
-        name: name || "unknown",
-        website: website || "n/a",
-        trade: trade || "service",
-        city: city || "unknown"
-      },
-      questions: {
-        real_local_business: {
-          type: "noul",
-          instructions:
-            "Is `name` a real local business that sells services to the public (not a government office, university, church, association, directory listing, or national chain headquarters)?"
-        },
-        independent: {
-          type: "noul",
-          instructions:
-            "Is `name` an independent local operator and not a national franchise or big-box chain (Walmart, Home Depot, national brands)?"
-        }
-      }
-    });
-    const answers = response?.answers || response;
-    const real = Number(answers?.real_local_business?.noul ?? answers?.real_local_business ?? 1);
-    const indep = Number(answers?.independent?.noul ?? answers?.independent ?? 1);
-    const okReal = real >= 0.35;
-    const okIndep = mode === "tenant" ? true : indep >= 0.25;
-    if (!okReal || !okIndep) {
-      return {
-        ok: false,
-        reason: `clef reject real=${real.toFixed(2)} indep=${indep.toFixed(2)}`
-      };
-    }
-    return { ok: true, reason: `clef ok real=${real.toFixed(2)} indep=${indep.toFixed(2)}` };
-  } catch (e: any) {
-    console.warn("[classifyWithClef] fallback allow:", e?.message || e);
-    return { ok: true, reason: "clef_error_allow" };
-  }
+  // "@cf/cloudflare/clef-flash" no existe en el catálogo de Workers AI: cada llamada fallaba y se permitía todo.
+  // Ahora se usa directamente el modelo real (llama-3.2-3b) con el filtro de negocio real / cadena / institución.
+  return classifyWithWorkersAI(env, name, website || null, trade);
 }
 
 export async function classifyWithWorkersAI(
@@ -3917,6 +3899,63 @@ export async function classifyWithWorkersAI(
   } catch (e: any) {
     return { ok: true, reason: e.message || "error_open" };
   }
+}
+
+
+/**
+ * Conciliación con Resend SIN webhook: consulta el estado real de los correos enviados (RESEND_API_KEY ya existente).
+ * Rebote o queja => el prospecto queda bloqueado y su correo/dominio entra a la lista de supresión,
+ * para proteger la reputación del dominio aunque nunca llegue un webhook.
+ */
+export async function reconcileResendDeliveries(env: Env): Promise<{ checked: number; bounced: number; complained: number }> {
+  const out = { checked: 0, bounced: 0, complained: 0 };
+  const key = String((env as any).RESEND_API_KEY || "").trim();
+  if (!key || !env.RADAR_DB) return out;
+
+  const since = new Date(Date.now() - 10 * 24 * 3600 * 1000).toISOString();
+  const rows = await env.RADAR_DB.prepare(`
+    SELECT id, email, dispatch_message_id
+    FROM prospects
+    WHERE dispatch_provider = 'resend'
+      AND dispatch_message_id IS NOT NULL AND dispatch_message_id != ''
+      AND COALESCE(dispatch_status, '') NOT IN ('delivered', 'bounced', 'complained', 'opened', 'clicked')
+      AND last_contact_at >= ?
+    ORDER BY last_contact_at DESC
+    LIMIT 20
+  `).bind(since).all();
+
+  for (const p of (rows.results || []) as any[]) {
+    try {
+      const res = await fetch(`https://api.resend.com/emails/${encodeURIComponent(p.dispatch_message_id)}`, {
+        headers: { Authorization: `Bearer ${key}` },
+        signal: AbortSignal.timeout(6000)
+      });
+      if (res.status === 429) break; // límite de Resend: seguimos en el próximo cron
+      if (!res.ok) continue;
+      const data: any = await res.json().catch(() => ({}));
+      const ev = String(data?.last_event || "").toLowerCase();
+      if (!ev) continue;
+      out.checked++;
+      const now = new Date().toISOString();
+
+      if (ev === "bounced" || ev === "complained") {
+        const email = String(p.email || "").trim().toLowerCase();
+        await env.RADAR_DB.prepare(
+          "UPDATE prospects SET status = ?, outcome = ?, dispatch_status = ?, updated_at = ? WHERE id = ?"
+        ).bind(ev === "complained" ? "suppressed" : "bounced", ev, ev, now, p.id).run();
+        if (email) {
+          await env.RADAR_DB.prepare("INSERT OR REPLACE INTO suppression (key, reason, created_at) VALUES (?, ?, ?)")
+            .bind(email, `resend_${ev}`, now).run();
+        }
+        if (ev === "bounced") out.bounced++; else out.complained++;
+      } else if (["delivered", "opened", "clicked"].includes(ev)) {
+        await env.RADAR_DB.prepare("UPDATE prospects SET dispatch_status = ?, updated_at = ? WHERE id = ?")
+          .bind(ev, now, p.id).run();
+      }
+    } catch { /* un correo que falla no frena al resto */ }
+    await new Promise(r => setTimeout(r, 600)); // Resend permite ~2 req/s
+  }
+  return out;
 }
 
 /**
