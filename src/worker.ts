@@ -3228,7 +3228,18 @@ async function bootstrapBveltTenant(
     if (nearest) cityLabel = formatPlaceLabel(nearest);
   }
   if (!cityLabel) {
-    cityLabel = "Tampa, FL"; // last-resort so bootstrap never no-ops
+    // Antes caía en "Tampa, FL" y un cliente de Naples/Austin recibía leads de la ciudad equivocada.
+    // Mejor decir la verdad: sin ciudad no hay búsqueda, y Bvelt usa sus fuentes propias.
+    return {
+      success: false,
+      tenant_id: tenantId,
+      city: "",
+      niches: [],
+      run_id: null,
+      leads: [],
+      message: "city_required: falta ciudad o coordenadas del cliente; Radar no inventa ubicación.",
+      source
+    };
   }
 
   // Contractor trade → who they sell TO (buyer ICP)
