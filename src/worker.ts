@@ -948,21 +948,48 @@ export default {
         const tenantId = url.searchParams.get("tenant_id");
         const minScore = parseInt(url.searchParams.get("min_score") || "0", 10);
         // Founder UI omits tenant_id → scope founder only (never mix tenants)
-        const scopeTenant = tenantId || "founder";
+        const scopeTenant = (tenantId || "founder").trim() || "founder";
 
-        // Auto-curación: 234 prospectos y 0 oportunidades = el heal del cron no corrió o falló.
-        // Si la lista está vacía, crea un lote chico (12 -> dentro del límite de D1 del plan gratis) antes de responder.
+        // Normaliza tenant_id: en SQLite COALESCE('','founder') NO corrige string vacío.
+        // También repara filas huérfanas alineando tenant_id al del prospecto.
+        try {
+          await ensureOpportunitiesSchema(env.RADAR_DB);
+          await env.RADAR_DB.prepare(`
+            UPDATE opportunities
+            SET tenant_id = 'founder'
+            WHERE tenant_id IS NULL OR TRIM(tenant_id) = '' OR LOWER(TRIM(tenant_id)) = 'null'
+          `).run();
+          // Alinear tenant_id de la oportunidad al del prospecto cuando el prospecto tiene tenant real
+          await env.RADAR_DB.prepare(`
+            UPDATE opportunities
+            SET tenant_id = (
+              SELECT COALESCE(NULLIF(TRIM(p.tenant_id), ''), 'founder')
+              FROM prospects p WHERE p.id = opportunities.prospect_id
+            )
+            WHERE prospect_id IS NOT NULL
+              AND EXISTS (
+                SELECT 1 FROM prospects p
+                WHERE p.id = opportunities.prospect_id
+                  AND COALESCE(NULLIF(TRIM(p.tenant_id), ''), 'founder')
+                      != COALESCE(NULLIF(TRIM(opportunities.tenant_id), ''), 'founder')
+              )
+          `).run();
+        } catch (normErr: any) {
+          console.warn("[GET /opportunities] tenant normalize:", normErr?.message || normErr);
+        }
+
+        // Auto-curación si el scope sigue vacío
         try {
           const cnt: any = await env.RADAR_DB.prepare(
-            `SELECT COUNT(*) AS c FROM opportunities WHERE COALESCE(tenant_id, 'founder') = ?`
+            `SELECT COUNT(*) AS c FROM opportunities
+             WHERE COALESCE(NULLIF(TRIM(tenant_id), ''), 'founder') = ?`
           ).bind(scopeTenant).first();
           if (!cnt || Number(cnt.c) === 0) {
-            await ensureOpportunitiesSchema(env.RADAR_DB);
             const ps = await env.RADAR_DB.prepare(`
               SELECT id, name, city, trade, score, opportunity_score, tenant_id, expected_value,
                      fit_score, intent_score, pain_score, decision_state, why_now_json
               FROM prospects
-              WHERE COALESCE(tenant_id, 'founder') = ?
+              WHERE COALESCE(NULLIF(TRIM(tenant_id), ''), 'founder') = ?
                 AND COALESCE(score, opportunity_score, 0) >= 40
                 AND status NOT IN ('discarded','suppressed','blocked','disqualified')
               ORDER BY COALESCE(score, opportunity_score, 0) DESC LIMIT 12
@@ -970,7 +997,7 @@ export default {
             const nowIso = new Date().toISOString();
             for (const pr of (ps.results || []) as any[]) {
               const strat = Math.round(pr.opportunity_score || pr.score || 50);
-              const tid = pr.tenant_id || "founder";
+              const tid = scopeTenant;
               const ttl = `${pr.name} — ${pr.trade || "service"} (${pr.city || ""})`;
               try {
                 await env.RADAR_DB.prepare(`
@@ -987,10 +1014,11 @@ export default {
               } catch {
                 try {
                   await env.RADAR_DB.prepare(`
-                    INSERT OR IGNORE INTO opportunities (id, prospect_id, tenant_id, mode, title, first_seen_at, last_seen_at, strategic_score, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                  `).bind(`opp_${pr.id}`, pr.id, tid, tid === "founder" ? "founder" : "tenant", ttl, nowIso, nowIso, strat, nowIso, nowIso).run();
-                } catch { /* sigue con el siguiente */ }
+                    INSERT OR IGNORE INTO opportunities (id, prospect_id, tenant_id, mode, title, first_seen_at, last_seen_at, strategic_score, priority_tier, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  `).bind(`opp_${pr.id}`, pr.id, tid, tid === "founder" ? "founder" : "tenant", ttl, nowIso, nowIso, strat,
+                    strat >= 80 ? "high" : strat >= 55 ? "medium" : "low", nowIso, nowIso).run();
+                } catch { /* sigue */ }
               }
             }
           }
@@ -998,6 +1026,8 @@ export default {
           console.warn("[GET /opportunities] auto-heal failed:", healErr?.message || healErr);
         }
 
+        // Lectura robusta: normaliza tenant vacío; si falla el JOIN, degrada sin JOIN.
+        // Último recurso: devolver por prospect_id del scope aunque tenant_id de la opp esté mal.
         const attempts: { sql: string; binds: any[] }[] = [
           {
             sql: `SELECT o.*, p.name as prospect_name, p.city as prospect_city, p.trade as prospect_trade,
@@ -1006,26 +1036,42 @@ export default {
                   FROM opportunities o
                   LEFT JOIN prospects p ON o.prospect_id = p.id
                   WHERE COALESCE(o.strategic_score, 0) >= ?
-                    AND COALESCE(o.tenant_id, 'founder') = ?
+                    AND COALESCE(NULLIF(TRIM(o.tenant_id), ''), 'founder') = ?
                   ORDER BY COALESCE(o.strategic_score, 0) DESC, o.created_at DESC LIMIT ?`,
             binds: [minScore, scopeTenant, limit],
           },
           {
             sql: `SELECT * FROM opportunities
                   WHERE COALESCE(strategic_score, 0) >= ?
-                    AND COALESCE(tenant_id, 'founder') = ?
+                    AND COALESCE(NULLIF(TRIM(tenant_id), ''), 'founder') = ?
                   ORDER BY COALESCE(strategic_score, 0) DESC LIMIT ?`,
             binds: [minScore, scopeTenant, limit],
           },
           {
-            sql: `SELECT * FROM opportunities WHERE COALESCE(tenant_id, 'founder') = ? ORDER BY rowid DESC LIMIT ?`,
+            sql: `SELECT o.*, p.name as prospect_name, p.city as prospect_city, p.trade as prospect_trade,
+                         p.website as prospect_website, p.phone as prospect_phone, p.email as prospect_email,
+                         p.status as prospect_status, p.draft_subject, p.draft_body
+                  FROM opportunities o
+                  INNER JOIN prospects p ON o.prospect_id = p.id
+                  WHERE COALESCE(NULLIF(TRIM(p.tenant_id), ''), 'founder') = ?
+                    AND COALESCE(p.score, p.opportunity_score, o.strategic_score, 0) >= ?
+                  ORDER BY COALESCE(o.strategic_score, p.score, 0) DESC LIMIT ?`,
+            binds: [scopeTenant, minScore, limit],
+          },
+          {
+            sql: `SELECT * FROM opportunities
+                  WHERE COALESCE(NULLIF(TRIM(tenant_id), ''), 'founder') = ?
+                  ORDER BY rowid DESC LIMIT ?`,
             binds: [scopeTenant, limit],
           },
         ];
         for (const a of attempts) {
           try {
             const res = await env.RADAR_DB.prepare(a.sql).bind(...a.binds).all();
-            return Response.json(res.results || [], { headers: corsHeaders });
+            const rows = res.results || [];
+            if (rows.length > 0 || a === attempts[attempts.length - 1]) {
+              return Response.json(rows, { headers: corsHeaders });
+            }
           } catch (e: any) {
             console.warn("[GET /opportunities]", e?.message || e);
           }
@@ -1076,6 +1122,15 @@ export default {
           const batchSize = Math.min(parseInt(url.searchParams.get("limit") || "15", 10), 20);
           const offset = Math.max(parseInt(url.searchParams.get("offset") || "0", 10), 0);
 
+          // Reparar tenant_id vacío antes de evaluar NOT EXISTS / conteos
+          try {
+            await env.RADAR_DB.prepare(`
+              UPDATE opportunities
+              SET tenant_id = 'founder'
+              WHERE tenant_id IS NULL OR TRIM(tenant_id) = '' OR LOWER(TRIM(tenant_id)) = 'null'
+            `).run();
+          } catch { /* ok */ }
+
           let prospects: any[] = [];
           try {
             const q = `SELECT p.id, p.name, p.city, p.trade, p.score, p.opportunity_score,
@@ -1086,13 +1141,14 @@ export default {
                      FROM prospects p
                      WHERE COALESCE(p.score, p.opportunity_score, 0) >= 40
                        AND p.status NOT IN ('discarded','suppressed','blocked','disqualified')
-                       AND COALESCE(p.tenant_id,'founder') = ?
+                       AND COALESCE(NULLIF(TRIM(p.tenant_id), ''), 'founder') = ?
                        AND NOT EXISTS (
                          SELECT 1 FROM opportunities o
-                         WHERE o.id = 'opp_' || p.id OR o.prospect_id = p.id
+                         WHERE (o.id = 'opp_' || p.id OR o.prospect_id = p.id)
+                           AND COALESCE(NULLIF(TRIM(o.tenant_id), ''), 'founder') = ?
                        )
                      ORDER BY COALESCE(p.score, p.opportunity_score, 0) DESC LIMIT ? OFFSET ?`;
-            const rows = await env.RADAR_DB.prepare(q).bind(scopeTenant, batchSize, offset).all();
+            const rows = await env.RADAR_DB.prepare(q).bind(scopeTenant, scopeTenant, batchSize, offset).all();
             prospects = rows.results || [];
           } catch (qe: any) {
             console.warn("[backfill] NOT EXISTS failed:", qe?.message || qe);
@@ -1104,7 +1160,7 @@ export default {
                       FROM prospects
                       WHERE COALESCE(score, opportunity_score, 0) >= 40
                         AND status NOT IN ('discarded','suppressed','blocked','disqualified')
-                        AND COALESCE(tenant_id,'founder') = ?
+                        AND COALESCE(NULLIF(TRIM(tenant_id), ''), 'founder') = ?
                       ORDER BY COALESCE(score, opportunity_score, 0) DESC LIMIT ? OFFSET ?`;
             const rows = await env.RADAR_DB.prepare(q2).bind(scopeTenant, batchSize, offset).all();
             // Fallback sin NOT EXISTS: filtrar en memoria los que ya tienen oportunidad
