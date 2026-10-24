@@ -823,8 +823,31 @@ export default {
         });
       }
 
-      // 2d. Serve PWA Console Static Assets for Root / Non-API Paths
-      if ((env as any).ASSETS && !path.startsWith("/api/") && !["/run", "/health", "/stats", "/decision", "/suppression", "/prospects", "/seeds", "/verify-key", "/logout", "/telegram/webhook", "/telegram-webhook", "/telegram/webhook/", "/telegram-webhook/"].includes(path)) {
+      // 2d. Serve PWA Console Static Assets ONLY for UI shell — never for API routes.
+      // Bug histórico: /opportunities y /missions NO estaban en la lista → ASSETS devolvía
+      // HTML/placeholder y el frontend nunca recibía JSON (lista siempre en 0).
+      const isWorkerApiPath =
+        path.startsWith("/api/") ||
+        path.startsWith("/webhook") ||
+        path.startsWith("/telegram") ||
+        path.startsWith("/opportunities") ||
+        path.startsWith("/missions") ||
+        path.startsWith("/prospects") ||
+        path.startsWith("/seeds") ||
+        path.startsWith("/demo") ||
+        [
+          "/run",
+          "/health",
+          "/stats",
+          "/decision",
+          "/suppression",
+          "/verify-key",
+          "/logout",
+          "/telegram-webhook",
+          "/telegram/webhook",
+        ].includes(path);
+
+      if ((env as any).ASSETS && !isWorkerApiPath) {
         const assetRes = await (env as any).ASSETS.fetch(request);
         if (assetRes.status !== 404) {
           return assetRes;

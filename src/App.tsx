@@ -491,21 +491,22 @@ export default function App() {
         setIsAuthenticated(true);
 
         // Fetch Opportunity Intelligence data (founder sin tenant_id; tenant siempre con tenant_id)
+        // Si /opportunities devuelve HTML (Assets/SPA), forzar fallback a /api/opportunities
         try {
-          let oppRes = await fetch(`${apiUrl}/opportunities${queryParam}`, { credentials: 'include' }).catch(() => null);
-          if (!oppRes || !oppRes.ok) {
-            oppRes = await fetch(`${apiUrl}/api/opportunities${queryParam}`, { credentials: 'include' }).catch(() => null);
-          }
-          if (oppRes && oppRes.ok) {
-            const oppList = await oppRes.json();
-            if (Array.isArray(oppList)) {
-              setOpportunities(oppList);
-            } else if (oppList && Array.isArray((oppList as any).opportunities)) {
-              setOpportunities((oppList as any).opportunities);
-            } else {
-              setOpportunities([]);
-            }
-          }
+          const tryOpp = async (url: string) => {
+            const res = await fetch(url, { credentials: 'include' }).catch(() => null);
+            if (!res || !res.ok) return null;
+            const ct = (res.headers.get('content-type') || '').toLowerCase();
+            if (ct.includes('text/html')) return null;
+            const data = await res.json().catch(() => null);
+            if (Array.isArray(data)) return data;
+            if (data && Array.isArray((data as any).opportunities)) return (data as any).opportunities;
+            return null;
+          };
+          let oppList =
+            (await tryOpp(`${apiUrl}/opportunities${queryParam}`)) ||
+            (await tryOpp(`${apiUrl}/api/opportunities${queryParam}`));
+          setOpportunities(oppList || []);
         } catch (e) {
           console.warn("[fetchTelemetry] opportunities:", e);
         }
