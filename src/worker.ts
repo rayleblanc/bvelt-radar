@@ -950,6 +950,54 @@ export default {
         // Founder UI omits tenant_id → scope founder only (never mix tenants)
         const scopeTenant = tenantId || "founder";
 
+        // Auto-curación: 234 prospectos y 0 oportunidades = el heal del cron no corrió o falló.
+        // Si la lista está vacía, crea un lote chico (12 -> dentro del límite de D1 del plan gratis) antes de responder.
+        try {
+          const cnt: any = await env.RADAR_DB.prepare(
+            `SELECT COUNT(*) AS c FROM opportunities WHERE COALESCE(tenant_id, 'founder') = ?`
+          ).bind(scopeTenant).first();
+          if (!cnt || Number(cnt.c) === 0) {
+            await ensureOpportunitiesSchema(env.RADAR_DB);
+            const ps = await env.RADAR_DB.prepare(`
+              SELECT id, name, city, trade, score, opportunity_score, tenant_id, expected_value,
+                     fit_score, intent_score, pain_score, decision_state, why_now_json
+              FROM prospects
+              WHERE COALESCE(tenant_id, 'founder') = ?
+                AND COALESCE(score, opportunity_score, 0) >= 40
+                AND status NOT IN ('discarded','suppressed','blocked','disqualified')
+              ORDER BY COALESCE(score, opportunity_score, 0) DESC LIMIT 12
+            `).bind(scopeTenant).all();
+            const nowIso = new Date().toISOString();
+            for (const pr of (ps.results || []) as any[]) {
+              const strat = Math.round(pr.opportunity_score || pr.score || 50);
+              const tid = pr.tenant_id || "founder";
+              const ttl = `${pr.name} — ${pr.trade || "service"} (${pr.city || ""})`;
+              try {
+                await env.RADAR_DB.prepare(`
+                  INSERT OR IGNORE INTO opportunities (
+                    id, prospect_id, tenant_id, mode, title, first_seen_at, last_seen_at, status, strategic_score,
+                    fit_score, intent_score, pain_score, expected_value, decision_state, why_now_json, priority_tier, created_at, updated_at
+                  ) VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                `).bind(
+                  `opp_${pr.id}`, pr.id, tid, tid === "founder" ? "founder" : "tenant", ttl, nowIso, nowIso, strat,
+                  pr.fit_score || strat, pr.intent_score || Math.round(strat * 0.8), pr.pain_score || 50,
+                  pr.expected_value || 0, pr.decision_state || "identified", pr.why_now_json || null,
+                  strat >= 80 ? "high" : strat >= 55 ? "medium" : "low", nowIso, nowIso
+                ).run();
+              } catch {
+                try {
+                  await env.RADAR_DB.prepare(`
+                    INSERT OR IGNORE INTO opportunities (id, prospect_id, tenant_id, mode, title, first_seen_at, last_seen_at, strategic_score, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  `).bind(`opp_${pr.id}`, pr.id, tid, tid === "founder" ? "founder" : "tenant", ttl, nowIso, nowIso, strat, nowIso, nowIso).run();
+                } catch { /* sigue con el siguiente */ }
+              }
+            }
+          }
+        } catch (healErr: any) {
+          console.warn("[GET /opportunities] auto-heal failed:", healErr?.message || healErr);
+        }
+
         const attempts: { sql: string; binds: any[] }[] = [
           {
             sql: `SELECT o.*, p.name as prospect_name, p.city as prospect_city, p.trade as prospect_trade,
@@ -2079,7 +2127,7 @@ export default {
     // After discovery wave, repair opportunities table from scored prospects (guerrilla self-heal)
     const heal = (async () => {
       try {
-        await run;
+        await run.catch(() => undefined); // si el descubrimiento falla, igual reparamos las oportunidades
         await ensureOpportunitiesSchema(env.RADAR_DB);
         const rows = await env.RADAR_DB.prepare(`
           SELECT id, name, city, trade, score, opportunity_score, tenant_id, expected_value,
@@ -2126,7 +2174,7 @@ export default {
     const tenantRefresh = (async () => {
       try {
         await pruneRadarCache(env);
-        await run;
+        await run.catch(() => undefined);
         // Reparto justo (round-robin): se refresca primero al tenant que lleva más tiempo sin refresco.
         // Antes: siempre los 3 más recientes => con 200 clientes, el resto nunca se actualizaba.
         const maxTenants = Math.max(0, Math.min(10, parseInt((env as any).TENANT_REFRESH_PER_CRON || "2", 10) || 2));
