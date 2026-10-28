@@ -917,6 +917,12 @@ export default {
         return await handleStats(env, corsHeaders);
       }
 
+      // 4b. Resumen de salud del radar: lo calcula y lo manda a Telegram al instante (abrir en el navegador ya logueado)
+      if ((path === "/api/digest/now" || path === "/digest/now") && (method === "GET" || method === "POST")) {
+        const r = await sendRadarDigest(env, { force: true });
+        return Response.json({ success: r.sent, verdict: r.verdict, headline: r.headline, telegram: r.telegram, data: r.data }, { headers: corsHeaders });
+      }
+
       // 6. Decision API Endpoint (sent / discard / suppress / replied / demo / won)
       if (path === "/decision" && method === "POST") {
         const body: any = await request.json();
@@ -2312,14 +2318,26 @@ export default {
       }
     })();
     const reconcile = reconcileResendDeliveries(env).catch(e => console.warn("[Radar Cron] resend reconcile failed:", e));
+    // Latido + alerta de bloqueo: sin esto, un radar bloqueado o sin resultados se ve igual que uno muerto.
+    const digest = (async () => {
+      try {
+        await Promise.allSettled([heal, tenantRefresh]);
+        const hour = new Date((event as any)?.scheduledTime || Date.now()).getUTCHours();
+        await sendRadarDigest(env, { scheduledHourUtc: hour });
+      } catch (e) {
+        console.warn("[Radar Cron] digest failed:", e);
+      }
+    })();
     if (ctx && typeof ctx.waitUntil === "function") {
       ctx.waitUntil(heal);
       ctx.waitUntil(tenantRefresh);
       ctx.waitUntil(reconcile);
+      ctx.waitUntil(digest);
     } else {
       await heal;
       await tenantRefresh;
       await reconcile;
+      await digest;
     }
   },
 
@@ -5419,6 +5437,15 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
         await env.RADAR_DB.prepare(
           "UPDATE prospects SET status = 'hold', outcome = ?, updated_at = ? WHERE id = ?"
         ).bind(sendRes.reason, new Date().toISOString(), prospect.id).run();
+        // Antes este bloqueo era silencioso: el prospecto quedaba en hold y Telegram no decía nada.
+        await notifyOnce(
+          env,
+          `autosend_blocked_${String(sendRes.reason).split(":")[0]}`,
+          `<b>⚠️ Radar: envío automático bloqueado</b>\n` +
+          `<b>Motivo:</b> <code>${escapeHtml(String(sendRes.reason).slice(0, 200))}</code>\n` +
+          `<b>Prospecto:</b> ${escapeHtml(String(prospect.name || ""))} (${escapeHtml(String(prospect.city || ""))})\n` +
+          `<i>Queda en hold. Te aviso 1 vez al día por motivo.</i>`
+        );
         return;
       }
     } else {
@@ -8222,6 +8249,183 @@ export function buildLegalFooter(env: Env): string {
 /**
  * Centralized Outbound Telegram Notification Engine
  */
+/**
+ * Avisa a Telegram como máximo UNA vez por día por motivo (evita spam cuando el mismo bloqueo se repite).
+ * Antes, cuando el envío se bloqueaba (breaker, falta de dirección postal, sin proveedor de email, presupuesto...)
+ * el prospecto pasaba a "hold" en D1 SIN avisar, y desde Telegram el radar parecía muerto.
+ */
+export async function notifyOnce(env: Env, reasonKey: string, text: string): Promise<void> {
+  try {
+    const day = new Date().toISOString().split("T")[0];
+    const key = `radar_notify_once_${day}_${String(reasonKey).toLowerCase().replace(/[^a-z0-9]+/g, "_").slice(0, 60)}`;
+    if (env.RADAR_DB) {
+      const seen = await cacheGet(env, key);
+      if (seen) return;
+      await cachePut(env, key, "1", 86400);
+    }
+    await notifyFounder(env, text);
+  } catch (e) {
+    console.warn("[notifyOnce] failed:", e);
+  }
+}
+
+type RadarDigest = {
+  verdict: "ok" | "idle" | "blocked";
+  headline: string;
+  text: string;
+  data: Record<string, any>;
+};
+
+/**
+ * Resumen de salud del radar (últimas 24 h) leído de D1 + configuración.
+ * Responde a "¿está vivo o no?" y, si no produce, EN QUÉ ETAPA se corta el embudo.
+ */
+export async function collectRadarDigest(env: Env): Promise<RadarDigest> {
+  const db = env.RADAR_DB;
+  const since = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+  const day = new Date().toISOString().split("T")[0];
+  const q = async <T = any>(sql: string, ...binds: any[]): Promise<T | null> => {
+    try { return (await db.prepare(sql).bind(...binds).first()) as T; } catch { return null; }
+  };
+  const qAll = async (sql: string, ...binds: any[]): Promise<any[]> => {
+    try { return ((await db.prepare(sql).bind(...binds).all()).results || []) as any[]; } catch { return []; }
+  };
+
+  const runsRow = await q<any>("SELECT COUNT(*) AS runs, COALESCE(SUM(discovered),0) AS discovered FROM runs WHERE mode = 'founder' AND created_at >= ?", since);
+  const discJobs = await q<any>("SELECT COUNT(*) AS c FROM queue_jobs WHERE job_type = 'discovery' AND created_at >= ?", since);
+  const zeroJobs = await q<any>("SELECT COUNT(*) AS c FROM queue_jobs WHERE status = 'completed_zero_prospects' AND created_at >= ?", since);
+  const failedJobs = await q<any>("SELECT COUNT(*) AS c FROM queue_jobs WHERE status = 'failed' AND created_at >= ?", since);
+  const lastFail = await q<any>("SELECT error FROM queue_jobs WHERE status = 'failed' AND error IS NOT NULL AND created_at >= ? ORDER BY created_at DESC LIMIT 1", since);
+  const created = await q<any>("SELECT COUNT(*) AS c FROM prospects WHERE COALESCE(tenant_id,'founder') = 'founder' AND created_at >= ?", since);
+  const withEmail = await q<any>("SELECT COUNT(*) AS c FROM prospects WHERE COALESCE(tenant_id,'founder') = 'founder' AND created_at >= ? AND email IS NOT NULL AND email != ''", since);
+  const sent = await q<any>("SELECT COUNT(*) AS c FROM prospects WHERE COALESCE(tenant_id,'founder') = 'founder' AND status IN ('sent','scheduled') AND updated_at >= ?", since);
+  const waiting = await q<any>("SELECT COUNT(*) AS c FROM prospects WHERE COALESCE(tenant_id,'founder') = 'founder' AND status IN ('queued','notified')");
+  const blockedRows = await qAll(
+    `SELECT COALESCE(outcome,'sin_motivo') AS outcome, COUNT(*) AS c FROM prospects
+     WHERE COALESCE(tenant_id,'founder') = 'founder' AND updated_at >= ?
+       AND status IN ('hold','held','disqualified','provider_required','provider_error','provider_unknown','blocked')
+     GROUP BY outcome ORDER BY c DESC LIMIT 5`, since);
+  const gov = await q<any>("SELECT sends_today, status FROM sender_governor_state WHERE id = 'global_governor'");
+  const cb = await getCircuitBreakerStatus(db);
+  const remDisc = await getRemainingBudget(db, "founder", "discovery_units");
+  const remOut = await getRemainingBudget(db, "founder", "outreach_units");
+
+  const runs = Number(runsRow?.runs || 0);
+  const nJobs = Number(discJobs?.c || 0);
+  const nZero = Number(zeroJobs?.c || 0);
+  const nFailed = Number(failedJobs?.c || 0);
+  const nCreated = Number(created?.c || 0);
+  const nEmail = Number(withEmail?.c || 0);
+  const nSent = Number(sent?.c || 0);
+  const nWaiting = Number(waiting?.c || 0);
+
+  const has = (v?: string) => !!(v && String(v).trim());
+  const hasProvider = has(env.RESEND_API_KEY) || has(env.BREVO_API_KEY) || (has(env.HUNTER_API_KEY) && has(env.HUNTER_SEQUENCE_ID));
+  const paused = env.RADAR_GLOBAL_PAUSE === "true" || env.RADAR_GLOBAL_PAUSE === "1";
+  const outPaused = env.RADAR_OUTREACH_PAUSE === "true" || env.RADAR_OUTREACH_PAUSE === "1";
+  const autoFlag = String(env.FOUNDER_AUTO_OUTREACH !== undefined && env.FOUNDER_AUTO_OUTREACH !== "" ? env.FOUNDER_AUTO_OUTREACH : "true").toLowerCase();
+  const autoOn = autoFlag === "true" || autoFlag === "1" || autoFlag === "yes";
+
+  const blockers: string[] = [];
+  if (!has(env.TELEGRAM_BOT_TOKEN) || !has(env.TELEGRAM_CHAT_ID)) blockers.push("Falta TELEGRAM_BOT_TOKEN o TELEGRAM_CHAT_ID");
+  if (paused) blockers.push("RADAR_GLOBAL_PAUSE está activo (nada corre)");
+  if (outPaused) blockers.push("RADAR_OUTREACH_PAUSE está activo (no se envía)");
+  if (cb.active) blockers.push(`Circuit breaker abierto: ${cb.reason || "sin motivo"} (requiere reset manual)`);
+  if (!hasProvider) blockers.push("Sin proveedor de email (RESEND_API_KEY / BREVO_API_KEY / Hunter)");
+  if (autoOn && !has(env.SENDER_POSTAL_ADDRESS)) blockers.push("Falta SENDER_POSTAL_ADDRESS: bloquea todo envío automático");
+  if (gov && gov.status && gov.status !== "active") blockers.push(`Sender governor en estado "${gov.status}"`);
+  if (!has(env.FOUNDING_CITIES)) blockers.push("FOUNDING_CITIES vacío (usa solo el pool nacional)");
+
+  const hardBlock = blockers.filter(b => !b.startsWith("FOUNDING_CITIES"));
+  let verdict: RadarDigest["verdict"] = "ok";
+  let headline = "🟢 Funcionando: el embudo está produciendo";
+  if (hardBlock.length > 0) {
+    verdict = "blocked";
+    headline = "🔴 Bloqueado: " + hardBlock[0];
+  } else if (runs === 0) {
+    verdict = "blocked";
+    headline = "🔴 El cron no creó ninguna corrida en 24 h";
+  } else if (nCreated === 0) {
+    verdict = "idle";
+    headline = nZero >= nJobs && nJobs > 0
+      ? "🟡 Corre, pero las fuentes devuelven 0 negocios (Overpass/BizData/Geoapify)"
+      : "🟡 Corre, pero no encuentra prospectos NUEVOS (todo lo que halla ya existe)";
+  } else if (nEmail === 0) {
+    verdict = "idle";
+    headline = "🟡 Encuentra negocios, pero ninguno llega con email válido (no pasan a Telegram)";
+  } else if (nSent === 0 && nWaiting === 0 && blockedRows.length > 0) {
+    verdict = "idle";
+    headline = `🟡 Hay prospectos con email, pero se frenan en: ${blockedRows[0].outcome}`;
+  }
+
+  const lines: string[] = [];
+  lines.push(`<b>📡 Radar · estado (24 h)</b>`);
+  lines.push(headline);
+  lines.push("");
+  lines.push(`<b>Corridas:</b> ${runs} · <b>Jobs discovery:</b> ${nJobs} (${nZero} con 0 resultados) · <b>Jobs fallidos:</b> ${nFailed}`);
+  lines.push(`<b>Prospectos nuevos:</b> ${nCreated} · <b>con email:</b> ${nEmail}`);
+  lines.push(`<b>Enviados/programados:</b> ${nSent} · <b>esperando tu aprobación:</b> ${nWaiting}`);
+  lines.push(`<b>Presupuesto hoy:</b> discovery restante ${remDisc} · outreach restante ${remOut}${gov ? ` · envíos hoy ${gov.sends_today ?? 0}` : ""}`);
+  if (blockedRows.length > 0) {
+    lines.push("");
+    lines.push("<b>Dónde se frenan:</b>");
+    for (const r of blockedRows) lines.push(`• ${escapeHtml(String(r.outcome).slice(0, 70))}: ${r.c}`);
+  }
+  if (blockers.length > 0) {
+    lines.push("");
+    lines.push("<b>Config a revisar:</b>");
+    for (const b of blockers.slice(0, 5)) lines.push(`• ${escapeHtml(b)}`);
+  }
+  if (nFailed > 0 && lastFail?.error) {
+    lines.push("");
+    lines.push(`<b>Último error de job:</b> <code>${escapeHtml(String(lastFail.error).slice(0, 160))}</code>`);
+  }
+  lines.push("");
+  lines.push(`<i>${day} · el radar solo avisa de prospectos cuando hay uno listo; este resumen te dice si está vivo.</i>`);
+
+  return {
+    verdict,
+    headline,
+    text: lines.join("\n").slice(0, 3900),
+    data: {
+      runs, discovery_jobs: nJobs, zero_result_jobs: nZero, failed_jobs: nFailed,
+      new_prospects: nCreated, with_email: nEmail, sent: nSent, waiting_approval: nWaiting,
+      blocked_by: blockedRows, blockers, remaining: { discovery: remDisc, outreach: remOut },
+      circuit_breaker: cb, last_job_error: lastFail?.error || null
+    }
+  };
+}
+
+/**
+ * Envía el resumen. Reglas (para no hacer spam):
+ *  - force=true: siempre (endpoint manual).
+ *  - Cron de las 22:00 UTC: siempre, 1 vez al día (aunque todo vaya bien: es tu "latido").
+ *  - Cualquier otro cron: solo si hay problema (🔴/🟡) y no se avisó ya hoy de ese mismo estado.
+ */
+export async function sendRadarDigest(
+  env: Env,
+  opts: { force?: boolean; scheduledHourUtc?: number } = {}
+): Promise<{ sent: boolean; verdict: string; headline: string; data: Record<string, any>; telegram?: any }> {
+  const d = await collectRadarDigest(env);
+  const day = new Date().toISOString().split("T")[0];
+  const isDailySlot = (opts.scheduledHourUtc ?? -1) >= 22;
+  let shouldSend = !!opts.force;
+
+  if (!shouldSend && env.RADAR_DB) {
+    const key = `radar_digest_${day}_${isDailySlot ? "daily" : d.verdict}`;
+    const already = await cacheGet(env, key);
+    if (!already && (isDailySlot || d.verdict !== "ok")) {
+      shouldSend = true;
+      await cachePut(env, key, "1", 86400);
+    }
+  }
+  if (!shouldSend) return { sent: false, verdict: d.verdict, headline: d.headline, data: d.data };
+
+  const tg = await notifyFounder(env, d.text);
+  return { sent: !!tg.ok, verdict: d.verdict, headline: d.headline, data: d.data, telegram: tg };
+}
+
+
 export async function notifyFounder(
   env: Env,
   text: string,
