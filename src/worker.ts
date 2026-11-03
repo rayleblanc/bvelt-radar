@@ -4126,6 +4126,37 @@ export async function reconcileResendDeliveries(env: Env): Promise<{ checked: nu
  */
 async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void> {
   const { city, trade, overrides } = job.payload;
+
+  // Skip city+trade pairs already dense in D1 (founder or tenant scope).
+  // Prevents burning budget on "todo lo que halla ya existe".
+  if (env.RADAR_DB && city && trade) {
+    try {
+      const scope = (job.tenant_id || "founder").trim() || "founder";
+      const row = await env.RADAR_DB.prepare(
+        `SELECT COUNT(*) AS c FROM prospects
+         WHERE COALESCE(tenant_id,'founder') = ?
+           AND lower(trim(city)) = lower(trim(?))
+           AND lower(trim(trade)) = lower(trim(?))`
+      ).bind(scope, city, trade).first() as any;
+      const existingCount = Number(row?.c || 0);
+      if (existingCount >= 8) {
+        console.log(`[Job: discovery] saturated_pair skip ${city} / ${trade} count=${existingCount} scope=${scope}`);
+        try {
+          const place = findPlace(city);
+          if (place) {
+            await markSearched(env.RADAR_DB, scope, place, trade, {
+              candidates: 0,
+              qualified: 0,
+            } as any);
+          }
+        } catch (_) {}
+        return;
+      }
+    } catch (e) {
+      console.warn("[Job: discovery] saturated_pair check failed:", e);
+    }
+  }
+
   let customOsmTags: string[] | undefined = undefined;
   if (job.mode === "tenant" && job.tenant_id && env.RADAR_DB) {
     const cleanTrade = trade.toLowerCase().trim();
@@ -6424,9 +6455,15 @@ export function isHardRejectedChain(name: string): boolean {
   ];
   if (banned.some(b => n.includes(b))) return true;
 
-  // Hard-reject retail garden centers, nurseries, plant stores, building/landscape supplies
+  // Hard-reject retail garden centers, nurseries, feed/garden stores, plant stores, supply houses
+  // (name~ search matches "Garden Store" / "Feed & Garden" which are NOT field operators)
   if (
     /garden cent(er|re)/i.test(n) ||
+    /\bgarden store\b/i.test(n) ||
+    /\bfeed\b.*\bgarden\b/i.test(n) ||
+    /\bgarden\b.*\bfeed\b/i.test(n) ||
+    /\bfeed store\b/i.test(n) ||
+    /\bagricultural supply\b/i.test(n) ||
     /plant nursery/i.test(n) ||
     /tree nursery/i.test(n) ||
     /\bnursery\b/i.test(n) ||
@@ -6437,7 +6474,9 @@ export function isHardRejectedChain(name: string): boolean {
     /building supplies/i.test(n) ||
     /landscape supply/i.test(n) ||
     /stone supply/i.test(n) ||
-    /mulch supply/i.test(n)
+    /mulch supply/i.test(n) ||
+    /\bpet store\b/i.test(n) ||
+    /\bgrocery\b/i.test(n)
   ) {
     return true;
   }
@@ -8367,7 +8406,7 @@ export async function collectRadarDigest(env: Env): Promise<RadarDigest> {
   if (!hasProvider) blockers.push("Sin proveedor de email (RESEND_API_KEY / BREVO_API_KEY / Hunter)");
   if (autoOn && !has(env.SENDER_POSTAL_ADDRESS)) blockers.push("Falta SENDER_POSTAL_ADDRESS: bloquea todo envío automático");
   if (gov && gov.status && gov.status !== "active") blockers.push(`Sender governor en estado "${gov.status}"`);
-  if (!has(env.FOUNDING_CITIES)) blockers.push("FOUNDING_CITIES vacío (usa solo el pool nacional)");
+  if (!has(env.FOUNDING_CITIES)) blockers.push("FOUNDING_CITIES vacío (OK: rotación geoData/geoFrontier activa — no hace falta lista manual)");
 
   const hardBlock = blockers.filter(b => !b.startsWith("FOUNDING_CITIES"));
   let verdict: RadarDigest["verdict"] = "ok";
