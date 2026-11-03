@@ -7210,7 +7210,29 @@ export async function fetchOverpassBusinesses(
     `amenity="trade"`
   ];
   
-  const allTags = Array.from(new Set([...specificTags, ...genericTags]));
+  // El OSM de EE. UU. casi no etiqueta contratistas con craft=*, pero sí les pone nombre ("Green Thumb Lawn Care").
+  // Buscar por nombre multiplica el rendimiento (antes: Raw 2 en Houston/lawn_care).
+  const nameRegex = (() => {
+    const t = cleanTrade;
+    if (/lawn|landscap|garden|tree|mow|irrigat/.test(t)) return "lawn|landscap|mowing|turf|sod|tree service|tree care|irrigation|yard|garden|grounds";
+    if (/hvac|heating|cooling|air/.test(t)) return "hvac|heating|cooling|air condition|a/c|climate|furnace|refrigeration";
+    if (/plumb/.test(t)) return "plumb|drain|rooter|pipe|water heater|sewer";
+    if (/electric/.test(t)) return "electric|wiring|lighting";
+    if (/roof/.test(t)) return "roof|shingle|gutter";
+    if (/clean|maid|janitor/.test(t)) return "clean|maid|janitorial|housekeeping|pressure wash|power wash";
+    if (/pool/.test(t)) return "pool|spa |aquatic";
+    if (/handyman|repair|appliance/.test(t)) return "handyman|repair|appliance|fix";
+    if (/pest|exterminat/.test(t)) return "pest|exterminat|termite|bug|rodent";
+    if (/paint/.test(t)) return "paint|coating";
+    if (/garage/.test(t)) return "garage door|overhead door";
+    if (/fenc/.test(t)) return "fence|fencing";
+    if (/floor|carpet|tile/.test(t)) return "floor|carpet|tile|hardwood";
+    if (/junk|haul|moving/.test(t)) return "junk|haul|moving|movers|removal";
+    return "";
+  })();
+  const nameTags = nameRegex ? [`name~"${nameRegex}"`] : [];
+
+  const allTags = Array.from(new Set([...specificTags, ...nameTags, ...genericTags]));
 
   async function queryOverpassWithGeo(geo: NominatimGeocoding | null, isWidened = false): Promise<{ businesses: any[]; status: string } | null> {
     const tagQueries = allTags.map(tag => {
@@ -8296,6 +8318,17 @@ export async function collectRadarDigest(env: Env): Promise<RadarDigest> {
   const zeroJobs = await q<any>("SELECT COUNT(*) AS c FROM queue_jobs WHERE status = 'completed_zero_prospects' AND created_at >= ?", since);
   const failedJobs = await q<any>("SELECT COUNT(*) AS c FROM queue_jobs WHERE status = 'failed' AND created_at >= ?", since);
   const lastFail = await q<any>("SELECT error FROM queue_jobs WHERE status = 'failed' AND error IS NOT NULL AND created_at >= ? ORDER BY created_at DESC LIMIT 1", since);
+  const zeroRows = await qAll("SELECT error FROM queue_jobs WHERE status = 'completed_zero_prospects' AND error IS NOT NULL AND created_at >= ? LIMIT 40", since);
+  const zeroReasonCounts = new Map<string, number>();
+  for (const zr of zeroRows) {
+    const txt = String(zr.error || "");
+    const ov = (txt.match(/Overpass:\s*([^,]+?)(?:,|$)/) || [])[1] || "";
+    const geo = (txt.match(/Geoapify:\s*([^,]+?)(?:,|$)/) || [])[1] || "";
+    const norm = (x: string) => x.replace(/\(([^)]*)\)/g, "").replace(/\d+/g, "N").replace(/\s+/g, " ").trim().slice(0, 45);
+    const k = `Overpass: ${norm(ov) || "?"} · Geoapify: ${norm(geo) || "?"}`;
+    zeroReasonCounts.set(k, (zeroReasonCounts.get(k) || 0) + 1);
+  }
+  const zeroReasonTop = Array.from(zeroReasonCounts.entries()).sort((a, b) => b[1] - a[1]).slice(0, 3);
   const created = await q<any>("SELECT COUNT(*) AS c FROM prospects WHERE COALESCE(tenant_id,'founder') = 'founder' AND created_at >= ?", since);
   const withEmail = await q<any>("SELECT COUNT(*) AS c FROM prospects WHERE COALESCE(tenant_id,'founder') = 'founder' AND created_at >= ? AND email IS NOT NULL AND email != ''", since);
   const sent = await q<any>("SELECT COUNT(*) AS c FROM prospects WHERE COALESCE(tenant_id,'founder') = 'founder' AND status IN ('sent','scheduled') AND updated_at >= ?", since);
@@ -8370,6 +8403,11 @@ export async function collectRadarDigest(env: Env): Promise<RadarDigest> {
     lines.push("");
     lines.push("<b>Dónde se frenan:</b>");
     for (const r of blockedRows) lines.push(`• ${escapeHtml(String(r.outcome).slice(0, 70))}: ${r.c}`);
+  }
+  if (zeroReasonTop.length > 0) {
+    lines.push("");
+    lines.push("<b>Por qué salen 0 resultados:</b>");
+    for (const [k, c] of zeroReasonTop) lines.push(`• ${escapeHtml(k)}: ${c}`);
   }
   if (blockers.length > 0) {
     lines.push("");
