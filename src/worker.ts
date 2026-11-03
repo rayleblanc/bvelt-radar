@@ -1139,37 +1139,21 @@ export default {
         }
       }
 
-      // 8c-bis. Backfill opportunities — FREE PLAN SAFE (≤50 D1 ops / invocation)
-      // Lotes de 15; la UI puede pedir varios offsets seguidos.
-      // Founder sin tenant_id => SOLO founder. Tenant con tenant_id => SOLO ese tenant.
-      // Contador real vía meta.changes (INSERT OR IGNORE no debe inflar "creadas").
+      // 8c-bis. Backfill opportunities — FIXED: upsertOpportunity (no false "ya existían")
       if ((path === "/api/opportunities/backfill" || path === "/opportunities/backfill") && method === "POST") {
         try {
           await ensureOpportunitiesSchema(env.RADAR_DB);
-          // Sin tenant_id => founder (nunca mezclar tenants en backfill founder)
           const scopeTenant = (url.searchParams.get("tenant_id") || "founder").trim() || "founder";
           const batchSize = Math.min(parseInt(url.searchParams.get("limit") || "15", 10), 20);
           const offset = Math.max(parseInt(url.searchParams.get("offset") || "0", 10), 0);
-
-          // Reparar tenant_id vacío antes de evaluar NOT EXISTS / conteos
-          try {
-            await env.RADAR_DB.prepare(`
-              UPDATE opportunities
-              SET tenant_id = 'founder'
-              WHERE tenant_id IS NULL OR TRIM(tenant_id) = '' OR LOWER(TRIM(tenant_id)) = 'null'
-            `).run();
-          } catch { /* ok */ }
-
-          let prospects: any[] = [];
-          try {
-            const q = `SELECT p.id, p.name, p.city, p.trade, p.score, p.opportunity_score,
+          const q = `SELECT p.id, p.name, p.city, p.trade, p.score, p.opportunity_score,
                             p.fit_score, p.intent_score, p.pain_score, p.ability_to_pay_score,
                             p.contactability_score, p.timing_score, p.evidence_score,
                             p.signal_freshness_score, p.expected_value, p.decision_state,
                             p.why_now_json, p.tenant_id, p.status
                      FROM prospects p
-                     WHERE COALESCE(p.score, p.opportunity_score, 0) >= 40
-                       AND p.status NOT IN ('discarded','suppressed','blocked','disqualified')
+                     WHERE COALESCE(p.score, p.opportunity_score, 0) >= 35
+                       AND lower(COALESCE(p.status,'')) IN ('approved','qualified','scored','hold')
                        AND COALESCE(NULLIF(TRIM(p.tenant_id), ''), 'founder') = ?
                        AND NOT EXISTS (
                          SELECT 1 FROM opportunities o
@@ -1177,125 +1161,66 @@ export default {
                            AND COALESCE(NULLIF(TRIM(o.tenant_id), ''), 'founder') = ?
                        )
                      ORDER BY COALESCE(p.score, p.opportunity_score, 0) DESC LIMIT ? OFFSET ?`;
+          let prospects: any[] = [];
+          try {
             const rows = await env.RADAR_DB.prepare(q).bind(scopeTenant, scopeTenant, batchSize, offset).all();
             prospects = rows.results || [];
-          } catch (qe: any) {
-            console.warn("[backfill] NOT EXISTS failed:", qe?.message || qe);
-            const q2 = `SELECT id, name, city, trade, score, opportunity_score,
-                             fit_score, intent_score, pain_score, ability_to_pay_score,
-                             contactability_score, timing_score, evidence_score,
-                             signal_freshness_score, expected_value, decision_state,
-                             why_now_json, tenant_id, status
-                      FROM prospects
-                      WHERE COALESCE(score, opportunity_score, 0) >= 40
-                        AND status NOT IN ('discarded','suppressed','blocked','disqualified')
-                        AND COALESCE(NULLIF(TRIM(tenant_id), ''), 'founder') = ?
-                      ORDER BY COALESCE(score, opportunity_score, 0) DESC LIMIT ? OFFSET ?`;
-            const rows = await env.RADAR_DB.prepare(q2).bind(scopeTenant, batchSize, offset).all();
-            // Fallback sin NOT EXISTS: filtrar en memoria los que ya tienen oportunidad
-            const raw = rows.results || [];
-            const existing = new Set<string>();
-            try {
-              const ex = await env.RADAR_DB.prepare(
-                `SELECT id, prospect_id FROM opportunities WHERE COALESCE(tenant_id,'founder') = ? LIMIT 500`
-              ).bind(scopeTenant).all();
-              for (const r of (ex.results || []) as any[]) {
-                if (r.id) existing.add(String(r.id));
-                if (r.prospect_id) existing.add(`opp_${r.prospect_id}`);
-                if (r.prospect_id) existing.add(String(r.prospect_id));
-              }
-            } catch { /* ok */ }
-            prospects = raw.filter((p: any) => !existing.has(`opp_${p.id}`) && !existing.has(String(p.id)));
+          } catch {
+            const rows = await env.RADAR_DB.prepare(`
+              SELECT id, name, city, trade, score, opportunity_score, fit_score, intent_score, pain_score,
+                     ability_to_pay_score, contactability_score, timing_score, evidence_score,
+                     signal_freshness_score, expected_value, decision_state, why_now_json, tenant_id, status
+              FROM prospects
+              WHERE COALESCE(score, opportunity_score, 0) >= 35
+                AND lower(COALESCE(status,'')) IN ('approved','qualified','scored','hold')
+                AND COALESCE(NULLIF(TRIM(tenant_id), ''), 'founder') = ?
+              ORDER BY COALESCE(score, opportunity_score, 0) DESC LIMIT ? OFFSET ?`).bind(scopeTenant, batchSize, offset).all();
+            prospects = rows.results || [];
           }
-
-          const nowIso = new Date().toISOString();
-          let created = 0;
-          let skippedExisting = 0;
-          let failed = 0;
+          let created = 0, skippedExisting = 0, failed = 0;
           const errors: string[] = [];
-
           for (const p of prospects) {
             const oppId = `opp_${p.id}`;
-            const stratScore = Math.round(p.opportunity_score || p.score || 50);
-            // Respetar scope: forzar tenant del backfill (no heredar null raro de otro tenant)
-            const tenantId = scopeTenant;
-            const mode = tenantId === "founder" ? "founder" : "tenant";
-            const title = `${p.name} — ${p.trade || "service"} (${p.city || ""})`;
-            const priority = stratScore >= 80 ? "high" : stratScore >= 55 ? "medium" : "low";
             try {
-              const ins = await env.RADAR_DB.prepare(`
-                INSERT OR IGNORE INTO opportunities (
-                  id, prospect_id, tenant_id, mode, title,
-                  first_seen_at, last_seen_at, status,
-                  strategic_score, fit_score, intent_score, pain_score,
-                  ability_to_pay_score, contactability_score, timing_score,
-                  evidence_score, signal_freshness_score, expected_value,
-                  decision_state, why_now_json, priority_tier, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-              `).bind(
-                oppId, p.id, tenantId, mode, title,
-                nowIso, nowIso,
-                stratScore,
-                p.fit_score || stratScore,
-                p.intent_score || Math.round(stratScore * 0.8),
-                p.pain_score || Math.round(stratScore * 0.7),
-                p.ability_to_pay_score || 60,
-                p.contactability_score || 70,
-                p.timing_score || 50,
-                p.evidence_score || 50,
-                p.signal_freshness_score || 80,
-                p.expected_value || 0,
-                p.decision_state || "identified",
-                p.why_now_json || null,
-                priority,
-                nowIso, nowIso
-              ).run();
-              const changes = Number((ins as any)?.meta?.changes ?? 0);
-              if (changes > 0) created++;
-              else skippedExisting++;
-            } catch (ie: any) {
+              const already = await env.RADAR_DB.prepare(`SELECT id FROM opportunities WHERE id = ? OR prospect_id = ? LIMIT 1`).bind(oppId, p.id).first();
+              if (already) { skippedExisting++; continue; }
+            } catch {}
+            const stratScore = Math.round(Number(p.opportunity_score || p.score || 50));
+            try {
+              const ok = await upsertOpportunity(env.RADAR_DB, {
+                id: oppId, prospect_id: p.id, tenant_id: scopeTenant,
+                mode: scopeTenant === "founder" ? "founder" : "tenant",
+                title: `${p.name} — ${p.trade || "service"} (${p.city || ""})`,
+                strategic_score: stratScore,
+                fit_score: Number(p.fit_score || stratScore),
+                intent_score: Number(p.intent_score || Math.round(stratScore * 0.8)),
+                pain_score: Number(p.pain_score || Math.round(stratScore * 0.7)),
+                ability_to_pay_score: Number(p.ability_to_pay_score || 60),
+                contactability_score: Number(p.contactability_score || 70),
+                timing_score: Number(p.timing_score || 50),
+                evidence_score: Number(p.evidence_score || 50),
+                signal_freshness_score: Number(p.signal_freshness_score || 80),
+                expected_value: Number(p.expected_value || Math.round(stratScore * 25)),
+                decision_state: String(p.decision_state || "identified"),
+                why_now_json: p.why_now_json || null,
+                priority_tier: stratScore >= 80 ? "high" : stratScore >= 55 ? "medium" : "low",
+              });
+              if (ok) created++; else { failed++; errors.push("upsert false " + p.id); }
+            } catch (e: any) {
               failed++;
-              if (errors.length < 3) errors.push(String(ie?.message || ie).slice(0, 140));
-              try {
-                const ins2 = await env.RADAR_DB.prepare(`
-                  INSERT OR IGNORE INTO opportunities
-                    (id, prospect_id, tenant_id, mode, title, first_seen_at, last_seen_at, strategic_score, priority_tier, created_at, updated_at)
-                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                `).bind(oppId, p.id, tenantId, mode, title, nowIso, nowIso, stratScore, priority, nowIso, nowIso).run();
-                const changes2 = Number((ins2 as any)?.meta?.changes ?? 0);
-                if (changes2 > 0) {
-                  created++;
-                  failed--;
-                } else {
-                  skippedExisting++;
-                  failed--;
-                }
-              } catch { /* keep failed */ }
+              if (errors.length < 5) errors.push(String(e?.message || e).slice(0, 140));
             }
           }
-
           const hasMore = prospects.length >= batchSize;
           return Response.json({
-            success: true,
-            scope_tenant: scopeTenant,
-            prospects_scanned: prospects.length,
-            opportunities_created: created,
-            skipped_existing: skippedExisting,
-            failed,
-            offset,
-            batch_size: batchSize,
-            next_offset: hasMore ? offset + batchSize : null,
-            has_more: hasMore,
+            success: true, scope_tenant: scopeTenant, prospects_scanned: prospects.length,
+            opportunities_created: created, skipped_existing: skippedExisting, failed,
+            offset, batch_size: batchSize, next_offset: hasMore ? offset + batchSize : null, has_more: hasMore,
             errors: errors.length ? errors : undefined,
-            message: hasMore
-              ? `Lote OK: ${created} nuevas, ${skippedExisting} ya existían. Siguiente offset ${offset + batchSize}.`
-              : `Listo: ${created} nuevas, ${skippedExisting} ya existían. Fallos: ${failed}.`
+            message: `Lote: ${created} creadas, ${skippedExisting} ya existían, ${failed} fallos.`,
           }, { headers: corsHeaders });
         } catch (e: any) {
-          return Response.json({
-            error: e.message || String(e),
-            hint: "Si dice Too many API requests: lotes de 15. Vuelve a pulsar Regenerar."
-          }, { status: 500, headers: corsHeaders });
+          return Response.json({ error: e.message || String(e) }, { status: 500, headers: corsHeaders });
         }
       }
 
@@ -2317,6 +2242,47 @@ export default {
         console.warn("[Radar Cron] tenant refresh error:", e);
       }
     })();
+    const followUps = (async () => {
+      try {
+        if (!env.RADAR_DB) return;
+        const rows = await env.RADAR_DB.prepare(`
+          SELECT id FROM prospects
+          WHERE COALESCE(NULLIF(TRIM(tenant_id),''),'founder') = 'founder'
+            AND lower(status) = 'sent'
+            AND (last_reply_at IS NULL OR TRIM(last_reply_at) = '')
+            AND last_contact_at IS NOT NULL
+            AND last_contact_at <= datetime('now', '-5 days')
+            AND last_contact_at >= datetime('now', '-45 days')
+          ORDER BY last_contact_at ASC
+          LIMIT 8
+        `).all();
+        const list = (rows.results || []) as any[];
+        for (const r of list) {
+          try {
+            const p = await env.RADAR_DB.prepare("SELECT * FROM prospects WHERE id = ?").bind(r.id).first() as any;
+            if (!p) continue;
+            const touch = getOutreachTouch(p);
+            if (touch >= 3) continue;
+            if (env.RADAR_QUEUE && typeof env.RADAR_QUEUE.send === "function") {
+              await env.RADAR_QUEUE.send({
+                run_id: `fu-${new Date().toISOString().slice(0, 10)}`,
+                job_id: `outreach-fu-${r.id}-${touch + 1}`,
+                type: "outreach",
+                mode: "founder",
+                tenant_id: "founder",
+                payload: { prospect_id: r.id },
+                created_at: new Date().toISOString(),
+              } as any);
+            }
+          } catch (e) {
+            console.warn("[Radar Cron] follow-up queue failed", r.id, e);
+          }
+        }
+        if (list.length) console.log("[Radar Cron] queued follow-ups:", list.length);
+      } catch (e) {
+        console.warn("[Radar Cron] follow-ups error:", e);
+      }
+    })();
     const reconcile = reconcileResendDeliveries(env).catch(e => console.warn("[Radar Cron] resend reconcile failed:", e));
     // Latido + alerta de bloqueo: sin esto, un radar bloqueado o sin resultados se ve igual que uno muerto.
     const digest = (async () => {
@@ -2331,11 +2297,13 @@ export default {
     if (ctx && typeof ctx.waitUntil === "function") {
       ctx.waitUntil(heal);
       ctx.waitUntil(tenantRefresh);
+      ctx.waitUntil(followUps);
       ctx.waitUntil(reconcile);
       ctx.waitUntil(digest);
     } else {
       await heal;
       await tenantRefresh;
+      await followUps;
       await reconcile;
       await digest;
     }
@@ -5311,7 +5279,24 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
     return;
   }
 
-  if (prospect.draft_body && ['queued', 'notified', 'sent'].includes(prospect.status)) return;
+  // Follow-up: if already sent, only continue when 5+ days, no reply, touch < 3
+  {
+    const st = String(prospect.status || "").toLowerCase();
+    const touchNow = getOutreachTouch(prospect);
+    if (prospect.draft_body && ['queued', 'notified'].includes(st)) return;
+    if (st === 'sent' && prospect.draft_body) {
+      if (prospect.last_reply_at) return;
+      const last = prospect.last_contact_at ? new Date(prospect.last_contact_at).getTime() : 0;
+      const days = last ? (Date.now() - last) / 86400000 : 999;
+      if (days < 5) return;
+      if (touchNow >= 3) return; // max 2 follow-ups
+      // bump touch for this generation
+      prospect.signals_json = JSON.stringify({
+        ...((): any => { try { return JSON.parse(prospect.signals_json || "{}"); } catch { return {}; } })(),
+        outreach_touch: touchNow + 1,
+      });
+    }
+  }
 
   const dayOfYear = getDayOfYear(new Date());
   const { missionConfig } = await getPriorityTargets(dayOfYear, env, job.mode, job.tenant_id, overrides, true);
@@ -5347,6 +5332,10 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
 
   prospect.draft_subject = draft.subject;
   prospect.draft_body = draft.body;
+  try {
+    const t = getOutreachTouch(prospect);
+    await bumpOutreachTouch(env.RADAR_DB, prospect, t);
+  } catch { /* ok */ }
 
   try {
     await env.RADAR_DB.prepare("UPDATE runs SET finalized = finalized + 1 WHERE id = ?").bind(job.run_id).run();
@@ -7890,6 +7879,70 @@ export async function expandTenantIcp(
 /**
  * Trade Psychology Copywriting Engine (Groq / Gemini / Fallback)
  */
+
+/**
+ * Short founder identity lines — NO pity, NO long bio.
+ * Rotates by prospect id + outreach touch so emails don't repeat the same sentence.
+ */
+const FOUNDER_VOICE_EN: string[] = [
+  "I'm Rainer — solo builder of Bvelt.",
+  "I ship Bvelt myself end-to-end, so it stays lean for field crews.",
+  "Built Bvelt as a one-person product focused on contractors, not enterprise bloat.",
+  "I built Bvelt under tight bandwidth and power limits — that's why it stays fast on a phone.",
+  "Solo founder here: every feature has to earn its place for real trade businesses.",
+  "I'm Rainer. I built Bvelt from a constrained setup so it still works when the connection is messy.",
+  "One-person shop behind Bvelt — designed for crews who live on their phones.",
+  "I built Bvelt the hard way so the tool itself stays simple and reliable.",
+];
+
+const FOUNDER_VOICE_ES: string[] = [
+  "Soy Rainer, el constructor en solitario de Bvelt.",
+  "Desarrollo Bvelt de punta a punta para que siga siendo ligero para cuadrillas en campo.",
+  "Creé Bvelt como producto de una sola persona, enfocado en contratistas, no en enterprise.",
+  "Construí Bvelt con poco ancho de banda y cortes de luz — por eso funciona rápido en el móvil.",
+  "Fundador único: cada función tiene que valer la pena para negocios de oficio reales.",
+  "Soy Rainer. Hice Bvelt en un entorno limitado para que siga útil con mala conexión.",
+  "Bvelt lo lleva una sola persona — pensado para quien trabaja desde el teléfono.",
+  "Construí Bvelt a la manera difícil para que la herramienta sea simple y fiable.",
+];
+
+function hashPick(seed: string, n: number): number {
+  let h = 0;
+  for (let i = 0; i < seed.length; i++) h = ((h << 5) - h + seed.charCodeAt(i)) | 0;
+  return Math.abs(h) % Math.max(1, n);
+}
+
+/** touch: 1 = first email, 2+ = follow-up without reply */
+export function pickFounderVoiceLine(prospectId: string, touch: number, lang: string): string {
+  const list = (lang || "en").toLowerCase().startsWith("es") ? FOUNDER_VOICE_ES : FOUNDER_VOICE_EN;
+  const idx = hashPick(`${prospectId || "x"}|t${touch || 1}`, list.length);
+  return list[idx];
+}
+
+function getOutreachTouch(prospect: any): number {
+  try {
+    const s = typeof prospect.signals_json === "string" ? JSON.parse(prospect.signals_json || "{}") : (prospect.signals_json || {});
+    const t = Number(s.outreach_touch || 1);
+    return Number.isFinite(t) && t >= 1 ? t : 1;
+  } catch {
+    return 1;
+  }
+}
+
+async function bumpOutreachTouch(db: D1Database, prospect: any, nextTouch: number): Promise<void> {
+  try {
+    let s: any = {};
+    try { s = JSON.parse(prospect.signals_json || "{}"); } catch { s = {}; }
+    s.outreach_touch = nextTouch;
+    s.last_outreach_touch_at = new Date().toISOString();
+    await db.prepare("UPDATE prospects SET signals_json = ?, updated_at = ? WHERE id = ?")
+      .bind(JSON.stringify(s), new Date().toISOString(), prospect.id).run();
+  } catch (e) {
+    console.warn("[bumpOutreachTouch]", e);
+  }
+}
+
+
 async function generateAICopy(
   prospect: any, 
   variantId: string, 
@@ -7898,6 +7951,11 @@ async function generateAICopy(
 ): Promise<{ subject: string; body: string }> {
   const language = (missionConfig?.languages && missionConfig.languages[0]) || "en";
   const isSpanish = language.toLowerCase().startsWith("es");
+  const outreachTouch = getOutreachTouch(prospect);
+  const founderLine = (!prospect.tenant_id || prospect.tenant_id === "founder" || prospect.mode === "founder")
+    ? pickFounderVoiceLine(String(prospect.id || prospect.name || "x"), outreachTouch, language)
+    : "";
+  const isFollowUp = outreachTouch >= 2;
   const demoLink = prospect.demo_token 
     ? `https://bvelt.app/demo?p=${prospect.demo_token}`
     : "https://bvelt.app/demo";
@@ -7988,8 +8046,10 @@ async function generateAICopy(
     3. Tono: Respetuoso, directo, mentalidad de emprendedor de guerrilla.
     4. Exactamente UNA oración sobre el valor tecnológico: "${tenantInfo ? `Usamos Bvelt para garantizar que nunca pierdas una oportunidad con nosotros por falta de respuesta.` : "Bvelt reactiva automáticamente prospectos perdidos y recupera trabajos para contratistas mediante SMS automatizados rápidos."}"
     5. Soft CTA: "Si quiere ver cómo funciona en 2 minutos → ${demoLink}".
-    6. SIN FIRMA NI PIE DE PÁGINA.
-    7. Formato JSON: {"subject": "...", "body": "..."}
+    6. SIN FIRMA NI PIE DE PÁGINA (el sistema añade el legal).
+    7. ${!tenantInfo && founderLine ? `FRASE FUNDADOR (úsala una vez, natural, no inventes otra biografía): "${founderLine}"` : "No inventes historia personal del fundador."}
+    8. ${isFollowUp ? "Esto es SEGUIMIENTO toque #" + outreachTouch + " sin respuesta. Más corto, otro ángulo, sin culpar. Asunto sin Re: falso." : "Primer correo en frío."}
+    9. Formato JSON: {"subject": "...", "body": "..."}
   ` : `
     You are an expert sales copywriter writing cold outreach.
     ${tenantInfo ? `Sender: ${tenantInfo.tenant_name} (${tenantInfo.industry})` : "Sender: Bvelt (https://bvelt.app)"}
@@ -8003,12 +8063,14 @@ async function generateAICopy(
     ${angleFocus}
 
     RULES:
-    1. Length: 85 to 105 words. Contractor-friendly and punchy.
-    2. Tone: Respectful, direct, guerrilla entrepreneur mindset.
+    1. Length: ${isFollowUp ? "55 to 80" : "85 to 105"} words. Contractor-friendly and punchy.
+    2. Tone: Respectful, direct, guerrilla entrepreneur mindset. Never beg. Never play for pity.
     3. Exactly ONE sentence on tech value: "${tenantInfo ? `We use Bvelt to ensure you never miss an opportunity with us due to response lag.` : "Bvelt automatically re-engages missed leads and recovers lost jobs for contractors via fast, automated SMS."}"
     4. Soft Call-to-Action: "If you'd like to see how it works in 2 minutes → ${demoLink}".
-    5. NO SIGNATURE OR FOOTER.
-    6. JSON format: {"subject": "...", "body": "..."}
+    5. NO SIGNATURE OR FOOTER (system adds legal footer).
+    6. ${!tenantInfo && founderLine ? `FOUNDER LINE (use once, natural English, do not invent a different bio): "${founderLine}"` : "Do not invent a personal founder story."}
+    7. ${isFollowUp ? "This is FOLLOW-UP touch #" + outreachTouch + " after no reply. Different angle from a first cold email. Shorter. Do not guilt-trip. Subject must NOT start with Re: unless truly a thread. Mention you are checking in once, then offer the demo link again." : "This is the FIRST outreach email."}
+    8. JSON format: {"subject": "...", "body": "..."}
   `;
 
   // 1. CASCADA GEMINI INTELIGENTE (Prioritizing models from GEMINI_MODELS, max 2 total)
