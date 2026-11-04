@@ -14,8 +14,8 @@
 import { getAlerts, tradeForEvent, eventAppliesToTrade, WeatherAlert } from './weatherSignals';
 import { dispatchEmail, EmailDispatchResult } from './emailDispatcher';
 import { auditDomainSecurityAndMx, auditWebsitePerformance, auditCityWeatherEmergency } from './openAudits';
-import { fetchPermitContractors } from './permitSources';
 import { pickTargets, findPlace, findNearestPlace, formatPlaceLabel, markSearched, placeKey, radiusKm, haversineKm } from './geoFrontier';
+import { sanitizeEmail, sanitizeProspectEmail, isOffIcpName, hasMxRecords } from './emailSanitizer';
 
 // Global type declarations for Cloudflare Worker compilation
 declare global {
@@ -177,6 +177,27 @@ export async function fetchPublicPermits(city: string): Promise<any[]> {
     }
   }
   return [];
+}
+
+export async function fetchPermitContractors(city: string, trade: string): Promise<any[]> {
+  try {
+    const permits = await fetchPublicPermits(city);
+    if (!permits || !Array.isArray(permits)) return [];
+    const results: any[] = [];
+    for (const p of permits) {
+      const name = p.contractor_name || p.company_name || p.applicant_name;
+      if (!name) continue;
+      results.push({
+        name,
+        phone: p.contractor_phone || p.phone || null,
+        city: p.city || city,
+        permits_90d: 1
+      });
+    }
+    return results;
+  } catch {
+    return [];
+  }
 }
 
 export async function releaseBudget(
@@ -841,6 +862,7 @@ export default {
           "/stats",
           "/decision",
           "/suppression",
+          "/fix-suppression",
           "/verify-key",
           "/logout",
           "/telegram-webhook",
@@ -948,6 +970,53 @@ export default {
         ).bind(key.toLowerCase(), reason, new Date().toISOString()).run();
         
         return Response.json({ success: true, message: `Added ${key} to suppression list.` }, { headers: corsHeaders });
+      }
+
+      // 7b. Self-healing suppression and cooldown repair endpoint
+      if ((path === "/fix-suppression" || path === "/api/fix-suppression") && method === "POST") {
+        if (!authorized) {
+          return Response.json({ error: "Unauthorized. Missing or invalid service key." }, { status: 401, headers: corsHeaders });
+        }
+
+        let deletedInvalidSuppressions = 0;
+        let reactivatedProspects = 0;
+
+        // (a) Delete suppression entries created by invalid email bounces
+        try {
+          const suppRows = await env.RADAR_DB.prepare(
+            "SELECT key, reason FROM suppression WHERE lower(reason) LIKE '%invalid%' OR lower(reason) LIKE '%bounced%'"
+          ).all();
+          const items = (suppRows.results || []) as any[];
+          for (const item of items) {
+            const check = sanitizeEmail(item.key);
+            if (!check.valid) {
+              await env.RADAR_DB.prepare("DELETE FROM suppression WHERE key = ?").bind(item.key).run();
+              deletedInvalidSuppressions++;
+            }
+          }
+        } catch (e: any) {
+          console.warn("[fix-suppression] Error cleaning suppression entries:", e);
+        }
+
+        // (b) Reactivate prospects with cooldown_until > 40 days and score >= 50
+        try {
+          const future40d = new Date(Date.now() + 40 * 24 * 60 * 60 * 1000).toISOString();
+          const reactivateResult = await env.RADAR_DB.prepare(`
+            UPDATE prospects
+            SET status = 'qualified', cooldown_until = NULL, updated_at = ?
+            WHERE cooldown_until > ? AND COALESCE(score, opportunity_score, 0) >= 50
+          `).bind(new Date().toISOString(), future40d).run();
+          reactivatedProspects = reactivateResult?.meta?.changes || 0;
+        } catch (e: any) {
+          console.warn("[fix-suppression] Error reactivating prospects:", e);
+        }
+
+        return Response.json({
+          success: true,
+          deleted_invalid_suppressions: deletedInvalidSuppressions,
+          reactivated_prospects: reactivatedProspects,
+          timestamp: new Date().toISOString()
+        }, { headers: corsHeaders });
       }
 
       // 8. Single Production Prospects Fetching Endpoint
@@ -3002,6 +3071,11 @@ async function handleDecision(
 
       // Compliance Hard Gate: missing sender postal address MUST block outbound dispatch
       if ((env.RESEND_API_KEY || env.BREVO_API_KEY) && !env.SENDER_POSTAL_ADDRESS?.trim()) {
+        await notifyOnce(
+          env,
+          "missing_sender_postal_address",
+          "⚠️ <b>Outreach en HOLD:</b> Falta <code>SENDER_POSTAL_ADDRESS</code> en las variables de Cloudflare. Se requiere dirección postal física para envíos conformes a CAN-SPAM."
+        );
         return Response.json({
           success: false,
           blocked: true,
@@ -3174,30 +3248,31 @@ async function handleDecision(
     return Response.json({ success: true, message: `Prospect ${id} marked as WON/CONVERTED.`, id }, { headers });
 
   } else if (action === "discard") {
+    const cooldown30d = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
     await db.prepare(
-      "UPDATE prospects SET status = 'discarded', outcome = 'rejected', updated_at = ? WHERE id = ?"
-    ).bind(timestamp, id).run();
+      "UPDATE prospects SET status = 'discarded', outcome = 'rejected', cooldown_until = ?, updated_at = ? WHERE id = ?"
+    ).bind(cooldown30d, timestamp, id).run();
     
-    // Add to suppression so this business won't be re-scouted
+    // Add to suppression with 30-day cooldown
     const nameCityKey = `${prospect.name.toLowerCase()}_${prospect.city.toLowerCase()}`.replace(/\s+/g, "_");
     await db.prepare("INSERT OR REPLACE INTO suppression (key, reason, created_at) VALUES (?, ?, ?)")
-      .bind(nameCityKey, `Discarded on ${timestamp}`, timestamp).run();
+      .bind(nameCityKey, `Discarded on ${timestamp} (cooldown until ${cooldown30d})`, timestamp).run();
 
     if (prospect.email) {
       await db.prepare("INSERT OR REPLACE INTO suppression (key, reason, created_at) VALUES (?, ?, ?)")
-        .bind(prospect.email.toLowerCase(), `Discarded on ${timestamp}`, timestamp).run();
+        .bind(prospect.email.toLowerCase(), `Discarded on ${timestamp} (cooldown until ${cooldown30d})`, timestamp).run();
     }
     if (prospect.website) {
       const domain = getDomain(prospect.website);
       if (domain) {
         await db.prepare("INSERT OR REPLACE INTO suppression (key, reason, created_at) VALUES (?, ?, ?)")
-          .bind(domain.toLowerCase(), `Discarded on ${timestamp}`, timestamp).run();
+          .bind(domain.toLowerCase(), `Discarded on ${timestamp} (cooldown until ${cooldown30d})`, timestamp).run();
       }
     }
 
     await recordLearningEvent(db, prospect.city, prospect.trade, prospect.variant_id, false);
 
-    return Response.json({ success: true, message: `Prospect ${id} discarded and permanently suppressed.`, id }, { headers });
+    return Response.json({ success: true, message: `Prospect ${id} discarded with 30-day cooldown.`, id }, { headers });
 
   } else if (action === "suppress") {
     await db.prepare(
@@ -4237,6 +4312,13 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
 
     // Descartes baratos ANTES de reservar presupuesto (evita 3 escrituras a D1 por cada candidato que se rechaza)
     const preName = (candidate.name || "").toLowerCase();
+    const EXTRA_SYNTACTIC_ICP_EXCLUSION = /\b(store|shop|market|pet|nails|hair|grocery|florist|boutique)\b/i;
+    if (isOffIcpName(candidate.name) || EXTRA_SYNTACTIC_ICP_EXCLUSION.test(candidate.name)) {
+      console.log(`[ICP Gate: Discarded] "${candidate.name}" matched off-ICP exclusion in handleDiscoveryJob`);
+      filteredCount++;
+      continue;
+    }
+
     if (
       (candidate.email || "").toLowerCase().includes("example.com") ||
       (candidate.website || "").toLowerCase().includes("example.com") ||
@@ -7643,7 +7725,7 @@ export async function fetchLocalBusinessesWithDiagnostics(
   try {
     const permitContractors = await fetchPermitContractors(city, trade);
     if (permitContractors && permitContractors.length > 0) {
-      permitCandidates = permitContractors.map(p => ({
+      permitCandidates = permitContractors.map((p: any) => ({
         name: p.name,
         phone: p.phone,
         city: p.city || city,
@@ -7688,8 +7770,15 @@ export async function fetchLocalBusinessesWithDiagnostics(
   const allCandidates = [...permitCandidates, ...rawBusinesses];
   const seen = new Set<string>();
   const deduped: any[] = [];
+  const EXTRA_SYNTACTIC_ICP_EXCLUSION = /\b(store|shop|market|pet|nails|hair|grocery|florist|boutique)\b/i;
+
   for (const item of allCandidates) {
-    const normName = (item.name || "").toLowerCase().trim().replace(/[^a-z0-9]/g, "");
+    const rawName = String(item.name || "").trim();
+    if (isOffIcpName(rawName) || EXTRA_SYNTACTIC_ICP_EXCLUSION.test(rawName)) {
+      console.log(`[ICP Gate: Discarded] "${rawName}" matched off-ICP filter in discovery for ${city} - ${trade}`);
+      continue;
+    }
+    const normName = rawName.toLowerCase().replace(/[^a-z0-9]/g, "");
     if (normName && !seen.has(normName)) {
       seen.add(normName);
       deduped.push(item);
@@ -7715,9 +7804,26 @@ export async function fetchLocalBusinessesWithDiagnostics(
     geoapify_status: geoapifyStatus
   };
 
-  // Caché en D1: 24 h si hubo resultados; 30 min si salió vacío (evita martillar los espejos de Overpass).
+  // Caché en D1: 24 h si hubo resultados; 30 min si salió vacío, con contador de vacíos consecutivos (cooldown de 7 días al llegar a 5)
   if (env.RADAR_DB) {
-    await cachePut(env, cacheKey, JSON.stringify(deduped), deduped.length > 0 ? 86400 : 1800);
+    const zeroKey = `radar_zero_streak_${city.replace(/[^a-z0-9]/gi, "_")}_${trade}_v3`.toLowerCase();
+    if (deduped.length > 0) {
+      await cachePut(env, zeroKey, "0", 86400 * 30);
+      await cachePut(env, cacheKey, JSON.stringify(deduped), 86400);
+    } else {
+      let streak = 1;
+      try {
+        const prev = await cacheGet(env, zeroKey);
+        streak = (parseInt(prev || "0", 10) || 0) + 1;
+      } catch (e) {}
+      await cachePut(env, zeroKey, String(streak), 86400 * 30);
+
+      const ttl = streak >= 5 ? 7 * 86400 : 1800; // 7 días si streak >= 5, si no 30 min
+      if (streak >= 5) {
+        console.log(`[Discovery Zero-Cache] ${city} - ${trade} reached ${streak} consecutive zeroes. Applying 7-day cooldown.`);
+      }
+      await cachePut(env, cacheKey, JSON.stringify([]), ttl);
+    }
   }
 
   return { businesses: deduped, diagnostics };
@@ -8782,17 +8888,26 @@ async function scrapeWebsiteContact(url: string): Promise<{
       const html = (await res.text()).slice(0, 50000);
       const normalizedHtml = html.toLowerCase();
 
-      // 1. Email extraction if not found yet
+      // 1. Email extraction if not found yet (sanitized against retina assets & file TLDs)
       if (!finalEmail) {
         const mailtoMatch = html.match(/href="mailto:([^"?#]+)"/i);
-        finalEmail = mailtoMatch ? mailtoMatch[1].trim() : null;
+        const mailtoCandidate = mailtoMatch ? sanitizeProspectEmail(mailtoMatch[1]) : null;
+        if (mailtoCandidate) {
+          finalEmail = mailtoCandidate;
+        }
 
         if (!finalEmail) {
           const emailRegex = /[a-zA-Z0-9._%+-]+@(?!gmail\.com)(?!yahoo\.com)(?!hotmail\.com)[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/gi;
           const matches = html.match(emailRegex);
           if (matches && matches.length > 0) {
-            const business = matches.filter(e => /^(info|office|contact|hello|service|admin|support|sales)/i.test(e));
-            finalEmail = business.length > 0 ? business[0] : matches[0];
+            const validCandidates = matches
+              .map(m => sanitizeProspectEmail(m))
+              .filter((m): m is string => Boolean(m));
+
+            if (validCandidates.length > 0) {
+              const business = validCandidates.filter(e => /^(info|office|contact|hello|service|admin|support|sales)/i.test(e));
+              finalEmail = business.length > 0 ? business[0] : validCandidates[0];
+            }
           }
         }
       }
@@ -8933,31 +9048,18 @@ export interface EmailVerificationResult {
 }
 
 export async function verifyEmail(email: string, env: Env): Promise<EmailVerificationResult> {
-  const normEmail = email.toLowerCase().trim();
+  const normEmail = (email || "").toLowerCase().trim();
   const timestamp = new Date().toISOString();
 
-  // 1. Format validation
-  const emailRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
-  if (!emailRegex.test(normEmail)) {
+  // 1. Strict sanitization check (rejects file extensions, @2x, disposables, system mailboxes, invalid format)
+  const sanitized = sanitizeEmail(normEmail);
+  if (!sanitized.valid) {
     return {
       valid: false,
-      deliverability: "INVALID_FORMAT",
-      is_disposable: false,
+      deliverability: sanitized.reason === "disposable_domain" ? "DISPOSABLE" : "INVALID_FORMAT",
+      is_disposable: sanitized.reason === "disposable_domain",
       is_catchall: false,
-      reason: "Invalid email format"
-    };
-  }
-
-  // 2. Known disposable domains check
-  const disposableDomains = ["mailinator.com", "tempmail.com", "10minutemail.com", "yopmail.com", "guerrillamail.com", "trashmail.com"];
-  const domain = normEmail.split("@")[1];
-  if (disposableDomains.includes(domain)) {
-    return {
-      valid: false,
-      deliverability: "DISPOSABLE",
-      is_disposable: true,
-      is_catchall: false,
-      reason: "Disposable email domain detected"
+      reason: `Sanitizer rejected: ${sanitized.reason}`
     };
   }
 
@@ -9189,6 +9291,11 @@ export async function sendOrQueueOutreach(prospect: any, runId: string, env: Env
   if (cb.active) {
     await env.RADAR_DB.prepare("UPDATE prospects SET status = 'held', outcome = 'circuit_breaker_active', updated_at = ? WHERE id = ?")
       .bind(new Date().toISOString(), prospect.id).run();
+    await notifyOnce(
+      env,
+      "circuit_breaker_active",
+      `⚠️ <b>Outreach en HOLD:</b> Circuit Breaker activo (${cb.reason || 'error de proveedor'}). Envíos pausados.`
+    );
     return { success: false, reason: `circuit_breaker_active: ${cb.reason}` };
   }
 
@@ -9197,6 +9304,11 @@ export async function sendOrQueueOutreach(prospect: any, runId: string, env: Env
     console.warn(`[Compliance Gate] Prospect ${prospect.id} blocked: missing_sender_postal_address`);
     await env.RADAR_DB.prepare("UPDATE prospects SET status = 'held', outcome = 'missing_sender_postal_address', updated_at = ? WHERE id = ?")
       .bind(new Date().toISOString(), prospect.id).run();
+    await notifyOnce(
+      env,
+      "missing_sender_postal_address",
+      "⚠️ <b>Outreach en HOLD:</b> Falta <code>SENDER_POSTAL_ADDRESS</code> en las variables de Cloudflare. Se requiere dirección postal física para envíos conformes a CAN-SPAM."
+    );
     return { success: false, reason: "missing_sender_postal_address" };
   }
 
@@ -9256,6 +9368,13 @@ export async function sendOrQueueOutreach(prospect: any, runId: string, env: Env
 
   const governor = await checkSenderGovernor(env);
   if (!governor.allowed) {
+    await env.RADAR_DB.prepare("UPDATE prospects SET status = 'held', outcome = 'sender_governor_limit', updated_at = ? WHERE id = ?")
+      .bind(new Date().toISOString(), prospect.id).run();
+    await notifyOnce(
+      env,
+      "sender_governor_blocked",
+      `⚠️ <b>Outreach en HOLD:</b> Sender Governor límite diario alcanzado (${governor.reason}).`
+    );
     return { success: false, reason: `SENDER_GOVERNOR_BLOCKED: ${governor.reason}` };
   }
 
@@ -9265,6 +9384,11 @@ export async function sendOrQueueOutreach(prospect: any, runId: string, env: Env
   if (!outreachReserved) {
     await env.RADAR_DB.prepare("UPDATE prospects SET status = 'held', outcome = 'outreach_budget_limit_exceeded', updated_at = ? WHERE id = ?")
       .bind(new Date().toISOString(), prospect.id).run();
+    await notifyOnce(
+      env,
+      "outreach_budget_exhausted",
+      `⚠️ <b>Outreach en HOLD:</b> Presupuesto diario de outreach agotado para tenant '${tenantId}'.`
+    );
     return { success: false, reason: "outreach_budget_limit_exceeded" };
   }
 
@@ -9278,6 +9402,11 @@ export async function sendOrQueueOutreach(prospect: any, runId: string, env: Env
     const missingOutcome = 'missing_email_provider_keys';
     await env.RADAR_DB.prepare("UPDATE prospects SET status = 'provider_required', outcome = ?, updated_at = ? WHERE id = ?")
       .bind(missingOutcome, new Date().toISOString(), prospect.id).run();
+    await notifyOnce(
+      env,
+      "missing_email_provider",
+      "⚠️ <b>Outreach en HOLD:</b> No hay claves de proveedor configuradas (falta RESEND_API_KEY o BREVO_API_KEY)."
+    );
     return { success: false, reason: `provider_required: ${missingOutcome}` };
   }
 

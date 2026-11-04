@@ -6,6 +6,8 @@
  * 3. Simulated Mode (when no keys provided) - Logs diagnostic details & guides user
  */
 
+import { sanitizeEmail } from './emailSanitizer';
+
 export interface EmailDispatchOptions {
   to: string;
   recipientName?: string;
@@ -32,16 +34,18 @@ export interface EmailDispatchResult {
  * Dispatches an outbound cold outreach email using the available free tier provider
  */
 export async function dispatchEmail(options: EmailDispatchOptions): Promise<EmailDispatchResult> {
-  const to = (options.to || '').trim();
-  if (!to || !to.includes('@')) {
+  const sanitizeRes = sanitizeEmail(options.to);
+  if (!sanitizeRes.valid || !sanitizeRes.email) {
     return {
       success: false,
       provider: 'simulated',
       messageId: '',
       status: 'failed',
-      error: 'Dirección de correo electrónico de destino inválida o vacía.'
+      error: `Dirección de correo electrónico no válida (${sanitizeRes.reason || 'sanitizer_rejected'}). Envío cancelado sin marcar como rebote.`
     };
   }
+
+  const to = sanitizeRes.email;
 
   const subject = (options.subject || 'Bvelt - Pregunta rápida').trim();
   const body = (options.body || '').trim();
