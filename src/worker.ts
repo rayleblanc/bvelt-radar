@@ -4312,11 +4312,22 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
 
     // Descartes baratos ANTES de reservar presupuesto (evita 3 escrituras a D1 por cada candidato que se rechaza)
     const preName = (candidate.name || "").toLowerCase();
+    const allowGym = job.mode === 'tenant';
     const EXTRA_SYNTACTIC_ICP_EXCLUSION = /\b(store|shop|market|pet|nails|hair|grocery|florist|boutique)\b/i;
-    if (isOffIcpName(candidate.name) || EXTRA_SYNTACTIC_ICP_EXCLUSION.test(candidate.name)) {
+    if (isOffIcpName(candidate.name, allowGym) || EXTRA_SYNTACTIC_ICP_EXCLUSION.test(candidate.name)) {
       console.log(`[ICP Gate: Discarded] "${candidate.name}" matched off-ICP exclusion in handleDiscoveryJob`);
       filteredCount++;
       continue;
+    }
+
+    const candCoherence = checkTradeCoherence(candidate.name, candidate.trade || trade, candidate.website, JSON.stringify(candidate), job.mode);
+    if (!candCoherence.coherent || candCoherence.disqualified) {
+      console.log(`[Trade Gate: Discarded] "${candidate.name}" failed trade coherence: ${candCoherence.reason}`);
+      filteredCount++;
+      continue;
+    }
+    if (candCoherence.verifiedTrade) {
+      candidate.trade = candCoherence.verifiedTrade;
     }
 
     if (
@@ -4462,6 +4473,20 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
       } catch (e) {}
     }
 
+    // Re-validate ICP and trade coherence right before database insertion
+    if (isOffIcpName(candidate.name, job.mode === 'tenant')) {
+      console.log(`[ICP Gate: Discarded before insert] "${candidate.name}" matched off-ICP`);
+      continue;
+    }
+    const preInsertCoherence = checkTradeCoherence(candidate.name, candidate.trade, candidate.website, null, job.mode);
+    if (!preInsertCoherence.coherent || preInsertCoherence.disqualified) {
+      console.log(`[Trade Gate: Discarded before insert] "${candidate.name}" failed trade coherence: ${preInsertCoherence.reason}`);
+      continue;
+    }
+    if (preInsertCoherence.verifiedTrade) {
+      candidate.trade = preInsertCoherence.verifiedTrade;
+    }
+
     const prospectId = crypto.randomUUID();
     const demoToken = crypto.randomUUID().replace(/-/g, "");
     const postalCode = candidate.postal_code || candidate.zip || null;
@@ -4583,6 +4608,24 @@ async function handleEnrichJob(job: RadarJobMessage, env: Env): Promise<void> {
   const { prospect_id, overrides, permits_90d } = job.payload;
   const prospect = await env.RADAR_DB.prepare("SELECT * FROM prospects WHERE id = ?").bind(prospect_id).first() as any;
   if (!prospect) return;
+
+  // Off-ICP and Trade Coherence Gate
+  if (isOffIcpName(prospect.name, prospect.mode === 'tenant')) {
+    await env.RADAR_DB.prepare("UPDATE prospects SET status = 'disqualified', outcome = 'off_icp_name', updated_at = ? WHERE id = ?")
+      .bind(new Date().toISOString(), prospect.id).run();
+    return;
+  }
+  const enrichCoherence = checkTradeCoherence(prospect.name, prospect.trade, prospect.website, prospect.signals_json, prospect.mode);
+  if (!enrichCoherence.coherent && enrichCoherence.disqualified) {
+    await env.RADAR_DB.prepare("UPDATE prospects SET status = 'disqualified', outcome = 'off_icp_name', updated_at = ? WHERE id = ?")
+      .bind(new Date().toISOString(), prospect.id).run();
+    return;
+  }
+  if (enrichCoherence.verifiedTrade && enrichCoherence.verifiedTrade !== prospect.trade) {
+    await env.RADAR_DB.prepare("UPDATE prospects SET trade = ?, updated_at = ? WHERE id = ?")
+      .bind(enrichCoherence.verifiedTrade, new Date().toISOString(), prospect.id).run();
+    prospect.trade = enrichCoherence.verifiedTrade;
+  }
 
   // Idempotency: skip re-scraping if already enriched or beyond
   if (['enriched', 'scored', 'approved', 'drafted', 'notified', 'sent'].includes(prospect.status)) {
@@ -7774,13 +7817,18 @@ export async function fetchLocalBusinessesWithDiagnostics(
 
   for (const item of allCandidates) {
     const rawName = String(item.name || "").trim();
-    if (isOffIcpName(rawName) || EXTRA_SYNTACTIC_ICP_EXCLUSION.test(rawName)) {
-      console.log(`[ICP Gate: Discarded] "${rawName}" matched off-ICP filter in discovery for ${city} - ${trade}`);
+    const candTrade = item.trade || trade;
+    const coherence = checkTradeCoherence(rawName, candTrade, item.website);
+    if (isOffIcpName(rawName) || EXTRA_SYNTACTIC_ICP_EXCLUSION.test(rawName) || !coherence.coherent || coherence.disqualified) {
+      console.log(`[ICP Gate: Discarded] "${rawName}" matched off-ICP/coherence filter in discovery for ${city} - ${candTrade}`);
       continue;
     }
     const normName = rawName.toLowerCase().replace(/[^a-z0-9]/g, "");
     if (normName && !seen.has(normName)) {
       seen.add(normName);
+      if (coherence.verifiedTrade) {
+        item.trade = coherence.verifiedTrade;
+      }
       deduped.push(item);
     }
   }
@@ -8291,18 +8339,59 @@ export function buildAttackKit(p: any): {
 } {
   const name = String(p.name || "there");
   const city = String(p.city || "");
-  const trade = String(p.trade || "service").replace(/_/g, " ");
-  const phone = p.phone ? String(p.phone) : null;
   const isTenantLead = p.mode === 'tenant' || (p.tenant_id && p.tenant_id !== 'founder');
+  const phone = p.phone ? String(p.phone) : null;
 
+  // 1. Off-ICP and Trade Coherence Hard Gate (Barbers, Salons, etc. CANNOT get SMS)
+  const coherence = checkTradeCoherence(
+    name,
+    String(p.trade || ''),
+    p.website,
+    typeof p.signals_json === 'string' ? p.signals_json : JSON.stringify(p.signals_json || {}),
+    isTenantLead ? 'tenant' : 'founder'
+  );
+
+  if (coherence.disqualified || !coherence.coherent || !coherence.verifiedTrade) {
+    return {
+      prospect_id: String(p.id || ""),
+      name,
+      why_this_lead: `DO NOT CONTACT: ${coherence.reason || 'Off ICP or trade mismatch'}`,
+      email: { subject: "", body: "" },
+      sms: "",
+      call_script: "- DO NOT CONTACT: Business is off-ICP or trade label conflicts with company name.",
+      next_action: "DO_NOT_CONTACT — off ICP or trade mismatch",
+      angle: "disqualified_off_icp"
+    };
+  }
+
+  const tradeKey = coherence.verifiedTrade;
+  // Human-readable verified trade label
+  const tradeLabels: Record<string, string> = {
+    lawn_care: "lawn care",
+    landscaping: "landscaping",
+    plumbing: "plumbing",
+    hvac: "HVAC",
+    roofing: "roofing",
+    electrical: "electrical",
+    painting: "painting",
+    pool: "pool service",
+    pest_control: "pest control",
+    cleaning: "cleaning",
+    garage_door: "garage door",
+    handyman: "handyman & remodeling",
+    construction: "general contracting",
+    remodeling: "remodeling"
+  };
+  const tradeLabel = tradeLabels[tradeKey] || tradeKey.replace(/_/g, " ");
+
+  // 2. TENANT MODE: Pitch tenant's services to local property managers / commercial buyers (NO Bvelt SaaS pitch)
   if (isTenantLead) {
-    const tradeLabel = trade || "mantenimiento y servicios";
-    const whyTenant = `${name} en ${city} (${trade}): comprador B2B potencial para tus servicios con necesidades de mantenimiento o gestión en ${city}.`;
+    const whyTenant = `${name} en ${city} (${tradeLabel}): comprador B2B potencial para tus servicios con necesidades de mantenimiento o gestión en ${city}.`;
     const subjectTenant = `Disponibilidad de servicio de ${tradeLabel} para ${name} en ${city}`;
     const emailBodyTenant = `Hola equipo de ${name},\n\nNos ponemos en contacto porque gestionan propiedades en ${city} y sabemos lo crítico que es contar con especialistas en ${tradeLabel} de respuesta rápida cuando surge una avería o necesidad de mantenimiento.\n\nContamos con técnicos locales disponibles y tiempos de atención inmediata para instalaciones comerciales y residenciales.\n\n¿Tienen un momento esta semana para una llamada breve y ver si podemos colaborar?\n\nSaludos cordiales,\nEquipo de servicio local`;
     const smsTenant = `Hola ${name}, ofrecemos servicio rápido de ${tradeLabel} en ${city} para propiedades comerciales y residenciales. ¿Tienen necesidades de mantenimiento activas?`;
-    const callTenant = `Hook: "Hola, llamo para presentar nuestro servicio de ${tradeLabel} en ${city}."\nPain: "¿Tienen incidencias abiertas o retrasos con contratistas en sus propiedades actualmente?"\nPitch: "Ofrecemos respuesta local garantizada y presupuestos en el día."\nClose: "¿Con quién puedo coordinar para enviarles nuestras tarifas o atender su próxima avería?"`;
-    const nextTenant = phone ? "Llamar directo o contactar por WhatsApp (cliente B2B local)." : p.email ? "Enviar email de propuesta B2B." : "Buscar teléfono y llamar.";
+    const callTenant = `- Contexto: Presentar servicio local de ${tradeLabel} en ${city}.\n- Pregunta: "¿Tienen incidencias abiertas o retrasos con contratistas actuales en sus propiedades?"\n- Propuesta: Ofrecer respuesta local garantizada y presupuestos en el día.\n- Cierre: Pedir contacto del responsable de mantenimiento para coordinar tarifas.`;
+    const nextTenant = phone ? "Llamar directo o contactar por WhatsApp (cliente B2B local)." : p.email ? "Enviar propuesta B2B por email." : "Buscar teléfono y llamar.";
 
     return {
       prospect_id: String(p.id || ""),
@@ -8316,52 +8405,131 @@ export function buildAttackKit(p: any): {
     };
   }
 
-  const angle = String(p.bvelt_angle || p.angle || "missed_calls").toLowerCase();
-  const demo = p.demo_token ? `https://bvelt.app/demo?p=${p.demo_token}` : "https://bvelt.app/demo";
-
+  // 3. FOUNDER MODE: Selling Bvelt to US home-service contractors
   let signals: any = {};
   try {
     signals = typeof p.signals_json === "string" ? JSON.parse(p.signals_json || "{}") : (p.signals_json || p.signals || {});
   } catch { signals = {}; }
 
+  const angleHint = String(p.bvelt_angle || p.angle || "").toLowerCase();
+
+  // Evidence check for angle selection (never invent)
+  const hasWeatherSignal = Boolean(p.signal_event || signals.weather_alert || signals.emergency_weather);
+  const hasQuoteSignal = Boolean(signals.quote_request || signals.estimate_language || angleHint.includes("quote"));
+  const hasSmsGapSignal = Boolean(signals.sms_gap || signals.no_own_website || angleHint.includes("sms") || angleHint.includes("contact_gap"));
+  const hasMissedCallsSignal = Boolean(signals.emergency || signals.contact_form || signals.booking || signals.call_cta || p.phone || p.email || p.website || angleHint.includes("missed"));
+
+  let selectedAngle: 'weather_surge' | 'stale_quotes' | 'no_sms' | 'missed_calls' | null = null;
+  if (hasWeatherSignal) {
+    selectedAngle = 'weather_surge';
+  } else if (hasQuoteSignal) {
+    selectedAngle = 'stale_quotes';
+  } else if (hasSmsGapSignal) {
+    selectedAngle = 'no_sms';
+  } else if (hasMissedCallsSignal) {
+    selectedAngle = 'missed_calls';
+  }
+
+  if (!selectedAngle) {
+    return {
+      prospect_id: String(p.id || ""),
+      name,
+      why_this_lead: `DO NOT CONTACT: no observable evidence for outreach angle`,
+      email: { subject: "", body: "" },
+      sms: "",
+      call_script: "- DO NOT CONTACT: No observable evidence for outreach angle.",
+      next_action: "DO_NOT_CONTACT — no evidence for angle",
+      angle: "no_evidence"
+    };
+  }
+
+  const demoUrl = p.demo_token ? `https://bvelt.app/demo?p=${p.demo_token}` : (p.demo_url || "");
+  const senderSignature = "Rainer — Bvelt";
+  const firstName = name.split(/\s+/)[0] || name;
+  const variantIndex = hashCode(String(p.id || name + city)) % 3;
+
   const reasons: string[] = [];
-  if (signals.sms_gap || signals.no_own_website) reasons.push("sin canal digital de respuesta rápida");
-  if (signals.emergency) reasons.push("promete urgencias 24/7");
-  if (!signals.booking) reasons.push("sin reserva online");
-  if (p.signal_event) reasons.push(`señal climática: ${p.signal_event}`);
-  if (reasons.length === 0) reasons.push("negocio local de oficio con hueco de seguimiento");
+  if (selectedAngle === 'weather_surge') reasons.push(`señal climática/demanda: ${p.signal_event || 'alerta meteorológica'}`);
+  else if (selectedAngle === 'stale_quotes') reasons.push("solicitud de presupuestos/estimaciones sin seguimiento");
+  else if (selectedAngle === 'no_sms') reasons.push("sin canal SMS/respuesta por texto");
+  else reasons.push(`contratista activo de ${tradeLabel} en ${city} con llamadas entrantes no atendidas`);
 
-  const why = `${name} en ${city} (${trade}): ${reasons.join("; ")}.`;
+  const why = `${name} en ${city} (${tradeLabel}): ${reasons.join("; ")}.`;
 
-  let subject = `Quick question for ${name}`;
+  let subject = "";
   let emailBody = "";
   let sms = "";
-  let call = "";
+  let call_script = "";
 
-  if (angle.includes("after") || signals.emergency) {
-    subject = `${name} — after-hours calls`;
-    emailBody = `Hi ${name} team — saw you handle emergency / after-hours work in ${city}. When the phone rings at 9pm and you're already on a job, those callers often go to whoever answers first.\n\nBvelt recovers those missed calls and old quotes automatically. 60-second look: ${demo}\n\nWorth a glance?`;
-    sms = `Hi, it's about ${name} after-hours calls in ${city}. Quick idea to stop losing emergency jobs to voicemail — ${demo}`;
-    call = `Hook: "I noticed ${name} advertises emergency service in ${city}."\nPain: "When you're on a job and the next emergency rings, who catches it?"\nPitch: "Bvelt texts back in under a minute and books or queues the lead."\nClose: "Can I send a 60-second demo link?"`;
-  } else if (angle.includes("sms") || signals.sms_gap || signals.no_own_website) {
-    subject = `${name} — texting gap`;
-    emailBody = `Hi ${name} — a lot of homeowners in ${city} text before they call. If the only option is a phone number, those jobs slip away.\n\nBvelt adds instant SMS follow-up for missed calls and web leads. Demo: ${demo}`;
-    sms = `${name}: many ${trade} leads in ${city} prefer text. Bvelt covers missed calls by SMS — ${demo}`;
-    call = `Hook: "Quick one — do most of your ${city} leads still only call, or do they text?"\nPain: "Phone-only shops lose the texters."\nPitch: "Bvelt answers the gap without another hire."\nClose: "I'll text you the demo — 60 seconds."`;
-  } else if (angle.includes("quote") || signals.quote_request) {
-    subject = `${name} — quote follow-up`;
-    emailBody = `Hi ${name} — estimates that sit without a follow-up are the quietest revenue leak in ${trade}.\n\nBvelt nudges old quotes and missed calls so jobs don't go cold. ${demo}`;
-    sms = `${name}: following up on open quotes in ${city} recovers jobs. See Bvelt: ${demo}`;
-    call = `Hook: "How do you follow up estimates that didn't close last week?"\nPain: "Most shops never touch them again."\nPitch: "Bvelt sequences those automatically."\nClose: "Demo link takes one minute."`;
+  if (selectedAngle === 'missed_calls') {
+    subject = `${name} — missed ${tradeLabel} calls in ${city}`;
+
+    if (variantIndex === 0) {
+      sms = `Hi ${firstName} — quick note from Rainer at Bvelt. When ${tradeLabel} calls in ${city} hit voicemail, a lot of homeowners call the next shop. We text them in under a minute so the job doesn't walk. 60-sec demo for ${name}: ${demoUrl} — want it or should I stop? — ${senderSignature}`;
+    } else if (variantIndex === 1) {
+      sms = `Hi ${firstName} — Rainer here with Bvelt. When your crew is out on a job in ${city} and the phone rings, most callers won't leave a voicemail. Bvelt sends an instant text back so you catch the job. 45-sec demo: ${demoUrl} — worth a glance? — ${senderSignature}`;
+    } else {
+      sms = `Hi ${firstName} — Rainer from Bvelt. When homeowners call for ${tradeLabel} in ${city} after hours, whoever replies by text first gets the job. We send that automated text response instantly. 45-sec preview: ${demoUrl} — should I send more info or pass? — ${senderSignature}`;
+    }
+
+    emailBody = `Hi ${name} team — saw your ${tradeLabel} service in ${city}.\n\nWhen your crew is out on a job or it's after hours, missed calls usually go straight to voicemail. In ${city}, homeowners rarely leave a message — they just call the next contractor on Google.\n\nWe built Bvelt to send an instant text back in under a minute so those calls stay on your calendar instead of walking away.\n\nPut together a 45-second preview of how it works for ${name}${demoUrl ? `: ${demoUrl}` : '.'}\n\nWould you be open to taking a look, or should I stop reaching out?\n\nBest,\n${senderSignature}`;
+
+    call_script = `- Operator Context: Verified ${tradeLabel} contractor in ${city}.\n- Opening Question: "When your crew is on a job and the phone rings, who catches the call?"\n- Key Point: Homeowners in ${city} call down Google listings and hire whoever texts back first.\n- Next Step: Offer to text over the 45-second preview link (${demoUrl}).`;
+
+  } else if (selectedAngle === 'no_sms') {
+    subject = `${name} — texting option for ${tradeLabel} in ${city}`;
+
+    if (variantIndex === 0) {
+      sms = `Hi ${firstName} — quick note from Rainer at Bvelt. Saw your ${tradeLabel} shop in ${city}. Most homeowners text for estimates now and walk away if there's no SMS option. We add instant text response for missed calls. Demo: ${demoUrl} — interested? — ${senderSignature}`;
+    } else if (variantIndex === 1) {
+      sms = `Hi ${firstName} — Rainer with Bvelt. If a homeowner in ${city} tries to text your ${tradeLabel} line and gets no reply, that lead goes cold. Bvelt replies by SMS in under a minute automatically. 45-sec preview: ${demoUrl} — worth a look? — ${senderSignature}`;
+    } else {
+      sms = `Hi ${firstName} — Rainer at Bvelt. A lot of ${tradeLabel} clients in ${city} prefer texting over calling. Bvelt turns missed phone calls into instant text conversations. 60-sec demo for ${name}: ${demoUrl} — want to check it out? — ${senderSignature}`;
+    }
+
+    emailBody = `Hi ${name} team — saw your ${tradeLabel} shop in ${city}.\n\nA lot of homeowners in ${city} prefer to text for estimates before calling. If the only option is a phone call or voicemail, those jobs quietly slip away.\n\nWe built Bvelt to add instant automated texting for missed calls and web inquiries so you catch those homeowners immediately.\n\nPut together a 45-second preview of how it works for ${name}${demoUrl ? `: ${demoUrl}` : '.'}\n\nWould you be open to taking a look?\n\nBest,\n${senderSignature}`;
+
+    call_script = `- Operator Context: ${tradeLabel} contractor in ${city} without instant texting.\n- Opening Question: "Do homeowners ever ask to text photos of the job, or is it phone-only?"\n- Key Point: Homeowners prefer quick text responses over leaving voicemails.\n- Next Step: Offer to text over the 45-second preview link (${demoUrl}).`;
+
+  } else if (selectedAngle === 'stale_quotes') {
+    subject = `${name} — following up on ${tradeLabel} quotes in ${city}`;
+
+    if (variantIndex === 0) {
+      sms = `Hi ${firstName} — quick note from Rainer at Bvelt. Unanswered ${tradeLabel} estimates in ${city} are a quiet revenue leak. Bvelt automatically nudges past quotes so jobs don't go cold. 60-sec demo: ${demoUrl} — open to a quick look? — ${senderSignature}`;
+    } else if (variantIndex === 1) {
+      sms = `Hi ${firstName} — Rainer here from Bvelt. Most ${tradeLabel} contractors in ${city} don't have time to follow up bids from last week. Bvelt sends automated text check-ins that bring buyers back. 45-sec demo: ${demoUrl} — want a look? — ${senderSignature}`;
+    } else {
+      sms = `Hi ${firstName} — Rainer at Bvelt. Following up on past ${tradeLabel} bids in ${city} takes hours when done by hand. Bvelt sequences text follow-ups automatically so you win more jobs. Quick demo: ${demoUrl} — should I send details or stop? — ${senderSignature}`;
+    }
+
+    emailBody = `Hi ${name} team — saw your ${tradeLabel} business in ${city}.\n\nFollowing up on estimates that sit unanswered is where most contractors in ${city} leave money on the table. Most homeowners get busy and just need a quick text check-in.\n\nWe built Bvelt to automatically send friendly text follow-ups on past quotes so bids don't go cold.\n\nPut together a 45-second preview of how it works for ${name}${demoUrl ? `: ${demoUrl}` : '.'}\n\nWould you be open to taking a look?\n\nBest,\n${senderSignature}`;
+
+    call_script = `- Operator Context: ${tradeLabel} contractor in ${city} sending out bids and estimates.\n- Opening Question: "How do you follow up on estimates that don't close right away?"\n- Key Point: Unanswered bids go cold unless sequenced with friendly SMS check-ins.\n- Next Step: Offer to text over the 45-second preview link (${demoUrl}).`;
+
   } else {
-    subject = p.draft_subject || `Missed calls at ${name}`;
-    emailBody = p.draft_body || `Hi ${name} team in ${city} — every missed call is a job that may go to the next contractor. Bvelt recovers them: ${demo}`;
-    sms = `Hi ${name} — idea to recover missed ${trade} calls in ${city}: ${demo}`;
-    call = `Hook: "I was looking at ${trade} operators in ${city} and ${name} stood out."\nPain: "Missed calls during busy hours."\nPitch: "Bvelt covers the gap."\nClose: "OK to send a short demo?"`;
+    // weather_surge
+    subject = `${name} — handling ${tradeLabel} call spikes in ${city}`;
+
+    if (variantIndex === 0) {
+      sms = `Hi ${firstName} — quick note from Rainer at Bvelt. With recent severe weather in ${city}, ${tradeLabel} call volume spikes fast. Bvelt texts back missed emergency calls instantly so jobs don't slip away. 60-sec demo: ${demoUrl} — open to a look? — ${senderSignature}`;
+    } else if (variantIndex === 1) {
+      sms = `Hi ${firstName} — Rainer with Bvelt. Heavy weather in ${city} means phones ring non-stop for ${tradeLabel} work. Bvelt catches missed calls with automated text replies so your crew stays booked. 45-sec preview: ${demoUrl} — worth a glance? — ${senderSignature}`;
+    } else {
+      sms = `Hi ${firstName} — Rainer from Bvelt. When storm weather hits ${city}, homeowners call multiple ${tradeLabel} companies at once. Bvelt texts back in under 60 seconds to lock in the job. Quick demo: ${demoUrl} — should I share details? — ${senderSignature}`;
+    }
+
+    emailBody = `Hi ${name} team — with the recent weather event in ${city}, call volume for ${tradeLabel} spikes fast.\n\nWhen phones ring non-stop, missed calls go to competitors who answer first.\n\nWe built Bvelt to send instant text replies to missed calls so your crew locks in emergency jobs automatically.\n\nPut together a 45-second preview of how it works for ${name}${demoUrl ? `: ${demoUrl}` : '.'}\n\nWould you be open to taking a look?\n\nBest,\n${senderSignature}`;
+
+    call_script = `- Operator Context: ${tradeLabel} contractor in ${city} facing weather call surges.\n- Opening Question: "How are you handling the extra call volume after the storm?"\n- Key Point: Instant automated text replies lock in emergency callers before competitors do.\n- Next Step: Offer to text over the 45-second preview link (${demoUrl}).`;
+  }
+
+  // Enforce max ~300 chars on SMS
+  if (sms.length > 310) {
+    sms = sms.slice(0, 307) + "...";
   }
 
   const next =
-    phone && !p.email ? "Llamar o WhatsApp primero (solo teléfono)." :
+    phone && !p.email ? "Llamar o contactar por WhatsApp primero (solo teléfono)." :
     p.email ? "Enviar correo + registrar decisión Enviar." :
     "Buscar contacto y luego kit SMS/llamada.";
 
@@ -8371,9 +8539,9 @@ export function buildAttackKit(p: any): {
     why_this_lead: why,
     email: { subject, body: emailBody },
     sms,
-    call_script: call,
+    call_script,
     next_action: next,
-    angle
+    angle: selectedAngle
   };
 }
 
@@ -9272,6 +9440,24 @@ export async function recordNegativeSignal(db: D1Database, signalType: 'bounce' 
  * Autonomous Hunter Sequences Outreach Dispatcher (Truthful State Engine)
  */
 export async function sendOrQueueOutreach(prospect: any, runId: string, env: Env): Promise<{ success: boolean; reason: string }> {
+  // 0. Off-ICP and Trade Coherence Gate
+  if (isOffIcpName(prospect.name, prospect.mode === 'tenant')) {
+    await env.RADAR_DB.prepare("UPDATE prospects SET status = 'disqualified', outcome = 'off_icp_name', updated_at = ? WHERE id = ?")
+      .bind(new Date().toISOString(), prospect.id).run();
+    return { success: false, reason: "OFF_ICP_NAME" };
+  }
+  const outreachCoherence = checkTradeCoherence(prospect.name, prospect.trade, prospect.website, prospect.signals_json, prospect.mode);
+  if (!outreachCoherence.coherent && outreachCoherence.disqualified) {
+    await env.RADAR_DB.prepare("UPDATE prospects SET status = 'disqualified', outcome = 'off_icp_name', updated_at = ? WHERE id = ?")
+      .bind(new Date().toISOString(), prospect.id).run();
+    return { success: false, reason: `TRADE_MISMATCH: ${outreachCoherence.reason}` };
+  }
+  if (outreachCoherence.verifiedTrade && outreachCoherence.verifiedTrade !== prospect.trade) {
+    await env.RADAR_DB.prepare("UPDATE prospects SET trade = ?, updated_at = ? WHERE id = ?")
+      .bind(outreachCoherence.verifiedTrade, new Date().toISOString(), prospect.id).run();
+    prospect.trade = outreachCoherence.verifiedTrade;
+  }
+
   // 1. Global Kill Switch check
   if (env.RADAR_GLOBAL_PAUSE === "true" || env.RADAR_GLOBAL_PAUSE === "1") {
     await env.RADAR_DB.prepare("UPDATE prospects SET status = 'held', outcome = 'RADAR_GLOBAL_PAUSED', updated_at = ? WHERE id = ?")
@@ -9965,19 +10151,133 @@ export function parseCSV(text: string): string[][] {
   return lines;
 }
 
-export function inferTradeFromText(...textParts: (string | undefined)[]): string {
+export interface TradeInferenceResult {
+  trade: string;
+  confidence: 'high' | 'medium' | 'low' | 'none';
+  isNonHomeService: boolean;
+  detectedClue?: string;
+}
+
+export function inferTradeFromTextDetailed(...textParts: (string | undefined)[]): TradeInferenceResult {
   const combined = textParts.filter(Boolean).join(' ').toLowerCase();
+  if (!combined.trim()) {
+    return { trade: 'general', confidence: 'none', isNonHomeService: false };
+  }
 
-  if (/plumb/i.test(combined)) return 'plumbing';
-  if (/hvac|heating|air/i.test(combined)) return 'hvac';
-  if (/roof/i.test(combined)) return 'roofing';
-  if (/landscap/i.test(combined)) return 'landscaping';
-  if (/electric/i.test(combined)) return 'electrical';
-  if (/paint/i.test(combined)) return 'painting';
-  if (/pool/i.test(combined)) return 'pool';
-  if (/pest/i.test(combined)) return 'pest_control';
+  // Check off-ICP first
+  if (isOffIcpName(combined)) {
+    return { trade: 'non_home_service', confidence: 'high', isNonHomeService: true, detectedClue: 'off_icp_token' };
+  }
 
-  return 'general';
+  const tradePatterns: [string, RegExp][] = [
+    ['lawn_care', /\b(lawn\s*care|lawn\s*mowing|mowing|turf|weed\s*control|aeration|yard\s*care|lawn\s*service)\b/i],
+    ['landscaping', /\b(landscap|irrigation|sprinkler|hardscap|tree\s*service|arborist|tree\s*care)\b/i],
+    ['plumbing', /\b(plumb|drain|sewer|water\s*heater|pipe|rooter|leak\s*detection)\b/i],
+    ['hvac', /\b(hvac|air\s*conditioning|heating|furnace|heat\s*pump|cooling|a\/c|duct|refrigeration)\b/i],
+    ['roofing', /\b(roof|roofer|roofing|shingle|gutters?|siding)\b/i],
+    ['electrical', /\b(electric|electrician|wiring|generator|lighting\s*install)\b/i],
+    ['painting', /\b(paint|painter|painting|drywall|stucco)\b/i],
+    ['pest_control', /\b(pest\s*control|exterminat|termite|bed\s*bug|fumigat|pest\s*solutions)\b/i],
+    ['pool', /\b(pool\s*service|pool\s*cleaning|pool\s*repair|pools\s*and\s*spa)\b/i],
+    ['cleaning', /\b(cleaning|maid|janitorial|pressure\s*wash|power\s*wash|carpet\s*clean|window\s*clean)\b/i],
+    ['garage_door', /\b(garage\s*door|overhead\s*door)\b/i],
+    ['handyman', /\b(handyman|general\s*contractor|remodel|renovation|home\s*repair)\b/i],
+  ];
+
+  for (const [t, regex] of tradePatterns) {
+    const m = combined.match(regex);
+    if (m) {
+      return { trade: t, confidence: 'high', isNonHomeService: false, detectedClue: m[0] };
+    }
+  }
+
+  return { trade: 'general', confidence: 'low', isNonHomeService: false };
+}
+
+export function inferTradeFromText(...textParts: (string | undefined)[]): string {
+  return inferTradeFromTextDetailed(...textParts).trade;
+}
+
+export interface TradeCoherenceCheck {
+  coherent: boolean;
+  verifiedTrade: string | null;
+  reason?: string;
+  disqualified: boolean;
+}
+
+export function checkTradeCoherence(
+  name: string,
+  declaredTrade: string,
+  website?: string | null,
+  tags?: string | null,
+  mode: string = 'founder'
+): TradeCoherenceCheck {
+  const allowGym = mode === 'tenant';
+  if (isOffIcpName(name, allowGym)) {
+    return {
+      coherent: false,
+      verifiedTrade: null,
+      reason: `off_icp_name: "${name}" is off-ICP`,
+      disqualified: true
+    };
+  }
+
+  const inferred = inferTradeFromTextDetailed(name, tags || '', website || '');
+  if (inferred.isNonHomeService) {
+    return {
+      coherent: false,
+      verifiedTrade: null,
+      reason: `non_home_service: clues indicate off-ICP`,
+      disqualified: true
+    };
+  }
+
+  const normDeclared = (declaredTrade || '').toLowerCase().replace(/[\s-]+/g, '_');
+
+  // If text clues give a specific trade with high confidence
+  if (inferred.confidence === 'high' && inferred.trade !== 'general') {
+    const compatible =
+      inferred.trade === normDeclared ||
+      (inferred.trade === 'lawn_care' && normDeclared === 'landscaping') ||
+      (inferred.trade === 'landscaping' && normDeclared === 'lawn_care');
+
+    if (!compatible) {
+      return {
+        coherent: true,
+        verifiedTrade: inferred.trade,
+        reason: `conflict_resolved_preferring_inferred_${inferred.trade}`,
+        disqualified: false
+      };
+    }
+
+    return {
+      coherent: true,
+      verifiedTrade: inferred.trade,
+      disqualified: false
+    };
+  }
+
+  // Declared trade fallback check against known valid trades
+  const validTrades = new Set([
+    'plumbing', 'hvac', 'roofing', 'landscaping', 'lawn_care',
+    'electrical', 'painting', 'pool', 'pest_control', 'cleaning',
+    'handyman', 'garage_door', 'construction', 'remodeling'
+  ]);
+
+  if (validTrades.has(normDeclared)) {
+    return {
+      coherent: true,
+      verifiedTrade: normDeclared,
+      disqualified: false
+    };
+  }
+
+  return {
+    coherent: false,
+    verifiedTrade: null,
+    reason: `unverified_trade: declared "${declaredTrade}" has no supporting contractor clues`,
+    disqualified: mode !== 'tenant'
+  };
 }
 
 export function isLicenseStatusInvalid(statusText?: string): boolean {

@@ -166,15 +166,31 @@ export async function hasMxRecords(domainOrEmail: string): Promise<boolean> {
 }
 
 /**
- * Detects if a business name is clearly off-ICP (consumer retail, restaurants, beauty, etc.)
+ * Detects if a business name is clearly off-ICP (consumer retail, restaurants, beauty, barbers, medical, etc.)
  */
-export function isOffIcpName(name: string | null | undefined): boolean {
+export function isOffIcpName(name: string | null | undefined, allowGym: boolean = false): boolean {
   if (!name || typeof name !== 'string') {
     return true;
   }
+  const clean = name.trim().toLowerCase();
+  if (!clean) return true;
 
+  // Strict regex for off-ICP business keywords
   const offIcpRegex =
-    /tamal|taquer|restaurant|cafe|catering|taco|pizza|bakery|beauty|salon|barber|nail|spa|church|iglesia|feed|clothing|boutique|florist|jewelry|pawn|casino|cannabis|dispensary|daycare|dental|massage|tattoo/i;
+    /\b(barber|barbershop|hairdresser|hair\s*salon|hair\s*studio|beauty|nails?|spa|tattoo|piercing|restaurant|cafe|coffee|bistro|bakery|diner|grill|pizzeria|pizza|taco|taquer|tamal|tamales|catering|burger|sushi|kitchen|brewery|winery|bar|pub|church|iglesia|ministry|ministerio|chapel|temple|parish|cathedral|dental|dentist|orthodont|clinic|doctor|medical|pharmacy|veterinar|vet|animal\s*hospital|daycare|childcare|child\s*care|preschool|kindergarten|school|academy|college|university|retail|retail\s*shop|boutique|clothing|apparel|shoe|shoes|jewelry|jeweler|pawn|pawnshop|cannabis|dispensary|smoke\s*shop|vape|tobacco|liquor|florist|flower|gift\s*shop|pet\s*store|grocery|supermarket|arcade|bowling|casino|theater|cinema)\b/i;
 
-  return offIcpRegex.test(name.trim());
+  if (offIcpRegex.test(clean)) {
+    return true;
+  }
+
+  // Non-word-boundary safety catch for concatenated terms like 'vibbarbershop', 'taqueria', 'tamales', etc.
+  if (/barber|barbershop|hairdresser|taquer|tamal|pizzeria|dispensary|daycare|boutique|cannabis/i.test(clean)) {
+    return true;
+  }
+
+  if (!allowGym && /\b(gym|fitness|crossfit|pilates|yoga)\b/i.test(clean)) {
+    return true;
+  }
+
+  return false;
 }

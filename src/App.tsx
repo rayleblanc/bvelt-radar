@@ -83,6 +83,7 @@ interface Prospect {
   expected_value?: number;
   decision_state?: string;
   why_now_json?: string;
+  attack_kit?: any;
 }
 
 export interface Opportunity {
@@ -317,6 +318,47 @@ interface StatsSummary {
 }
 
 export type StatusCategory = 'ALL' | 'SCOUTED' | 'QUALIFIED' | 'APPROVED' | 'QUEUED' | 'SENT' | 'REPLIED' | 'SUPPRESSED' | 'BLOCKED';
+
+export function renderScoreBreakdownChips(breakdownRaw: string) {
+  if (!breakdownRaw) return null;
+  let items: { label: string; score: string }[] = [];
+  try {
+    const parsed = typeof breakdownRaw === 'string' ? JSON.parse(breakdownRaw) : breakdownRaw;
+    if (typeof parsed === 'object' && parsed !== null) {
+      items = Object.entries(parsed).map(([k, v]) => ({
+        label: k.replace(/_/g, ' '),
+        score: typeof v === 'number' && v > 0 ? `+${v}` : String(v)
+      }));
+    }
+  } catch {
+    const parts = breakdownRaw.split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
+    items = parts.map(part => {
+      const [k, v] = part.split(/[:=]/);
+      return {
+        label: (k || part).trim(),
+        score: v ? v.trim() : ''
+      };
+    });
+  }
+
+  if (items.length === 0) {
+    return <div className="text-slate-400">{breakdownRaw}</div>;
+  }
+
+  return (
+    <div className="flex flex-wrap gap-1.5 pt-1">
+      {items.map((item, idx) => (
+        <span
+          key={idx}
+          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-slate-900 border border-slate-800 text-slate-300 font-mono text-[10px]"
+        >
+          <span className="capitalize text-slate-400">{item.label}:</span>
+          <span className="font-bold text-emerald-400">{item.score}</span>
+        </span>
+      ))}
+    </div>
+  );
+}
 
 export default function App() {
   // Authentication status tracked via Worker HttpOnly session cookie
@@ -2195,7 +2237,7 @@ const submitDecision = async (prospectId: string, action: string) => {
                               {p.score_breakdown && (
                                 <div className="bg-slate-950 p-2.5 rounded-xl border border-slate-900 font-mono text-[10px] text-slate-400 space-y-1">
                                   <span className="text-slate-500 font-bold uppercase block">Score Breakdown:</span>
-                                  <div>{p.score_breakdown}</div>
+                                  {renderScoreBreakdownChips(p.score_breakdown)}
                                 </div>
                               )}
                               {p.draft_body && (
@@ -2227,39 +2269,70 @@ const submitDecision = async (prospectId: string, action: string) => {
                                 </div>
                                 {attackKits[p.id] ? (
                                   <div className="space-y-2 text-[10px] text-slate-300 font-mono">
-                                    <p className="text-amber-200">{attackKits[p.id].why_this_lead}</p>
-                                    <p><span className="text-slate-500">SMS:</span> {attackKits[p.id].sms}</p>
-                                    <p className="whitespace-pre-wrap"><span className="text-slate-500">Llamada:</span>{'\n'}{attackKits[p.id].call_script}</p>
-                                    <p><span className="text-slate-500">Siguiente:</span> {attackKits[p.id].next_action}</p>
-                                    {p.phone && (
-                                      <a
-                                        href={`https://wa.me/1${String(p.phone).replace(/\D/g, '')}?text=${encodeURIComponent(attackKits[p.id].sms || '')}`}
-                                        target="_blank"
-                                        rel="noreferrer"
-                                        className="inline-block px-2 py-1 rounded bg-emerald-950/50 border border-emerald-800 text-emerald-300 font-bold"
-                                      >
-                                        WhatsApp con SMS del kit
-                                      </a>
+                                    {attackKits[p.id].next_action?.includes("DO_NOT_CONTACT") ? (
+                                      <div className="p-2.5 rounded-lg bg-rose-950/50 border border-rose-800/60 text-rose-300 font-sans space-y-1">
+                                        <div className="font-bold uppercase text-[10px] text-rose-200">⛔ {attackKits[p.id].next_action}</div>
+                                        <p className="text-[11px]">{attackKits[p.id].why_this_lead}</p>
+                                      </div>
+                                    ) : (
+                                      <>
+                                        <p className="text-amber-200">{attackKits[p.id].why_this_lead}</p>
+                                        <p><span className="text-slate-500">SMS:</span> {attackKits[p.id].sms}</p>
+                                        <p className="whitespace-pre-wrap"><span className="text-slate-500">Llamada:</span>{'\n'}{attackKits[p.id].call_script}</p>
+                                        <p><span className="text-slate-500">Siguiente:</span> {attackKits[p.id].next_action}</p>
+                                        {p.phone && (
+                                          <a
+                                            href={`https://wa.me/1${String(p.phone).replace(/\D/g, '')}?text=${encodeURIComponent(attackKits[p.id].sms || '')}`}
+                                            target="_blank"
+                                            rel="noreferrer"
+                                            className="inline-block px-2 py-1 rounded bg-emerald-950/50 border border-emerald-800 text-emerald-300 font-bold"
+                                          >
+                                            WhatsApp con SMS del kit
+                                          </a>
+                                        )}
+                                      </>
                                     )}
                                   </div>
                                 ) : (
                                   <p className="text-[10px] text-slate-500">Pulsa Generar kit → guion de llamada + SMS + por qué este lead.</p>
                                 )}
                               </div>
-                              <div className="grid grid-cols-2 gap-2 pt-1 font-mono">
-                                <button
-                                  onClick={() => submitDecision(p.id, 'sent')}
-                                  className="h-10 text-xs font-semibold rounded-lg bg-emerald-600/20 border border-emerald-500/20 text-emerald-400 hover:bg-emerald-600 hover:text-white transition-colors"
-                                >
-                                  ✓ Enviar (Lock)
-                                </button>
-                                <button
-                                  onClick={() => submitDecision(p.id, 'discard')}
-                                  className="h-10 text-xs font-semibold rounded-lg bg-slate-900 border border-slate-800 text-slate-400 hover:bg-slate-800 hover:text-white"
-                                >
-                                  ✕ Descartar
-                                </button>
-                              </div>
+                              {(() => {
+                                const activeKit = attackKits[p.id] || (p.attack_kit ? (typeof p.attack_kit === 'string' ? JSON.parse(p.attack_kit) : p.attack_kit) : null);
+                                const isDoNotContact =
+                                  !activeKit?.sms ||
+                                  activeKit.sms.trim() === "" ||
+                                  activeKit?.next_action?.startsWith("DO_NOT_CONTACT") ||
+                                  activeKit?.next_action?.includes("DO_NOT_CONTACT") ||
+                                  p.outcome?.includes("off_icp") ||
+                                  p.status === "disqualified";
+
+                                return (
+                                  <div className="grid grid-cols-2 gap-2 pt-1 font-mono">
+                                    {isDoNotContact ? (
+                                      <button
+                                        disabled
+                                        className="h-10 px-2 rounded-lg bg-rose-950/30 border border-rose-800/40 text-rose-400 flex items-center justify-center text-[10px] font-bold uppercase text-center opacity-70 cursor-not-allowed"
+                                      >
+                                        ⛔ DO NOT CONTACT
+                                      </button>
+                                    ) : (
+                                      <button
+                                        onClick={() => submitDecision(p.id, 'sent')}
+                                        className="h-10 text-xs font-semibold rounded-lg bg-emerald-600/20 border border-emerald-500/20 text-emerald-400 hover:bg-emerald-600 hover:text-white transition-colors"
+                                      >
+                                        ✓ Enviar (Lock)
+                                      </button>
+                                    )}
+                                    <button
+                                      onClick={() => submitDecision(p.id, 'discard')}
+                                      className="h-10 text-xs font-semibold rounded-lg bg-slate-900 border border-slate-800 text-slate-400 hover:bg-slate-800 hover:text-white"
+                                    >
+                                      ✕ Descartar
+                                    </button>
+                                  </div>
+                                );
+                              })()}
                               {currentMode === 'tenant' && selectedTenantId && selectedTenantId !== 'founder' && (
                                 <div className="grid grid-cols-3 gap-1.5 pt-1 font-mono">
                                   <button type="button" onClick={() => submitTenantOutcome(p.id, 'contacted')}
