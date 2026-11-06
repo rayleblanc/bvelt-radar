@@ -498,9 +498,8 @@ export default function App() {
         }
       }
 
-      // Session is managed via HttpOnly cookie with credentials: 'include'.
-      // If no token exists, do not send Authorization header.
-      const token = null;
+      // Session is managed via HttpOnly cookie with credentials: 'include' or Bearer token.
+      const token = typeof window !== 'undefined' ? localStorage.getItem('RADAR_BEARER_TOKEN') : null;
       const authHeaders: Record<string, string> = token ? { 'Authorization': `Bearer ${token}` } : {};
 
       // 2. GET /stats (protected by Worker HttpOnly cookie or Bearer token)
@@ -759,10 +758,14 @@ const submitDecision = async (prospectId: string, action: string) => {
         payload.tenant_id = selectedTenantId;
       }
 
+      const token = typeof window !== 'undefined' ? localStorage.getItem('RADAR_BEARER_TOKEN') : null;
+      const authHeaders: Record<string, string> = token ? { 'Authorization': `Bearer ${token}` } : {};
+
       const res = await fetch(`${apiUrl}/decision`, {
         method: 'POST',
         headers: {
-          'Content-Type': 'application/json'
+          'Content-Type': 'application/json',
+          ...authHeaders
         },
         credentials: 'include',
         body: JSON.stringify(payload)
@@ -770,7 +773,10 @@ const submitDecision = async (prospectId: string, action: string) => {
 
       if (!res.ok) {
         const errText = await res.text().catch(() => res.statusText);
-        alert(`Error [HTTP ${res.status}]: ${errText || 'No se pudo procesar la decisión'}`);
+        const errMsg = res.status === 401
+          ? `Error [HTTP 401]: Clave no autorizada o sesión expirada (${errText || 'No autorizado'})`
+          : `Error [HTTP ${res.status}]: ${errText || 'No se pudo procesar la decisión'}`;
+        alert(errMsg);
         return;
       }
 

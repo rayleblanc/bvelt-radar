@@ -118,12 +118,12 @@ export interface Env {
 
 export function getBudgetLimit(unitType: string): number {
   switch (unitType) {
-    case 'discovery_units': return 55;
-    case 'enrichment_units': return 45;
-    case 'ai_units': return 20;
-    case 'hunter_units': return 10;
-    case 'outreach_units': return 5;
-    case 'finalize_units': return 12;
+    case 'discovery_units': return 30;
+    case 'enrichment_units': return 20;
+    case 'ai_units': return 10;
+    case 'hunter_units': return 8;
+    case 'outreach_units': return 3;
+    case 'finalize_units': return 10;
     default: return 0;
   }
 }
@@ -7169,10 +7169,6 @@ export function mapTradeToBizDataCategory(trade: string): string | null {
     "painting": "painter",
     "moving": "moving_company",
     "handyman": "general_contractor",
-    "landscaping": "general_contractor",
-    "lawn_care": "general_contractor",
-    "pest_control": "general_contractor",
-    "hvac": "general_contractor",
     "real_estate": "real_estate_agency"
   };
 
@@ -7449,6 +7445,8 @@ export interface DiscoveryDiagnostics {
   reason: string;
   permits_found?: number;
   geoapify_status?: string;
+  locationiq_status?: string;
+  nominatim_poi_status?: string;
 }
 
 /**

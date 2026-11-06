@@ -63,10 +63,10 @@ export async function getAlerts(states: string[]): Promise<WeatherAlert[]> {
  * Maps a weather event name to relevant contractor/service trades
  */
 export const EVENT_TRADE_MAP: { pattern: RegExp; trades: string[] }[] = [
-  { pattern: /hail|wind|tornado|thunderstorm|hurricane|tropical/i, trades: ["roofing", "landscaping", "handyman", "lawn_care"] },
+  { pattern: /tornado|hail|wind|thunderstorm|hurricane|tropical/i, trades: ["roofing", "landscaping", "handyman"] },
   { pattern: /heat|excessive heat/i, trades: ["hvac"] },
   { pattern: /freeze|frost|winter|ice|cold|extreme cold/i, trades: ["plumbing", "hvac"] },
-  { pattern: /flood|rain|flash flood/i, trades: ["plumbing", "pool_cleaning", "handyman"] },
+  { pattern: /flood|rain|flash flood/i, trades: ["plumbing"] },
   { pattern: /air quality|smoke|dust/i, trades: ["hvac"] },
   { pattern: /fire|red flag/i, trades: ["landscaping", "lawn_care"] },
 ];
