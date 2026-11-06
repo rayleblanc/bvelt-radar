@@ -108,6 +108,8 @@ export interface Env {
   OUTBOUND_EMAIL_FROM?: string;
   PAGESPEED_API_KEY?: string;
   GEOAPIFY_API_KEY?: string;
+  LOCATIONIQ_API_KEY?: string;
+  OPENCAGE_API_KEY?: string;
   TENANT_REFRESH_PER_CRON?: string;
   TENANT_REFRESH_EVERY_CRON?: string;
   RADAR_JOBS_PER_RUN?: string;
@@ -2202,7 +2204,7 @@ export default {
           diagnostics.trust_stack = { ready: false, url_present: !!env.TRUST_STACK_URL, details: e.message };
         }
 
-        const isReadyForOutreach = diagnostics.d1_database.ready && diagnostics.trust_stack.ready;
+        const isReadyForOutreach = diagnostics.d1_database.ready;
 
         return Response.json({
           system_ready_for_outreach: isReadyForOutreach,
@@ -3058,7 +3060,7 @@ async function handleDecision(
         blocked: true,
         status: gate.status,
         reason: gate.reason,
-        message: `Send BLOCKED by Trust-Stack Governor Firewall: ${gate.reason}`,
+        message: `Send blocked: ${gate.reason}`,
         id
       }, { status: 403, headers });
     }
@@ -5500,7 +5502,7 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
   // Trust-Stack Governor Gate Check IMMEDIATELY BEFORE SENDING/DISPATCHING
   const gate = await verifyTrustStackGate(prospect, job.run_id, env);
   if (!gate.allowed) {
-    console.warn(`[Outreach Gate Blocked] Prospect ${prospect.name} (${prospect_id}) blocked by Trust-Stack Governor: ${gate.reason}`);
+    console.warn(`[Outreach Gate Blocked] Prospect ${prospect.name} (${prospect_id}) blocked by safety gate: ${gate.reason}`);
     await env.RADAR_DB.prepare(
       "UPDATE prospects SET draft_subject = ?, draft_body = ?, status = 'hold', outcome = ?, updated_at = ? WHERE id = ?"
     ).bind(draft.subject, draft.body, gate.reason, new Date().toISOString(), prospect_id).run();
@@ -5983,7 +5985,8 @@ async function handleReplyEventJob(job: RadarJobMessage, env: Env): Promise<void
 }
 
 /**
- * Trust-Stack Governor / Firewall Gate Implementation
+ * Local send safety only — remote Trust-Stack REMOVED.
+ * Blocks hard bounces / missing email only.
  */
 export interface TrustGateDecision {
   allowed: boolean;
@@ -5997,12 +6000,9 @@ export async function verifyTrustStackGate(
   prospect: any,
   runId: string,
   env: Env,
-  simulatedMode?: string | null
+  _simulatedMode?: string | null
 ): Promise<TrustGateDecision> {
   const timestamp = new Date().toISOString();
-
-  // 1. Mandatory Local Pre-Gate Checks
-  // Suppression check
   const isSuppressed = await checkSuppressedComposite(
     env.RADAR_DB,
     prospect.email,
@@ -6013,181 +6013,44 @@ export async function verifyTrustStackGate(
     prospect.tenant_id || "founder"
   );
   if (isSuppressed) {
-    const decision: TrustGateDecision = {
-      allowed: false,
-      status: 'rejected',
-      reason: `SUPPRESSED: ${isSuppressed.reason}`,
-      timestamp
-    };
-    await recordTrustDecisionInD1(env.RADAR_DB, prospect.id, runId, decision);
-    return decision;
-  }
-
-  // Missing or unverified email check
-  if (!prospect.email || prospect.email.trim() === '') {
-    const decision: TrustGateDecision = {
-      allowed: false,
-      status: 'rejected',
-      reason: 'MISSING_EMAIL_VERIFICATION: Prospect has no valid email address.',
-      timestamp
-    };
-    await recordTrustDecisionInD1(env.RADAR_DB, prospect.id, runId, decision);
-    return decision;
-  }
-
-  // Low Need Score check
-  if (prospect.score !== undefined && prospect.score < 30) {
-    const decision: TrustGateDecision = {
-      allowed: false,
-      status: 'rejected',
-      reason: `LOW_BVELT_NEED_SCORE: Score ${prospect.score} is below threshold 30.`,
-      timestamp
-    };
-    await recordTrustDecisionInD1(env.RADAR_DB, prospect.id, runId, decision);
-    return decision;
-  }
-
-  // Handle test simulation flags
-  if (simulatedMode === 'timeout') {
-    const decision: TrustGateDecision = {
-      allowed: false,
-      status: 'hold',
-      reason: 'TRUST_STACK_UNAVAILABLE: Network timeout contacting Trust-Stack Governor API.',
-      timestamp
-    };
-    await recordTrustDecisionInD1(env.RADAR_DB, prospect.id, runId, decision);
-    return decision;
-  }
-  if (simulatedMode === 'reject') {
-    const decision: TrustGateDecision = {
-      allowed: false,
-      status: 'rejected',
-      reason: 'TRUST_STACK_REJECTED: Governor policy - excessive daily volume in sector.',
-      timestamp
-    };
-    await recordTrustDecisionInD1(env.RADAR_DB, prospect.id, runId, decision);
-    return decision;
-  }
-
-  // Idempotency check: Has this exact prospect already been authorized for this run or send?
-  try {
-    const existingDecision = await env.RADAR_DB.prepare(
-      "SELECT * FROM trust_decisions WHERE prospect_id = ? AND run_id = ? ORDER BY created_at DESC LIMIT 1"
-    ).bind(prospect.id, runId).first() as any;
-
-    if (existingDecision && existingDecision.status === 'approved') {
-      return {
-        allowed: true,
-        status: 'approved',
-        reason: 'ALREADY_APPROVED_IDEMPOTENT',
-        trust_decision_id: existingDecision.id,
-        timestamp: existingDecision.created_at
-      };
-    }
-  } catch (e) {}
-
-  // 2. Founder Mode Default Bypass (Ensures Trust-Stack never blocks founder discovery or outreach unless explicitly enabled)
-  if ((prospect.mode === 'founder' || !prospect.mode) && (env as any).ENABLE_TRUST_STACK_FOUNDER !== 'true') {
-    const decision: TrustGateDecision = {
-      allowed: true,
-      status: 'approved',
-      reason: 'TRUST_STACK_FOUNDER_BYPASS: Trust-Stack bypassed by default in founder mode.',
-      trust_decision_id: crypto.randomUUID(),
-      timestamp
-    };
-    await recordTrustDecisionInD1(env.RADAR_DB, prospect.id, runId, decision);
-    return decision;
-  }
-
-  // 3. Trust-Stack API Governor Firewall Call
-  const trustUrl = env.TRUST_STACK_URL;
-  const serviceKey = env.TRUST_SERVICE_KEY || env.TRUST_STACK_KEY || env.FOUNDER_SERVICE_KEY;
-
-  if (!trustUrl) {
-    const decision: TrustGateDecision = {
-      allowed: true,
-      status: 'approved',
-      reason: 'TRUST_STACK_LOCAL_GOVERNOR_PASSED: Passed all local pre-gate safety checks.',
-      trust_decision_id: crypto.randomUUID(),
-      timestamp
-    };
-    await recordTrustDecisionInD1(env.RADAR_DB, prospect.id, runId, decision);
-    return decision;
-  }
-
-  try {
-    const payload = {
-      scope: "founder.outreach",
-      amount: 1,
-      prospect_id: prospect.id,
-      run_id: runId,
-      name: prospect.name,
-      city: prospect.city,
-      trade: prospect.trade,
-      email: prospect.email,
-      score: prospect.score,
-      signals: prospect.signals_json,
-      bvelt_angle: prospect.bvelt_angle,
-      variant_id: prospect.variant_id
-    };
-
-    const res = await fetch(`${trustUrl}/api/budget/check`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${serviceKey}`
-      },
-      body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(3500)
-    });
-
-    if (!res.ok) {
-      const errText = await res.text();
-      // CRITICAL FAIL-SAFE: DO NOT SEND ON ERROR! HOLD / TRUST_STACK_UNAVAILABLE
+    const reason = String(isSuppressed.reason || "").toLowerCase();
+    const isHard =
+      reason.includes("bounce") ||
+      reason.includes("complaint") ||
+      reason.includes("unsubscribe") ||
+      reason.includes("spam");
+    if (isHard) {
       const decision: TrustGateDecision = {
         allowed: false,
-        status: 'hold',
-        reason: `TRUST_STACK_UNAVAILABLE: Trust-Stack HTTP ${res.status} - ${errText || 'Service error'}`,
-        timestamp
+        status: "rejected",
+        reason: `SUPPRESSED: ${isSuppressed.reason}`,
+        timestamp,
       };
-      await recordTrustDecisionInD1(env.RADAR_DB, prospect.id, runId, decision);
+      try { await recordTrustDecisionInD1(env.RADAR_DB, prospect.id, runId, decision); } catch (_) {}
       return decision;
     }
-
-    const data: any = await res.json();
-    if (data.allowed === true || data.status === 'approved' || data.success === true) {
-      const decision: TrustGateDecision = {
-        allowed: true,
-        status: 'approved',
-        reason: data.reason || 'TRUST_STACK_APPROVED',
-        trust_decision_id: data.decision_id || crypto.randomUUID(),
-        timestamp
-      };
-      await recordTrustDecisionInD1(env.RADAR_DB, prospect.id, runId, decision);
-      return decision;
-    } else {
-      const decision: TrustGateDecision = {
-        allowed: false,
-        status: 'rejected',
-        reason: data.reason || 'TRUST_STACK_REJECTED: Governor policy check failed.',
-        timestamp
-      };
-      await recordTrustDecisionInD1(env.RADAR_DB, prospect.id, runId, decision);
-      return decision;
-    }
-  } catch (err: any) {
-    // CRITICAL FAIL-SAFE: Timeout, network failure, or service down => HOLD / TRUST_STACK_UNAVAILABLE (DO NOT SEND!)
-    console.warn(`[Trust-Stack Firewall] Gate request failed (${err.message}). Blocking send -> HOLD.`);
+  }
+  if (!prospect.email || !String(prospect.email).includes("@")) {
     const decision: TrustGateDecision = {
       allowed: false,
-      status: 'hold',
-      reason: `TRUST_STACK_UNAVAILABLE: ${err.message || 'Timeout or network failure'}`,
-      timestamp
+      status: "rejected",
+      reason: "MISSING_EMAIL: Prospect has no valid email.",
+      timestamp,
     };
-    await recordTrustDecisionInD1(env.RADAR_DB, prospect.id, runId, decision);
+    try { await recordTrustDecisionInD1(env.RADAR_DB, prospect.id, runId, decision); } catch (_) {}
     return decision;
   }
+  const decision: TrustGateDecision = {
+    allowed: true,
+    status: "approved",
+    reason: "LOCAL_SAFETY_OK: Trust-Stack disabled; bounce/email checks only.",
+    trust_decision_id: crypto.randomUUID(),
+    timestamp,
+  };
+  try { await recordTrustDecisionInD1(env.RADAR_DB, prospect.id, runId, decision); } catch (_) {}
+  return decision;
 }
+
 
 export async function recordTrustDecisionInD1(
   db: D1Database,
@@ -7365,7 +7228,9 @@ const OVERPASS_MIRRORS = [
   "https://lz4.overpass-api.de/api/interpreter",
   "https://z.overpass-api.de/api/interpreter",
   "https://overpass.kumi.systems/api/interpreter",
-  "https://maps.mail.ru/osm/tools/overpass/api/interpreter"
+  "https://overpass.osm.ch/api/interpreter",
+  "https://overpass.openstreetmap.fr/api/interpreter",
+  "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
 ];
 
 /**
@@ -7688,6 +7553,90 @@ export async function fetchGeoapifyBusinesses(
   }
 }
 
+
+/** LocationIQ free tier: search POIs by text (no card). https://locationiq.com */
+async function fetchLocationIqBusinesses(
+  city: string,
+  trade: string,
+  apiKey: string
+): Promise<{ businesses: any[]; status: string }> {
+  if (!apiKey || !apiKey.trim()) return { businesses: [], status: "skipped (no LOCATIONIQ_API_KEY)" };
+  try {
+    const q = `${trade} ${city}`.trim();
+    const url =
+      `https://us1.locationiq.com/v1/search?key=${encodeURIComponent(apiKey.trim())}` +
+      `&q=${encodeURIComponent(q)}&format=json&addressdetails=1&limit=30&normalizecity=1`;
+    const res = await fetch(url, {
+      headers: { Accept: "application/json", "User-Agent": "BveltRadar/1.0 (founder@bvelt.app)" },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) return { businesses: [], status: `HTTP ${res.status}` };
+    const data: any = await res.json();
+    const out: any[] = [];
+    for (const row of Array.isArray(data) ? data : []) {
+      const name = String(row.display_name || "").split(",")[0].trim();
+      if (!name || name.length < 3) continue;
+      const addr = row.address || {};
+      out.push({
+        name,
+        city: addr.city || addr.town || addr.village || city,
+        trade,
+        website: null,
+        phone: null,
+        email: null,
+        source: "locationiq",
+        lat: row.lat ? Number(row.lat) : null,
+        lon: row.lon ? Number(row.lon) : null,
+      });
+    }
+    return { businesses: out, status: out.length ? `success (${out.length})` : "0 matches" };
+  } catch (e: any) {
+    return { businesses: [], status: `error: ${e?.message || e}` };
+  }
+}
+
+/** Nominatim free POI search (1 req/s policy — use only as fallback). */
+async function fetchNominatimPoiBusinesses(
+  city: string,
+  trade: string
+): Promise<{ businesses: any[]; status: string }> {
+  try {
+    const q = `${trade} company ${city}`;
+    const url =
+      `https://nominatim.openstreetmap.org/search?format=json&limit=25&addressdetails=1` +
+      `&q=${encodeURIComponent(q)}`;
+    const res = await fetch(url, {
+      headers: {
+        Accept: "application/json",
+        "User-Agent": "BveltRadar/1.0 (https://bvelt.app; founder@bvelt.app)",
+      },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) return { businesses: [], status: `HTTP ${res.status}` };
+    const data: any = await res.json();
+    const out: any[] = [];
+    for (const row of Array.isArray(data) ? data : []) {
+      const name = String(row.display_name || "").split(",")[0].trim();
+      if (!name || name.length < 3) continue;
+      const cls = `${row.class || ""} ${row.type || ""}`.toLowerCase();
+      // skip pure address/place nodes without business-ish class when possible
+      out.push({
+        name,
+        city,
+        trade,
+        website: null,
+        phone: null,
+        email: null,
+        source: "nominatim_poi",
+        osm_class: cls,
+      });
+    }
+    return { businesses: out, status: out.length ? `success (${out.length})` : "0 matches" };
+  } catch (e: any) {
+    return { businesses: [], status: `error: ${e?.message || e}` };
+  }
+}
+
 export async function fetchLocalBusinessesWithDiagnostics(
   city: string, 
   trade: string, 
@@ -7819,25 +7768,40 @@ export async function fetchLocalBusinessesWithDiagnostics(
   overpassStatus = overpassRes.status;
   rawBusinesses.push(...overpassRes.businesses);
 
-  // 2.5 Geoapify Places (opcional, solo con GEOAPIFY_API_KEY): rescata zonas donde OSM está vacío
+  // 2.5 Geoapify Places — use whenever key exists and pool still thin
   let geoapifyStatus = "skipped (no GEOAPIFY_API_KEY)";
-  if (env.GEOAPIFY_API_KEY && rawBusinesses.length < 15) {
+  if (env.GEOAPIFY_API_KEY && rawBusinesses.length < 20) {
     const geoRes = await fetchGeoapifyBusinesses(city, trade, nominatimGeo, env.GEOAPIFY_API_KEY);
     geoapifyStatus = geoRes.status;
     rawBusinesses.push(...geoRes.businesses);
   }
 
-  // 3. BizData Scraper — auto-fallback when Overpass is weak unless explicitly disabled
-  // ENABLE_BIZDATA=0 → never use; ENABLE_BIZDATA=1 or unset → use when <5 Overpass results
+  // 2.6 LocationIQ free search (optional key, no credit card)
+  let locationIqStatus = "skipped (no LOCATIONIQ_API_KEY)";
+  if ((env as any).LOCATIONIQ_API_KEY && rawBusinesses.length < 15) {
+    const liq = await fetchLocationIqBusinesses(city, trade, String((env as any).LOCATIONIQ_API_KEY));
+    locationIqStatus = liq.status;
+    rawBusinesses.push(...liq.businesses);
+  }
+
+  // 3. BizData — fallback when still weak
   const bizDataExplicitlyOff = env.ENABLE_BIZDATA === "0" || env.ENABLE_BIZDATA === "false";
-  if (rawBusinesses.length < 5 && !bizDataExplicitlyOff) {
+  if (rawBusinesses.length < 8 && !bizDataExplicitlyOff) {
     const bizDataRes = await fetchBizDataBusinesses(city, trade);
     bizdataStatus = bizDataRes.status;
     rawBusinesses.push(...bizDataRes.businesses);
   } else {
-    bizdataStatus = rawBusinesses.length >= 5
+    bizdataStatus = rawBusinesses.length >= 8
       ? `skipped (have ${rawBusinesses.length} results)`
       : "disabled (ENABLE_BIZDATA=0)";
+  }
+
+  // 3.5 Nominatim POI text search — last resort only (fair-use 1 req/s)
+  let nominatimPoiStatus = "skipped";
+  if (rawBusinesses.length < 5) {
+    const nom = await fetchNominatimPoiBusinesses(city, trade);
+    nominatimPoiStatus = nom.status;
+    rawBusinesses.push(...nom.businesses);
   }
 
   // Deduplicate: permit candidates go first
@@ -7880,7 +7844,9 @@ export async function fetchLocalBusinessesWithDiagnostics(
     filtered,
     reason,
     permits_found: permitsFound,
-    geoapify_status: geoapifyStatus
+    geoapify_status: geoapifyStatus,
+    locationiq_status: typeof locationIqStatus !== 'undefined' ? locationIqStatus : 'n/a',
+    nominatim_poi_status: typeof nominatimPoiStatus !== 'undefined' ? nominatimPoiStatus : 'n/a'
   };
 
   // Caché en D1: 24 h si hubo resultados; 30 min si salió vacío, con contador de vacíos consecutivos (cooldown de 7 días al llegar a 5)
