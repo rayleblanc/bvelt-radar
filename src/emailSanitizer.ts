@@ -177,14 +177,14 @@ export function isOffIcpName(name: string | null | undefined, allowGym: boolean 
 
   // Strict regex for off-ICP business keywords
   const offIcpRegex =
-    /\b(barber|barbershop|hairdresser|hair\s*salon|hair\s*studio|beauty|nails?|spa|tattoo|piercing|restaurant|cafe|coffee|bistro|bakery|diner|grill|pizzeria|pizza|taco|taquer|tamal|tamales|catering|burger|sushi|kitchen|brewery|winery|bar|pub|church|iglesia|ministry|ministerio|chapel|temple|parish|cathedral|dental|dentist|orthodont|clinic|doctor|medical|pharmacy|veterinar|vet|animal\s*hospital|daycare|childcare|child\s*care|preschool|kindergarten|school|academy|college|university|retail|retail\s*shop|boutique|clothing|apparel|shoe|shoes|jewelry|jeweler|pawn|pawnshop|cannabis|dispensary|smoke\s*shop|vape|tobacco|liquor|florist|flower|gift\s*shop|pet\s*store|grocery|supermarket|arcade|bowling|casino|theater|cinema)\b/i;
+    /\b(barber|barbershop|hairdresser|hair\s*salon|hair\s*studio|salon|beauty|nails?|spa|tattoo|piercing|restaurant|cafe|coffee|bistro|bakery|diner|grill|pizzeria|pizza|taco|taquer|tamal|tamales|catering|burger|sushi|kitchen|brewery|winery|bar|pub|church|iglesia|ministry|ministerio|chapel|temple|parish|cathedral|dental|dentist|orthodont|clinic|doctor|medical|pharmacy|veterinar|vet|animal\s*hospital|daycare|childcare|child\s*care|preschool|kindergarten|school|academy|college|university|retail|retail\s*shop|boutique|clothing|apparel|shoe|shoes|jewelry|jeweler|pawn|pawnshop|cannabis|dispensary|smoke\s*shop|vape|tobacco|liquor|florist|flower|gift\s*shop|pet\s*store|grocery|supermarket|arcade|bowling|casino|theater|cinema|auto\s*repair|auto_repair|car\s*repair|mechanic|tire|body\s*shop|auto\s*body|muffler|transmission)\b/i;
 
   if (offIcpRegex.test(clean)) {
     return true;
   }
 
-  // Non-word-boundary safety catch for concatenated terms like 'vibbarbershop', 'taqueria', 'tamales', etc.
-  if (/barber|barbershop|hairdresser|taquer|tamal|pizzeria|dispensary|daycare|boutique|cannabis/i.test(clean)) {
+  // Non-word-boundary safety catch for concatenated terms like 'vibbarbershop', 'taqueria', 'tamales', 'autorepair', etc.
+  if (/barber|barbershop|hairdresser|taquer|tamal|pizzeria|dispensary|daycare|boutique|cannabis|autorepair|carrepair|mechanic|bodyshop/i.test(clean)) {
     return true;
   }
 

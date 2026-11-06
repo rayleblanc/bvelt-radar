@@ -1,12 +1,16 @@
 /**
  * Outbound Email Dispatcher for Bvelt Radar
- * Supports 100% free outbound providers:
- * 1. Resend (Free 3,000 emails/month, 100/day) - High deliverability REST API
- * 2. Brevo (Free 300 emails/day) - Transactional SMTP REST API
- * 3. Simulated Mode (when no keys provided) - Logs diagnostic details & guides user
+ * Providers: Resend → Brevo → simulated
+ * Brand: every real email includes Bvelt icon + CTA https://bvelt.app/
  */
 
 import { sanitizeEmail } from './emailSanitizer';
+
+/** Official product URL — never /demo?p= tokens */
+export const BVELT_SITE = 'https://bvelt.app/';
+
+/** Public brand mark (upload public/bvelt-icon.png to bvelt.app) */
+export const BVELT_ICON_URL = 'https://bvelt.app/bvelt-icon.png';
 
 export interface EmailDispatchOptions {
   to: string;
@@ -19,6 +23,7 @@ export interface EmailDispatchOptions {
   resendApiKey?: string;
   brevoApiKey?: string;
   senderName?: string;
+  logoUrl?: string;
 }
 
 export interface EmailDispatchResult {
@@ -30,9 +35,66 @@ export interface EmailDispatchResult {
   details?: string;
 }
 
-/**
- * Dispatches an outbound cold outreach email using the available free tier provider
- */
+export function normalizeOutreachBody(body: string): string {
+  let b = (body || '').trim();
+  b = b.replace(/https?:\/\/bvelt\.app\/demo\?[^\s)\]>"]+/gi, BVELT_SITE);
+  b = b.replace(/https?:\/\/bvelt\.app\/demo\b/gi, BVELT_SITE);
+  b = b.replace(/https?:\/\/[a-z0-9.-]*workers\.dev\/demo[^\s)\]>"]*/gi, BVELT_SITE);
+  if (!/bvelt\.app/i.test(b)) {
+    b = `${b}\n\n${BVELT_SITE}`;
+  }
+  return b.trim();
+}
+
+function escapeHtml(s: string): string {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+export function buildBrandedEmailHtml(bodyText: string, logoUrl?: string): string {
+  const logo = logoUrl || BVELT_ICON_URL;
+  const paragraphs = escapeHtml(bodyText)
+    .split(/\n\n+/)
+    .map((p) => p.replace(/\n/g, '<br/>'))
+    .map((p) => `<p style="margin:0 0 14px 0;line-height:1.5;color:#0f172a;font-size:15px;">${p}</p>`)
+    .join('');
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"/><meta name="viewport" content="width=device-width"/></head>
+<body style="margin:0;padding:0;background:#f1f5f9;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f1f5f9;padding:24px 12px;">
+    <tr><td align="center">
+      <table role="presentation" width="100%" style="max-width:560px;background:#ffffff;border-radius:12px;overflow:hidden;border:1px solid #e2e8f0;">
+        <tr>
+          <td style="padding:20px 24px 8px 24px;background:#0f172a;">
+            <img src="${escapeHtml(logo)}" width="48" height="48" alt="Bvelt" style="display:block;border:0;border-radius:10px;"/>
+            <div style="margin-top:10px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:13px;font-weight:700;letter-spacing:0.04em;color:#93c5fd;">BVELT</div>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:20px 24px 8px 24px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
+            ${paragraphs}
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:8px 24px 24px 24px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
+            <a href="${BVELT_SITE}" style="display:inline-block;background:#2563eb;color:#ffffff;text-decoration:none;font-weight:600;font-size:14px;padding:12px 18px;border-radius:8px;">Open Bvelt</a>
+            <p style="margin:16px 0 0 0;font-size:12px;color:#64748b;line-height:1.4;">
+              <a href="${BVELT_SITE}" style="color:#2563eb;text-decoration:none;">${BVELT_SITE}</a>
+            </p>
+          </td>
+        </tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`;
+}
+
 export async function dispatchEmail(options: EmailDispatchOptions): Promise<EmailDispatchResult> {
   const sanitizeRes = sanitizeEmail(options.to);
   if (!sanitizeRes.valid || !sanitizeRes.email) {
@@ -41,45 +103,39 @@ export async function dispatchEmail(options: EmailDispatchOptions): Promise<Emai
       provider: 'simulated',
       messageId: '',
       status: 'failed',
-      error: `Dirección de correo electrónico no válida (${sanitizeRes.reason || 'sanitizer_rejected'}). Envío cancelado sin marcar como rebote.`
+      error: `Invalid email (${sanitizeRes.reason || 'sanitizer_rejected'}). Send cancelled.`,
     };
   }
 
   const to = sanitizeRes.email;
+  const subject = (options.subject || 'Quick question from Bvelt').trim();
+  const body = normalizeOutreachBody(options.body || '');
+  const senderName = options.senderName || 'Rainer — Bvelt';
+  const html = buildBrandedEmailHtml(body, options.logoUrl);
 
-  const subject = (options.subject || 'Bvelt - Pregunta rápida').trim();
-  const body = (options.body || '').trim();
-  const senderName = options.senderName || 'Bvelt';
-
-  // -------------------------------------------------------------
-  // Provider 1: Resend (Free tier: 3,000/mo, 100/day)
-  // -------------------------------------------------------------
   if (options.resendApiKey && options.resendApiKey.trim()) {
     try {
-      // Default Resend test sender is onboarding@resend.dev unless user has verified custom domain
-      const fromAddress = options.from && options.from.includes('@')
-        ? options.from.trim()
-        : 'Bvelt <onboarding@resend.dev>';
+      const fromAddress =
+        options.from && options.from.includes('@')
+          ? options.from.trim()
+          : `${senderName} <onboarding@resend.dev>`;
 
-      const payload: any = {
+      const payload: Record<string, unknown> = {
         from: fromAddress,
         to: [to],
-        subject: subject,
+        subject,
         text: body,
-        headers: {
-          'X-Entity-Ref-ID': options.prospectId || `lead_${Date.now()}`
-        }
+        html,
+        headers: { 'X-Entity-Ref-ID': options.prospectId || `lead_${Date.now()}` },
       };
-
       if (options.replyTo && options.replyTo.includes('@')) {
         payload.reply_to = options.replyTo.trim();
       }
 
       const reqHeaders: Record<string, string> = {
-        'Authorization': `Bearer ${options.resendApiKey.trim()}`,
-        'Content-Type': 'application/json'
+        Authorization: `Bearer ${options.resendApiKey.trim()}`,
+        'Content-Type': 'application/json',
       };
-
       if (options.prospectId) {
         reqHeaders['Idempotency-Key'] = `send-prospect/${options.prospectId}`.substring(0, 256);
       }
@@ -88,129 +144,91 @@ export async function dispatchEmail(options: EmailDispatchOptions): Promise<Emai
         method: 'POST',
         headers: reqHeaders,
         body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(8000)
       });
-
-      const resJson: any = await res.json().catch(() => ({}));
-
-      if (res.ok && resJson.id) {
-        return {
-          success: true,
-          provider: 'resend',
-          messageId: String(resJson.id),
-          status: 'dispatched',
-          details: `Enviado con éxito a través de Resend API a ${to}`
-        };
-      } else {
-        if (res.status === 409) {
-          return {
-            success: false,
-            provider: 'resend',
-            messageId: '',
-            status: 'failed',
-            error: resJson.message,
-            details: resJson.name ? `${resJson.name}: ${resJson.message}` : resJson.message
-          };
-        }
-
-        let errorMsg = resJson.message || `Error HTTP ${res.status} en Resend`;
-        const resendMsg = (resJson.message || '').toLowerCase();
-        if (res.status === 403 && (resendMsg.includes('testing emails') || resendMsg.includes('verify a domain'))) {
-          errorMsg = 'Resend: el dominio resend.dev solo envía a tu propio correo. Verifica un dominio en resend.com/domains y usa un From de ese dominio.';
-        }
-
+      const data: any = await res.json().catch(() => ({}));
+      if (!res.ok) {
         return {
           success: false,
           provider: 'resend',
           messageId: '',
           status: 'failed',
-          error: errorMsg,
-          details: resJson.name ? `${resJson.name}: ${errorMsg}` : errorMsg
+          error: data?.message || data?.error || `Resend HTTP ${res.status}`,
+          details: JSON.stringify(data).slice(0, 400),
         };
       }
-    } catch (err: any) {
+      return {
+        success: true,
+        provider: 'resend',
+        messageId: String(data?.id || ''),
+        status: 'dispatched',
+      };
+    } catch (e: any) {
       return {
         success: false,
         provider: 'resend',
         messageId: '',
         status: 'failed',
-        error: `Excepción de red conectando con Resend: ${err.message}`
+        error: e?.message || 'Resend network error',
       };
     }
   }
 
-  // -------------------------------------------------------------
-  // Provider 2: Brevo / Sendinblue (Free tier: 300/day)
-  // -------------------------------------------------------------
   if (options.brevoApiKey && options.brevoApiKey.trim()) {
     try {
-      const fromEmail = options.from && options.from.includes('@')
-        ? options.from.trim()
-        : 'founder@bvelt.app';
-
-      const payload: any = {
-        sender: { name: senderName, email: fromEmail },
-        to: [{ email: to, name: options.recipientName || 'Contractor' }],
-        subject: subject,
-        textContent: body
-      };
-
-      if (options.replyTo && options.replyTo.includes('@')) {
-        payload.replyTo = { email: options.replyTo.trim() };
-      }
+      const fromEmail =
+        options.from && options.from.includes('@')
+          ? options.from.replace(/.*</, '').replace(/>.*/, '').trim()
+          : 'noreply@bvelt.app';
 
       const res = await fetch('https://api.brevo.com/v3/smtp/email', {
         method: 'POST',
         headers: {
           'api-key': options.brevoApiKey.trim(),
           'Content-Type': 'application/json',
-          'Accept': 'application/json'
+          Accept: 'application/json',
         },
-        body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(8000)
+        body: JSON.stringify({
+          sender: { name: senderName, email: fromEmail },
+          to: [{ email: to, name: options.recipientName || to }],
+          subject,
+          textContent: body,
+          htmlContent: html,
+        }),
       });
-
-      const resJson: any = await res.json().catch(() => ({}));
-
-      if (res.ok && (resJson.messageId || resJson.messageIds)) {
-        const mid = resJson.messageId || resJson.messageIds?.[0] || `brevo_${Date.now()}`;
-        return {
-          success: true,
-          provider: 'brevo',
-          messageId: String(mid),
-          status: 'dispatched',
-          details: `Enviado con éxito a través de Brevo API a ${to}`
-        };
-      } else {
-        const errorMsg = resJson.message || `Error HTTP ${res.status} en Brevo`;
+      const data: any = await res.json().catch(() => ({}));
+      if (!res.ok) {
         return {
           success: false,
           provider: 'brevo',
           messageId: '',
           status: 'failed',
-          error: errorMsg
+          error: data?.message || `Brevo HTTP ${res.status}`,
+          details: JSON.stringify(data).slice(0, 400),
         };
       }
-    } catch (err: any) {
+      return {
+        success: true,
+        provider: 'brevo',
+        messageId: String(data?.messageId || data?.id || ''),
+        status: 'dispatched',
+      };
+    } catch (e: any) {
       return {
         success: false,
         provider: 'brevo',
         messageId: '',
         status: 'failed',
-        error: `Excepción de red conectando con Brevo: ${err.message}`
+        error: e?.message || 'Brevo network error',
       };
     }
   }
 
-  // -------------------------------------------------------------
-  // Simulation Mode (Dry-run with clear guidance)
-  // -------------------------------------------------------------
-  const simId = `sim_${Math.random().toString(36).substring(2, 10)}`;
+  console.log('[emailDispatcher] SIMULATED send', { to, subject, preview: body.slice(0, 120) });
   return {
     success: true,
     provider: 'simulated',
-    messageId: simId,
+    messageId: `sim_${Date.now()}`,
     status: 'simulated',
-    details: 'Modo Simulado: Correo registrado en base de datos. Para que los correos salgan a la bandeja del destinatario, configura RESEND_API_KEY en variables de Cloudflare (3,000 correos/mes gratis en resend.com).'
+    details: 'No RESEND_API_KEY or BREVO_API_KEY — message not delivered to inbox.',
   };
 }

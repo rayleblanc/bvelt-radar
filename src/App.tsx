@@ -748,22 +748,48 @@ export default function App() {
 
 const submitDecision = async (prospectId: string, action: string) => {
     try {
+      const isTenantMode = currentMode === 'tenant';
+      const payload: any = {
+        id: prospectId,
+        action,
+        prospect_id: prospectId,
+        event_type: action
+      };
+      if (isTenantMode && selectedTenantId && selectedTenantId !== 'founder') {
+        payload.tenant_id = selectedTenantId;
+      }
+
       const res = await fetch(`${apiUrl}/decision`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
         },
         credentials: 'include',
-        body: JSON.stringify({ id: prospectId, action, prospect_id: prospectId, event_type: action })
+        body: JSON.stringify(payload)
       });
-      if (res.ok) {
-        fetchTelemetry();
-        if (inspectedProspect && inspectedProspect.id === prospectId) {
-          setInspectedProspect(null);
-        }
+
+      if (!res.ok) {
+        const errText = await res.text().catch(() => res.statusText);
+        alert(`Error [HTTP ${res.status}]: ${errText || 'No se pudo procesar la decisión'}`);
+        return;
       }
-    } catch (e) {
-      alert("Error al enviar la decisión: " + e);
+
+      const data = await res.json().catch(() => ({}));
+      if (data && data.success === false && data.message) {
+        alert(`Aviso: ${data.message}`);
+        return;
+      }
+
+      // Success: update local opportunities and prospects state immediately so closed/dispatched items leave open list
+      setOpportunities(prev => prev.filter(o => o.prospect_id !== prospectId));
+      setProspects(prev => prev.map(p => p.id === prospectId ? { ...p, status: action === 'sent' ? 'sent' : (action === 'discard' ? 'discarded' : p.status) } : p));
+
+      fetchTelemetry();
+      if (inspectedProspect && inspectedProspect.id === prospectId) {
+        setInspectedProspect(null);
+      }
+    } catch (e: any) {
+      alert("Error de red al enviar la decisión: " + (e?.message || e));
     }
   };
 

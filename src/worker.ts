@@ -12,7 +12,7 @@
  */
 
 import { getAlerts, tradeForEvent, eventAppliesToTrade, WeatherAlert } from './weatherSignals';
-import { dispatchEmail, EmailDispatchResult } from './emailDispatcher';
+import { dispatchEmail, normalizeOutreachBody, BVELT_SITE, EmailDispatchResult } from './emailDispatcher';
 import { auditDomainSecurityAndMx, auditWebsitePerformance, auditCityWeatherEmergency } from './openAudits';
 import { pickTargets, findPlace, findNearestPlace, formatPlaceLabel, markSearched, placeKey, radiusKm, haversineKm } from './geoFrontier';
 import { sanitizeEmail, sanitizeProspectEmail, isOffIcpName, hasMxRecords } from './emailSanitizer';
@@ -3068,6 +3068,7 @@ async function handleDecision(
     if (prospect.email && prospect.email.includes('@')) {
       const draftSubject = prospect.draft_subject || `Bvelt - Pregunta sobre llamadas de clientes (${prospect.name || 'su negocio'})`;
       const draftBody = prospect.draft_body || `Hola equipo de ${prospect.name},\n\n¿Qué ocurre cuando un cliente potencial llama a su negocio mientras están ocupados en obra y no pueden atender el teléfono?\n\nBvelt responde automáticamente por SMS en 15 segundos para no perder ningún trabajo: https://bvelt.app\n\nSaludos,\nEquipo Bvelt\n\nReply STOP to opt out`;
+      const safeBody = typeof normalizeOutreachBody === 'function' ? normalizeOutreachBody(draftBody) : draftBody;
 
       // Compliance Hard Gate: missing sender postal address MUST block outbound dispatch
       if ((env.RESEND_API_KEY || env.BREVO_API_KEY) && !env.SENDER_POSTAL_ADDRESS?.trim()) {
@@ -3087,7 +3088,7 @@ async function handleDecision(
         to: prospect.email,
         recipientName: prospect.name,
         subject: draftSubject,
-        body: draftBody,
+        body: typeof safeBody !== 'undefined' ? safeBody : draftBody,
         from: env.OUTBOUND_EMAIL_FROM,
         prospectId: prospect.id,
         resendApiKey: env.RESEND_API_KEY,
@@ -4182,13 +4183,23 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
            AND lower(trim(trade)) = lower(trim(?))`
       ).bind(scope, city, trade).first() as any;
       const existingCount = Number(row?.c || 0);
-      if (existingCount >= 8) {
-        console.log(`[Job: discovery] saturated_pair skip ${city} / ${trade} count=${existingCount} scope=${scope}`);
+      // Only treat as saturated when we already have enough NON-junk rows.
+      // Disqualified/discarded should not freeze the city forever.
+      const liveRow = await env.RADAR_DB.prepare(
+        `SELECT COUNT(*) AS c FROM prospects
+         WHERE COALESCE(tenant_id,'founder') = ?
+           AND lower(trim(city)) = lower(trim(?))
+           AND lower(trim(trade)) = lower(trim(?))
+           AND lower(COALESCE(status,'')) NOT IN ('disqualified','discarded','blocked','bounced')`
+      ).bind(scope, city, trade).first() as any;
+      const liveCount = Number(liveRow?.c || 0);
+      if (liveCount >= 12) {
+        console.log(`[Job: discovery] saturated_pair skip ${city} / ${trade} live=${liveCount} total=${existingCount} scope=${scope}`);
         try {
           const place = findPlace(city);
           if (place) {
             await markSearched(env.RADAR_DB, scope, place, trade, {
-              candidates: 0,
+              candidates: liveCount,
               qualified: 0,
             } as any);
           }
@@ -4256,12 +4267,34 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
       } catch (e) {}
     }
 
-    const place = findPlace(city);
-    if (place) {
-      await markSearched(env.RADAR_DB, job.tenant_id || "founder", place, trade, {
-        candidates: scraped.length,
-        qualified: 0
-      });
+    // Do NOT burn geo_coverage on infrastructure failures (timeout/4xx/abort).
+    // Only mark when sources honestly returned zero matches.
+    const reason = String(diagnostics?.reason || "").toLowerCase();
+    const isInfraFail =
+      reason.includes("timeout") ||
+      reason.includes("aborted") ||
+      reason.includes("http 4") ||
+      reason.includes("http 5") ||
+      reason.includes("network") ||
+      reason.includes("fetch failed") ||
+      reason.includes("econn") ||
+      (reason.includes("overpass") && reason.includes("fail"));
+    const isHonestEmpty =
+      reason.includes("0 matches") ||
+      reason.includes("0 businesses") ||
+      reason.includes("0 elements") ||
+      reason.includes("empty") ||
+      reason.includes("no results");
+    if (!isInfraFail && (isHonestEmpty || !reason)) {
+      const place = findPlace(city);
+      if (place) {
+        await markSearched(env.RADAR_DB, job.tenant_id || "founder", place, trade, {
+          candidates: 0,
+          qualified: 0
+        });
+      }
+    } else {
+      console.warn(`[Job: discovery] skip markSearched (infra/empty ambiguous) city=${city} trade=${trade} reason=${diagnostics?.reason}`);
     }
 
     return;
@@ -4408,7 +4441,7 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
       if (p.last_contact_at) {
         const contactTime = new Date(p.last_contact_at).getTime();
         const daysSinceContact = (Date.now() - contactTime) / (1000 * 60 * 60 * 24);
-        if (daysSinceContact < 120) {
+        if (daysSinceContact < 45) {
           await releaseBudget(env.RADAR_DB, tenantId, 'discovery_units', 1);
           filteredCount++;
           continue;
@@ -5289,9 +5322,7 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
           "INSERT INTO prospect_events (prospect_id, event_type, content, created_at) VALUES (?, 'hot_lead_alert_sent', ?, ?)"
         ).bind(prospect_id, "Hot lead Telegram notification sent", new Date().toISOString()).run();
 
-        const demoLink = prospect.demo_token 
-          ? `https://bvelt.app/demo?p=${prospect.demo_token}`
-          : "https://bvelt.app/demo";
+        const demoLink = "https://bvelt.app/";
 
         const hotMsg = `🔥 <b>BVELT HOT OPPORTUNITY</b>\n\n` +
           `🏢 <b>Business:</b> ${escapeHtml(prospect.name)}\n` +
@@ -8110,9 +8141,7 @@ async function generateAICopy(
     ? pickFounderVoiceLine(String(prospect.id || prospect.name || "x"), outreachTouch, language)
     : "";
   const isFollowUp = outreachTouch >= 2;
-  const demoLink = prospect.demo_token 
-    ? `https://bvelt.app/demo?p=${prospect.demo_token}`
-    : "https://bvelt.app/demo";
+  const demoLink = "https://bvelt.app/";
 
   let tenantInfo: any = null;
   if (prospect.mode === 'tenant' && prospect.tenant_id) {
@@ -8443,7 +8472,7 @@ export function buildAttackKit(p: any): {
     };
   }
 
-  const demoUrl = p.demo_token ? `https://bvelt.app/demo?p=${p.demo_token}` : (p.demo_url || "");
+  const demoUrl = "https://bvelt.app/";
   const senderSignature = "Rainer — Bvelt";
   const firstName = name.split(/\s+/)[0] || name;
   const variantIndex = hashCode(String(p.id || name + city)) % 3;
@@ -8467,14 +8496,14 @@ export function buildAttackKit(p: any): {
     if (variantIndex === 0) {
       sms = `Hi ${firstName} — quick note from Rainer at Bvelt. When ${tradeLabel} calls in ${city} hit voicemail, a lot of homeowners call the next shop. We text them in under a minute so the job doesn't walk. 60-sec demo for ${name}: ${demoUrl} — want it or should I stop? — ${senderSignature}`;
     } else if (variantIndex === 1) {
-      sms = `Hi ${firstName} — Rainer here with Bvelt. When your crew is out on a job in ${city} and the phone rings, most callers won't leave a voicemail. Bvelt sends an instant text back so you catch the job. 45-sec demo: ${demoUrl} — worth a glance? — ${senderSignature}`;
+      sms = `Hi ${firstName} — Rainer here with Bvelt. When your crew is out on a job in ${city} and the phone rings, most callers won't leave a voicemail. Bvelt sends an instant text back so you catch the job. See how it works: ${demoUrl} — worth a glance? — ${senderSignature}`;
     } else {
-      sms = `Hi ${firstName} — Rainer from Bvelt. When homeowners call for ${tradeLabel} in ${city} after hours, whoever replies by text first gets the job. We send that automated text response instantly. 45-sec preview: ${demoUrl} — should I send more info or pass? — ${senderSignature}`;
+      sms = `Hi ${firstName} — Rainer from Bvelt. When homeowners call for ${tradeLabel} in ${city} after hours, whoever replies by text first gets the job. We send that automated text response instantly. See how it works: ${demoUrl} — should I send more info or pass? — ${senderSignature}`;
     }
 
-    emailBody = `Hi ${name} team — saw your ${tradeLabel} service in ${city}.\n\nWhen your crew is out on a job or it's after hours, missed calls usually go straight to voicemail. In ${city}, homeowners rarely leave a message — they just call the next contractor on Google.\n\nWe built Bvelt to send an instant text back in under a minute so those calls stay on your calendar instead of walking away.\n\nPut together a 45-second preview of how it works for ${name}${demoUrl ? `: ${demoUrl}` : '.'}\n\nWould you be open to taking a look, or should I stop reaching out?\n\nBest,\n${senderSignature}`;
+    emailBody = `Hi ${name} team — saw your ${tradeLabel} service in ${city}.\n\nWhen your crew is out on a job or it's after hours, missed calls usually go straight to voicemail. In ${city}, homeowners rarely leave a message — they just call the next contractor on Google.\n\nWe built Bvelt to send an instant text back in under a minute so those calls stay on your calendar instead of walking away.\n\nA quick look at how it works: ${demoUrl}\n\nWould you be open to taking a look, or should I stop reaching out?\n\nBest,\n${senderSignature}`;
 
-    call_script = `- Operator Context: Verified ${tradeLabel} contractor in ${city}.\n- Opening Question: "When your crew is on a job and the phone rings, who catches the call?"\n- Key Point: Homeowners in ${city} call down Google listings and hire whoever texts back first.\n- Next Step: Offer to text over the 45-second preview link (${demoUrl}).`;
+    call_script = `- Operator Context: Verified ${tradeLabel} contractor in ${city}.\n- Opening Question: "When your crew is on a job and the phone rings, who catches the call?"\n- Key Point: Homeowners in ${city} call down Google listings and hire whoever texts back first.\n- Next Step: Offer to text over the demo link (${demoUrl}).`;
 
   } else if (selectedAngle === 'no_sms') {
     subject = `${name} — texting option for ${tradeLabel} in ${city}`;
@@ -8482,45 +8511,45 @@ export function buildAttackKit(p: any): {
     if (variantIndex === 0) {
       sms = `Hi ${firstName} — quick note from Rainer at Bvelt. Saw your ${tradeLabel} shop in ${city}. Most homeowners text for estimates now and walk away if there's no SMS option. We add instant text response for missed calls. Demo: ${demoUrl} — interested? — ${senderSignature}`;
     } else if (variantIndex === 1) {
-      sms = `Hi ${firstName} — Rainer with Bvelt. If a homeowner in ${city} tries to text your ${tradeLabel} line and gets no reply, that lead goes cold. Bvelt replies by SMS in under a minute automatically. 45-sec preview: ${demoUrl} — worth a look? — ${senderSignature}`;
+      sms = `Hi ${firstName} — Rainer with Bvelt. If a homeowner in ${city} tries to text your ${tradeLabel} line and gets no reply, that lead goes cold. Bvelt replies by SMS in under a minute automatically. See how it works: ${demoUrl} — worth a look? — ${senderSignature}`;
     } else {
       sms = `Hi ${firstName} — Rainer at Bvelt. A lot of ${tradeLabel} clients in ${city} prefer texting over calling. Bvelt turns missed phone calls into instant text conversations. 60-sec demo for ${name}: ${demoUrl} — want to check it out? — ${senderSignature}`;
     }
 
-    emailBody = `Hi ${name} team — saw your ${tradeLabel} shop in ${city}.\n\nA lot of homeowners in ${city} prefer to text for estimates before calling. If the only option is a phone call or voicemail, those jobs quietly slip away.\n\nWe built Bvelt to add instant automated texting for missed calls and web inquiries so you catch those homeowners immediately.\n\nPut together a 45-second preview of how it works for ${name}${demoUrl ? `: ${demoUrl}` : '.'}\n\nWould you be open to taking a look?\n\nBest,\n${senderSignature}`;
+    emailBody = `Hi ${name} team — saw your ${tradeLabel} shop in ${city}.\n\nA lot of homeowners in ${city} prefer to text for estimates before calling. If the only option is a phone call or voicemail, those jobs quietly slip away.\n\nWe built Bvelt to add instant automated texting for missed calls and web inquiries so you catch those homeowners immediately.\n\nA quick look at how it works: ${demoUrl}\n\nWould you be open to taking a look?\n\nBest,\n${senderSignature}`;
 
-    call_script = `- Operator Context: ${tradeLabel} contractor in ${city} without instant texting.\n- Opening Question: "Do homeowners ever ask to text photos of the job, or is it phone-only?"\n- Key Point: Homeowners prefer quick text responses over leaving voicemails.\n- Next Step: Offer to text over the 45-second preview link (${demoUrl}).`;
+    call_script = `- Operator Context: ${tradeLabel} contractor in ${city} without instant texting.\n- Opening Question: "Do homeowners ever ask to text photos of the job, or is it phone-only?"\n- Key Point: Homeowners prefer quick text responses over leaving voicemails.\n- Next Step: Offer to text over the demo link (${demoUrl}).`;
 
   } else if (selectedAngle === 'stale_quotes') {
     subject = `${name} — following up on ${tradeLabel} quotes in ${city}`;
 
     if (variantIndex === 0) {
-      sms = `Hi ${firstName} — quick note from Rainer at Bvelt. Unanswered ${tradeLabel} estimates in ${city} are a quiet revenue leak. Bvelt automatically nudges past quotes so jobs don't go cold. 60-sec demo: ${demoUrl} — open to a quick look? — ${senderSignature}`;
+      sms = `Hi ${firstName} — quick note from Rainer at Bvelt. Unanswered ${tradeLabel} estimates in ${city} are a quiet revenue leak. Bvelt automatically nudges past quotes so jobs don't go cold. See how it works: ${demoUrl} — open to a quick look? — ${senderSignature}`;
     } else if (variantIndex === 1) {
-      sms = `Hi ${firstName} — Rainer here from Bvelt. Most ${tradeLabel} contractors in ${city} don't have time to follow up bids from last week. Bvelt sends automated text check-ins that bring buyers back. 45-sec demo: ${demoUrl} — want a look? — ${senderSignature}`;
+      sms = `Hi ${firstName} — Rainer here from Bvelt. Most ${tradeLabel} contractors in ${city} don't have time to follow up bids from last week. Bvelt sends automated text check-ins that bring buyers back. See how it works: ${demoUrl} — want a look? — ${senderSignature}`;
     } else {
-      sms = `Hi ${firstName} — Rainer at Bvelt. Following up on past ${tradeLabel} bids in ${city} takes hours when done by hand. Bvelt sequences text follow-ups automatically so you win more jobs. Quick demo: ${demoUrl} — should I send details or stop? — ${senderSignature}`;
+      sms = `Hi ${firstName} — Rainer at Bvelt. Following up on past ${tradeLabel} bids in ${city} takes hours when done by hand. Bvelt sequences text follow-ups automatically so you win more jobs. See Bvelt: ${demoUrl} — should I send details or stop? — ${senderSignature}`;
     }
 
-    emailBody = `Hi ${name} team — saw your ${tradeLabel} business in ${city}.\n\nFollowing up on estimates that sit unanswered is where most contractors in ${city} leave money on the table. Most homeowners get busy and just need a quick text check-in.\n\nWe built Bvelt to automatically send friendly text follow-ups on past quotes so bids don't go cold.\n\nPut together a 45-second preview of how it works for ${name}${demoUrl ? `: ${demoUrl}` : '.'}\n\nWould you be open to taking a look?\n\nBest,\n${senderSignature}`;
+    emailBody = `Hi ${name} team — saw your ${tradeLabel} business in ${city}.\n\nFollowing up on estimates that sit unanswered is where most contractors in ${city} leave money on the table. Most homeowners get busy and just need a quick text check-in.\n\nWe built Bvelt to automatically send friendly text follow-ups on past quotes so bids don't go cold.\n\nA quick look at how it works: ${demoUrl}\n\nWould you be open to taking a look?\n\nBest,\n${senderSignature}`;
 
-    call_script = `- Operator Context: ${tradeLabel} contractor in ${city} sending out bids and estimates.\n- Opening Question: "How do you follow up on estimates that don't close right away?"\n- Key Point: Unanswered bids go cold unless sequenced with friendly SMS check-ins.\n- Next Step: Offer to text over the 45-second preview link (${demoUrl}).`;
+    call_script = `- Operator Context: ${tradeLabel} contractor in ${city} sending out bids and estimates.\n- Opening Question: "How do you follow up on estimates that don't close right away?"\n- Key Point: Unanswered bids go cold unless sequenced with friendly SMS check-ins.\n- Next Step: Offer to text over the demo link (${demoUrl}).`;
 
   } else {
     // weather_surge
     subject = `${name} — handling ${tradeLabel} call spikes in ${city}`;
 
     if (variantIndex === 0) {
-      sms = `Hi ${firstName} — quick note from Rainer at Bvelt. With recent severe weather in ${city}, ${tradeLabel} call volume spikes fast. Bvelt texts back missed emergency calls instantly so jobs don't slip away. 60-sec demo: ${demoUrl} — open to a look? — ${senderSignature}`;
+      sms = `Hi ${firstName} — quick note from Rainer at Bvelt. With recent severe weather in ${city}, ${tradeLabel} call volume spikes fast. Bvelt texts back missed emergency calls instantly so jobs don't slip away. See how it works: ${demoUrl} — open to a look? — ${senderSignature}`;
     } else if (variantIndex === 1) {
-      sms = `Hi ${firstName} — Rainer with Bvelt. Heavy weather in ${city} means phones ring non-stop for ${tradeLabel} work. Bvelt catches missed calls with automated text replies so your crew stays booked. 45-sec preview: ${demoUrl} — worth a glance? — ${senderSignature}`;
+      sms = `Hi ${firstName} — Rainer with Bvelt. Heavy weather in ${city} means phones ring non-stop for ${tradeLabel} work. Bvelt catches missed calls with automated text replies so your crew stays booked. See how it works: ${demoUrl} — worth a glance? — ${senderSignature}`;
     } else {
-      sms = `Hi ${firstName} — Rainer from Bvelt. When storm weather hits ${city}, homeowners call multiple ${tradeLabel} companies at once. Bvelt texts back in under 60 seconds to lock in the job. Quick demo: ${demoUrl} — should I share details? — ${senderSignature}`;
+      sms = `Hi ${firstName} — Rainer from Bvelt. When storm weather hits ${city}, homeowners call multiple ${tradeLabel} companies at once. Bvelt texts back in under 60 seconds to lock in the job. See Bvelt: ${demoUrl} — should I share details? — ${senderSignature}`;
     }
 
-    emailBody = `Hi ${name} team — with the recent weather event in ${city}, call volume for ${tradeLabel} spikes fast.\n\nWhen phones ring non-stop, missed calls go to competitors who answer first.\n\nWe built Bvelt to send instant text replies to missed calls so your crew locks in emergency jobs automatically.\n\nPut together a 45-second preview of how it works for ${name}${demoUrl ? `: ${demoUrl}` : '.'}\n\nWould you be open to taking a look?\n\nBest,\n${senderSignature}`;
+    emailBody = `Hi ${name} team — with the recent weather event in ${city}, call volume for ${tradeLabel} spikes fast.\n\nWhen phones ring non-stop, missed calls go to competitors who answer first.\n\nWe built Bvelt to send instant text replies to missed calls so your crew locks in emergency jobs automatically.\n\nA quick look at how it works: ${demoUrl}\n\nWould you be open to taking a look?\n\nBest,\n${senderSignature}`;
 
-    call_script = `- Operator Context: ${tradeLabel} contractor in ${city} facing weather call surges.\n- Opening Question: "How are you handling the extra call volume after the storm?"\n- Key Point: Instant automated text replies lock in emergency callers before competitors do.\n- Next Step: Offer to text over the 45-second preview link (${demoUrl}).`;
+    call_script = `- Operator Context: ${tradeLabel} contractor in ${city} facing weather call surges.\n- Opening Question: "How are you handling the extra call volume after the storm?"\n- Key Point: Instant automated text replies lock in emergency callers before competitors do.\n- Next Step: Offer to text over the demo link (${demoUrl}).`;
   }
 
   // Enforce max ~300 chars on SMS
@@ -8563,9 +8592,7 @@ function getTradePsychologyFallback(
 ): { subject: string; body: string } {
   const cTrade = String(trade || 'service').replace(/_/g, ' ');
   const isSpanish = language.toLowerCase().startsWith("es");
-  const ctaLink = demoToken
-    ? `https://bvelt.app/demo?p=${demoToken}`
-    : "https://bvelt.app/demo";
+  const ctaLink = "https://bvelt.app/";
 
   if (signalEvent && signalArea) {
     const subject = isSpanish

@@ -306,8 +306,12 @@ export async function pickTargets(
       if (h && h.last_searched_at) {
         isNew = false;
         const days = (now - new Date(h.last_searched_at).getTime()) / DAY_MS;
-        if (days < 30) continue;
-        fresh = Math.min(1, days / 30);
+        // Empty/failed scans (0 candidates) must not lock a city+trade for a month.
+        // Real hits cool down longer so we do not spam the same market.
+        const prevCandidates = Number(h.candidates || 0);
+        const cooldownDays = prevCandidates <= 0 ? 5 : 14;
+        if (days < cooldownDays) continue;
+        fresh = Math.min(1, days / Math.max(cooldownDays, 1));
       }
       // No repetir zonas cubiertas hace <30 días con el mismo oficio
       const recents = recentByTrade.get(t);
