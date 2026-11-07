@@ -3554,7 +3554,7 @@ async function bootstrapBveltTenant(
   // --- FAST PATH: one Overpass/BizData pull, top 2 leads now ---
   const leads: any[] = [];
   try {
-    const { businesses } = await fetchLocalBusinessesWithDiagnostics(cityLabel, searchTrade, env);
+    const { businesses } = await fetchLocalBusinessesWithDiagnostics(cityLabel, searchTrade, env, undefined, 'tenant');
     const ranked = (businesses || [])
       .filter((b: any) => b && b.name && tenantBuyerNameFits(b.name, searchTrade))
       .map((b: any) => {
@@ -4273,7 +4273,7 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
     }
   }
 
-  const { businesses: scraped, diagnostics } = await fetchLocalBusinessesWithDiagnostics(city, trade, env, customOsmTags);
+  const { businesses: scraped, diagnostics } = await fetchLocalBusinessesWithDiagnostics(city, trade, env, customOsmTags, (job.mode === 'tenant' ? 'tenant' : 'founder'));
 
   if (scraped.length === 0) {
     console.warn(`[Job: discovery] 0 businesses found for ${city} - ${trade}:`, diagnostics.reason);
@@ -4342,17 +4342,17 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
       return permitsB - permitsA;
     }
 
-    const hasPhoneA = a.phone && a.phone.trim().length > 0 ? 1 : 0;
-    const hasPhoneB = b.phone && b.phone.trim().length > 0 ? 1 : 0;
-    if (hasPhoneB !== hasPhoneA) {
-      return hasPhoneB - hasPhoneA;
-    }
-
-    const hasRealWebA = a.website && isRealWebsite(a.website) ? 1 : 0;
-    const hasRealWebB = b.website && isRealWebsite(b.website) ? 1 : 0;
-    if (hasRealWebB !== hasRealWebA) {
-      return hasRealWebB - hasRealWebA;
-    }
+    // Contactability first (email > phone > real website) — founder lives or dies by outreach
+    const contactScore = (x: any) => {
+      let s = 0;
+      if (x.email && String(x.email).includes('@')) s += 8;
+      if (x.phone && String(x.phone).replace(/\D/g, '').length >= 7) s += 4;
+      if (x.website && isRealWebsite(String(x.website))) s += 2;
+      return s;
+    };
+    const csB = contactScore(b);
+    const csA = contactScore(a);
+    if (csB !== csA) return csB - csA;
 
     return 0;
   });
@@ -7473,6 +7473,8 @@ export interface DiscoveryDiagnostics {
   geoapify_status?: string;
   locationiq_status?: string;
   nominatim_poi_status?: string;
+  photon_status?: string;
+  locationiq_status?: string;
 }
 
 /**
@@ -7619,6 +7621,67 @@ async function fetchLocationIqBusinesses(
   }
 }
 
+
+/** Photon (Komoot) — free geocoder/search on OSM, no API key. https://photon.komoot.io */
+async function fetchPhotonBusinesses(
+  city: string,
+  trade: string
+): Promise<{ businesses: any[]; status: string }> {
+  try {
+    const q = `${trade} ${city}`.trim();
+    const url =
+      `https://photon.komoot.io/api/?lang=en&limit=40&q=${encodeURIComponent(q)}`;
+    const res = await fetch(url, {
+      headers: {
+        Accept: "application/json",
+        "User-Agent": "BveltRadar/1.0 (https://bvelt.app; radar@bvelt.app)",
+      },
+      signal: AbortSignal.timeout(12000),
+    });
+    if (!res.ok) return { businesses: [], status: `HTTP ${res.status}` };
+    const data: any = await res.json();
+    const out: any[] = [];
+    const tradeL = trade.toLowerCase();
+    for (const f of data?.features || []) {
+      const props = f?.properties || {};
+      const name = String(props.name || props.osm_value || "").trim();
+      if (!name || name.length < 2) continue;
+      const osmKey = String(props.osm_key || "");
+      const osmVal = String(props.osm_value || "");
+      // Prefer shop/craft/office/amenity over pure address
+      if (osmKey === "place" || osmKey === "highway" || osmKey === "building") continue;
+      const cityName = props.city || props.county || props.state || city;
+      const website = props.website || props.url || null;
+      const phone = props.phone || props["contact:phone"] || null;
+      const email = props.email || props["contact:email"] || null;
+      out.push({
+        name,
+        city: cityName,
+        trade,
+        website,
+        phone,
+        email,
+        source: "photon",
+        osm_key: osmKey,
+        osm_value: osmVal,
+      });
+    }
+    // light relevance: name or value mentions trade token
+    const tokens = tradeL.split(/[_\s]+/).filter((x) => x.length > 3);
+    const scored = out.sort((a, b) => {
+      const score = (x: any) => {
+        const blob = `${x.name} ${x.osm_value || ""}`.toLowerCase();
+        return tokens.reduce((s, tok) => s + (blob.includes(tok) ? 2 : 0), 0) + (x.website ? 1 : 0) + (x.phone ? 1 : 0);
+      };
+      return score(b) - score(a);
+    });
+    return { businesses: scored.slice(0, 30), status: scored.length ? `success (${scored.length})` : "0 matches" };
+  } catch (e: any) {
+    return { businesses: [], status: `error: ${e?.message || e}` };
+  }
+}
+
+
 /** Nominatim free POI search (1 req/s policy — use only as fallback). */
 async function fetchNominatimPoiBusinesses(
   city: string,
@@ -7665,7 +7728,8 @@ export async function fetchLocalBusinessesWithDiagnostics(
   city: string, 
   trade: string, 
   env: Env,
-  customOsmTags?: string[]
+  customOsmTags?: string[],
+  mode: 'founder' | 'tenant' = 'founder'
 ): Promise<{ businesses: any[]; diagnostics: DiscoveryDiagnostics }> {
   const cacheKey = `radar_cache_${city.replace(/[^a-z0-9]/gi, "_")}_${trade}_v3`.toLowerCase();
   
@@ -7792,37 +7856,56 @@ export async function fetchLocalBusinessesWithDiagnostics(
   overpassStatus = overpassRes.status;
   rawBusinesses.push(...overpassRes.businesses);
 
-  // 2.5 Geoapify Places — use whenever key exists and pool still thin
+  // Target pool size: founder needs contactable trades; tenant needs broader B2B surface
+  const targetPool = mode === 'tenant' ? 40 : 28;
+
+  // 2.5 Geoapify Places — free tier key; fill until target
   let geoapifyStatus = "skipped (no GEOAPIFY_API_KEY)";
-  if (env.GEOAPIFY_API_KEY && rawBusinesses.length < 20) {
+  if (env.GEOAPIFY_API_KEY && rawBusinesses.length < targetPool) {
     const geoRes = await fetchGeoapifyBusinesses(city, trade, nominatimGeo, env.GEOAPIFY_API_KEY);
     geoapifyStatus = geoRes.status;
-    rawBusinesses.push(...geoRes.businesses);
+    // Founder: drop pure hotels/restaurants unless trade is hospitality-related
+    const geoItems = (geoRes.businesses || []).filter((b: any) => {
+      if (mode === 'tenant') return true;
+      const n = String(b.name || '').toLowerCase();
+      if (/\b(hotel|motel|resort|inn)\b/i.test(n) && !/plumb|hvac|electric|roof|landscap|clean|pest/i.test(trade)) return false;
+      if (/\b(restaurant|cafe|bar|grill)\b/i.test(n) && !/clean|pest|hvac|plumb/i.test(trade)) return false;
+      return true;
+    });
+    rawBusinesses.push(...geoItems);
   }
 
   // 2.6 LocationIQ free search (optional key, no credit card)
   let locationIqStatus = "skipped (no LOCATIONIQ_API_KEY)";
-  if ((env as any).LOCATIONIQ_API_KEY && rawBusinesses.length < 15) {
-    const liq = await fetchLocationIqBusinesses(city, trade, String((env as any).LOCATIONIQ_API_KEY));
+  if (env.LOCATIONIQ_API_KEY && rawBusinesses.length < targetPool) {
+    const liq = await fetchLocationIqBusinesses(city, trade, String(env.LOCATIONIQ_API_KEY));
     locationIqStatus = liq.status;
     rawBusinesses.push(...liq.businesses);
   }
 
-  // 3. BizData — fallback when still weak
+  // 2.7 Photon (Komoot) — NO KEY, OSM-based text search worldwide
+  let photonStatus = "unattempted";
+  if (rawBusinesses.length < targetPool) {
+    const ph = await fetchPhotonBusinesses(city, trade);
+    photonStatus = ph.status;
+    rawBusinesses.push(...ph.businesses);
+  }
+
+  // 3. BizData — no key; still useful when OSM thin in US metros
   const bizDataExplicitlyOff = env.ENABLE_BIZDATA === "0" || env.ENABLE_BIZDATA === "false";
-  if (rawBusinesses.length < 8 && !bizDataExplicitlyOff) {
+  if (rawBusinesses.length < Math.min(12, targetPool) && !bizDataExplicitlyOff) {
     const bizDataRes = await fetchBizDataBusinesses(city, trade);
     bizdataStatus = bizDataRes.status;
     rawBusinesses.push(...bizDataRes.businesses);
   } else {
-    bizdataStatus = rawBusinesses.length >= 8
+    bizdataStatus = rawBusinesses.length >= 12
       ? `skipped (have ${rawBusinesses.length} results)`
       : "disabled (ENABLE_BIZDATA=0)";
   }
 
   // 3.5 Nominatim POI text search — last resort only (fair-use 1 req/s)
   let nominatimPoiStatus = "skipped";
-  if (rawBusinesses.length < 5) {
+  if (rawBusinesses.length < 6) {
     const nom = await fetchNominatimPoiBusinesses(city, trade);
     nominatimPoiStatus = nom.status;
     rawBusinesses.push(...nom.businesses);
@@ -7869,6 +7952,8 @@ export async function fetchLocalBusinessesWithDiagnostics(
     reason,
     permits_found: permitsFound,
     geoapify_status: geoapifyStatus,
+      locationiq_status: locationIqStatus,
+      photon_status: photonStatus,
     locationiq_status: typeof locationIqStatus !== 'undefined' ? locationIqStatus : 'n/a',
     nominatim_poi_status: typeof nominatimPoiStatus !== 'undefined' ? nominatimPoiStatus : 'n/a'
   };
@@ -9550,6 +9635,12 @@ export async function sendOrQueueOutreach(prospect: any, runId: string, env: Env
 
   // 7. Dedupe check & Recipient email validation
   if (!prospect.email || !prospect.email.trim()) {
+    const hasPhone = prospect.phone && String(prospect.phone).replace(/\D/g, '').length >= 7;
+    if (hasPhone) {
+      await env.RADAR_DB.prepare("UPDATE prospects SET status = 'qualified', outcome = 'phone_only_no_email', updated_at = ? WHERE id = ?")
+        .bind(new Date().toISOString(), prospect.id).run();
+      return { success: false, reason: "PHONE_ONLY_NO_EMAIL" };
+    }
     await env.RADAR_DB.prepare("UPDATE prospects SET status = 'disqualified', outcome = 'missing_email', updated_at = ? WHERE id = ?")
       .bind(new Date().toISOString(), prospect.id).run();
     return { success: false, reason: "MISSING_EMAIL" };
