@@ -416,18 +416,20 @@ const OVERPASS_TRADE_TAGS: Record<string, string[]> = {
     'shop="plumbing"',
     'office="plumbing"',
     'amenity="plumbing"',
-    'name~"plumb"'
+    'name~"plumb"',
+    'name~"plumber"',
+    'name~"drain"'
   ],
-  hvac: ['craft="hvac"', 'craft="heating_technician"', 'craft="heating_contractor"'],
+  hvac: ['craft="hvac"', 'craft="heating_technician"', 'craft="heating_contractor"', 'craft="air_conditioning"', 'name~"hvac"', 'name~"heating and cooling"', 'name~"air conditioning"'],
   landscaping: ['craft="gardener"', 'craft="landscaper"', 'craft="groundskeeper"'],
   lawn_care: ['craft="gardener"', 'craft="landscaper"', 'craft="groundskeeper"', 'craft="lawn_mower"'],
-  electrical: ['craft="electrician"'],
+  electrical: ['craft="electrician"', 'craft="electrical"', 'shop="electrical"', 'name~"electric"', 'name~"electrician"'],
   house_cleaning: ['craft="cleaner"', 'office="cleaning_agency"', 'office="cleaning"'],
   cleaning: ['craft="cleaner"', 'office="cleaning_agency"', 'office="cleaning"'],
   pool_cleaning: ['craft="swimming_pool"', 'craft="pool_technician"', 'office="pool_service"'],
   pool: ['craft="swimming_pool"', 'craft="pool_technician"', 'office="pool_service"'],
   handyman: ['craft="handyman"', 'craft="carpenter"', 'craft="joiner"', 'craft="builder"', 'name~"handyman"', 'name~"handy man"', 'shop="doityourself"'],
-  roofing: ['craft="roofer"', 'craft="roofing"'],
+  roofing: ['craft="roofer"', 'craft="roofing"', 'name~"roof"', 'name~"roofer"', 'shop="roofing"'],
   pest_control: ['craft="pest_control"', 'amenity="pest_control"'],
   "property management": [
     'office="property_management"', 'amenity="property_management"',
@@ -4755,6 +4757,27 @@ async function handleEnrichJob(job: RadarJobMessage, env: Env): Promise<void> {
     try {
       webAudit = await auditWebsitePerformance(prospect.website, env.PAGESPEED_API_KEY);
     } catch (e) {}
+    // Free fallback when PageSpeed key missing or failed (local-outreach style evidence)
+    if (!webAudit) {
+      try {
+        const probe = await probeWebsiteHealth(prospect.website);
+        webAudit = {
+          mobileScore: null,
+          fcpSeconds: probe.isSlow ? 3.5 : null,
+          latencyMs: probe.ms,
+          isSlow: probe.isSlow,
+          parked: probe.parked,
+          reachable: probe.ok,
+        };
+        if (probe.parked || !probe.ok) {
+          // treat as no real website for scoring/templates
+          try {
+            const sig = typeof signals === 'object' && signals ? signals : {};
+            (sig as any).no_own_website = true;
+          } catch {}
+        }
+      } catch (e) {}
+    }
   }
 
   if (prospect.city) {
@@ -5577,6 +5600,12 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
   }
 
   if (isAutoOutreachEnabled) {
+    if (isUsOutreachQuietHours()) {
+      console.log(`[Auto-Outreach] Quiet hours (America/New_York) — holding ${prospect.id} for daytime send`);
+      await env.RADAR_DB.prepare(
+        "UPDATE prospects SET status = 'queued', outcome = 'held_quiet_hours', updated_at = ? WHERE id = ?"
+      ).bind(new Date().toISOString(), prospect.id).run();
+    } else {
     const timestamp = new Date().toISOString();
     let slotReserved = false;
     let sendsTodayCount = 1;
@@ -5657,7 +5686,9 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
     }
   }
 
-  // Fallback / Interactive Approval Flow (when FOUNDER_AUTO_OUTREACH is false or cap reached)
+  } // end quiet-hours else
+
+  // Fallback / Interactive Approval Flow (when FOUNDER_AUTO_OUTREACH is false or cap reached or quiet hours)
   await env.RADAR_DB.prepare(`
     UPDATE prospects
     SET draft_subject = ?, draft_body = ?, status = 'queued', updated_at = ?
@@ -7014,6 +7045,7 @@ export function calculateMultiFactorScore(
     }
   }
   if (phone) contactabilityNew += 2;
+  if (phone && !email) contactabilityNew += 3; // founder call path — no hard email requirement
   if (item.website && isRealWebsite(item.website)) contactabilityNew += 2;
   contactabilityNew = Math.min(10, Math.max(0, contactabilityNew));
 
@@ -8354,36 +8386,45 @@ async function generateAICopy(
       }
     }
 
-    // 2. GROQ FALLBACK (llama-3.3-70b-versatile)
+    // 2. GROQ FALLBACK — free-tier safe (llama-3.3 decommissioned on free)
     if (env.GROQ_API_KEY) {
-      console.log(`[Gemini Cascade] Calling Groq backup...`);
-      try {
-        const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${env.GROQ_API_KEY}`
-          },
-          body: JSON.stringify({
-            model: "llama-3.3-70b-versatile",
-            response_format: { type: "json_object" },
-            messages: [{ role: "user", content: prompt }],
-            temperature: 0.6
-          }),
-          signal: AbortSignal.timeout(5500)
-        });
-
-        if (response.ok) {
-          const data: any = await response.json();
-          const content = JSON.parse(data.choices[0].message.content);
-          if (content.subject && content.body) {
-            console.log(`[Gemini Cascade] Success using Groq backup`);
-            await commitBudget(env.RADAR_DB, tenantId, 'ai_units', 1);
-            return { subject: content.subject, body: content.body };
+      const groqModels = ["openai/gpt-oss-20b", "openai/gpt-oss-120b"];
+      for (const groqModel of groqModels) {
+        console.log(`[Gemini Cascade] Calling Groq backup model: ${groqModel}`);
+        try {
+          const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${env.GROQ_API_KEY}`
+            },
+            body: JSON.stringify({
+              model: groqModel,
+              response_format: { type: "json_object" },
+              messages: [{ role: "user", content: prompt }],
+              temperature: 0.6
+            }),
+            signal: AbortSignal.timeout(5500)
+          });
+          if (response.ok) {
+            const data: any = await response.json();
+            const raw = data.choices?.[0]?.message?.content;
+            if (raw) {
+              const content = typeof raw === "string" ? JSON.parse(raw) : raw;
+              if (content.subject && content.body) {
+                console.log(`[Gemini Cascade] Success using Groq ${groqModel}`);
+                await commitBudget(env.RADAR_DB, tenantId, 'ai_units', 1);
+                return { subject: content.subject, body: content.body };
+              }
+            }
+          } else {
+            const errTxt = await response.text().catch(() => "");
+            console.warn(`[Gemini Cascade] Groq ${groqModel} status ${response.status}: ${errTxt.slice(0, 180)}`);
+            if (response.status === 404 || response.status === 400) continue;
           }
+        } catch (e: any) {
+          console.warn(`[Gemini Cascade] Groq ${groqModel} failed:`, e.message);
         }
-      } catch (e: any) {
-        console.warn("[Gemini Cascade] Groq API backup failed:", e.message);
       }
     }
 
@@ -8686,6 +8727,18 @@ function getTradePsychologyFallback(
   try {
     signals = typeof signalsInput === "string" ? JSON.parse(signalsInput) : (signalsInput || {});
   } catch { signals = {}; }
+
+  if (signals.no_own_website) {
+    const subject = isSpanish
+      ? `${name} en ${city}: sin web propia, las llamadas se pierden`
+      : `${name} in ${city}: no website of your own — calls go dark`;
+    const bodyBase = isSpanish
+      ? `Hola equipo de ${name},\n\nVi que ${name} opera ${cTrade} en ${city} sin un sitio web propio (o solo con redes). Cuando un cliente llama y nadie contesta, no hay forma de capturar ese lead por SMS o formulario.\n\nCreé Bvelt para eso: responde automáticamente por SMS a llamadas perdidas en menos de 60 segundos y reactiva presupuestos antiguos.\n\nDemo corta: ${ctaLink}\n\n¿Tiene sentido echarle un vistazo?`
+      : `Hi ${name} team,\n\nI noticed ${name} runs ${cTrade} in ${city} without a real website of your own (or only social links). When a homeowner calls and nobody picks up, there is no SMS or form to catch that job.\n\nI built Bvelt for exactly that: automatic SMS on missed calls in under 60 seconds, plus follow-up on old estimates.\n\nShort demo: ${ctaLink}\n\nWorth a look?`;
+    const footer = env ? buildLegalFooter(env) : "";
+    const fullBody = footer ? `${bodyBase}\n\n${footer}` : bodyBase;
+    return { subject, body: fullBody };
+  }
 
   const techAudit = signals.technical_audits || {};
   const fcpSeconds = techAudit.fcp_seconds || (techAudit.is_slow_mobile ? 3.6 : null);
@@ -10420,15 +10473,68 @@ export function isLicenseStatusInvalid(statusText?: string): boolean {
   return /expired|expirad|revoked|revocad|cancelled|canceled|cancelad|suspended|suspendid|inactive|inactiv/i.test(lower);
 }
 
+/** US Eastern quiet hours for auto-outreach. 21:00–08:00 America/New_York. */
+function isUsOutreachQuietHours(now: Date = new Date()): boolean {
+  try {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/New_York",
+      hour: "numeric",
+      hour12: false,
+    }).formatToParts(now);
+    const hour = Number(parts.find((p) => p.type === "hour")?.value ?? "12");
+    return hour >= 21 || hour < 8;
+  } catch {
+    const h = now.getUTCHours();
+    return h >= 2 && h < 13;
+  }
+}
+
+/** Lightweight website health probe (no paid APIs). */
+async function probeWebsiteHealth(url: string): Promise<{ ok: boolean; status: number; parked: boolean; isSlow: boolean; ms: number }> {
+  const empty = { ok: false, status: 0, parked: false, isSlow: false, ms: 0 };
+  if (!url || !isRealWebsite(url)) return { ...empty, parked: true };
+  let target = url.trim();
+  if (!/^https?:\/\//i.test(target)) target = "https://" + target;
+  const start = Date.now();
+  try {
+    const res = await fetch(target, {
+      method: "GET",
+      redirect: "follow",
+      headers: { "User-Agent": "BveltRadar/1.0 (health; https://bvelt.app)", "Accept": "text/html" },
+      signal: AbortSignal.timeout(4500),
+    });
+    const ms = Date.now() - start;
+    let body = "";
+    try { body = (await res.text()).slice(0, 4000).toLowerCase(); } catch { body = ""; }
+    const parked = /domain is for sale|buy this domain|parked free|godaddy parking|sedoparking|coming soon|under construction/i.test(body);
+    return { ok: res.ok && !parked, status: res.status, parked, isSlow: ms > 2500, ms };
+  } catch {
+    return { ...empty, ms: Date.now() - start };
+  }
+}
+
 /**
  * Utilities
  */
 function isRealWebsite(url: string): boolean {
-  const lower = url.toLowerCase();
-  return !lower.includes("facebook.com") && 
-         !lower.includes("instagram.com") && 
-         !lower.includes("yelp.com") && 
-         !lower.includes("yellowpages.com");
+  if (!url || typeof url !== "string") return false;
+  const lower = url.toLowerCase().trim();
+  if (!lower || lower === "null" || lower === "undefined") return false;
+  const bad = [
+    "facebook.com", "fb.com", "instagram.com", "yelp.com", "yellowpages.com",
+    "linktr.ee", "linktree.com", "bit.ly", "tinyurl.com", "business.site",
+    "wixsite.com", "nextdoor.com", "angi.com", "homeadvisor.com", "thumbtack.com",
+    "bbb.org", "craigslist.org", "twitter.com", "x.com", "tiktok.com",
+    "linkedin.com", "google.com/maps", "goo.gl/maps"
+  ];
+  if (bad.some((b) => lower.includes(b))) return false;
+  try {
+    const host = lower.replace(/^(https?:\/\/)?(www\.)?/i, "").split("/")[0].split(":")[0];
+    if (!host || host.length < 4 || !host.includes(".")) return false;
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function getDomain(url: string): string | null {
