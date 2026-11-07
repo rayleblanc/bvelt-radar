@@ -7474,7 +7474,6 @@ export interface DiscoveryDiagnostics {
   locationiq_status?: string;
   nominatim_poi_status?: string;
   photon_status?: string;
-  locationiq_status?: string;
 }
 
 /**
@@ -7952,9 +7951,8 @@ export async function fetchLocalBusinessesWithDiagnostics(
     reason,
     permits_found: permitsFound,
     geoapify_status: geoapifyStatus,
-      locationiq_status: locationIqStatus,
-      photon_status: photonStatus,
     locationiq_status: typeof locationIqStatus !== 'undefined' ? locationIqStatus : 'n/a',
+    photon_status: typeof photonStatus !== 'undefined' ? photonStatus : 'n/a',
     nominatim_poi_status: typeof nominatimPoiStatus !== 'undefined' ? nominatimPoiStatus : 'n/a'
   };
 
