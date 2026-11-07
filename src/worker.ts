@@ -118,8 +118,8 @@ export interface Env {
 
 export function getBudgetLimit(unitType: string): number {
   switch (unitType) {
-    case 'discovery_units': return 30;
-    case 'enrichment_units': return 20;
+    case 'discovery_units': return 45;
+    case 'enrichment_units': return 30;
     case 'ai_units': return 10;
     case 'hunter_units': return 8;
     case 'outreach_units': return 3;
@@ -998,6 +998,32 @@ export default {
           }
         } catch (e: any) {
           console.warn("[fix-suppression] Error cleaning suppression entries:", e);
+        }
+
+        
+        // (a2) Purge soft "Contacted on" suppressions older than 25 days (fixes cooldown-until-2027 leftovers)
+        try {
+          const softRows = await env.RADAR_DB.prepare(
+            "SELECT key, reason, created_at FROM suppression WHERE lower(reason) LIKE '%contacted on%' OR lower(reason) LIKE '%cooldown%'"
+          ).all();
+          const nowMs = Date.now();
+          const softMs = 25 * 24 * 60 * 60 * 1000;
+          for (const item of (softRows.results || []) as any[]) {
+            const reason = String(item.reason || "");
+            const rl = reason.toLowerCase();
+            if (rl.includes('bounce') || rl.includes('complaint') || rl.includes('unsubscribe')) continue;
+            let exp = item.created_at ? Date.parse(item.created_at) + softMs : 0;
+            const m = reason.match(/cooldown until ([0-9T:\-.+Z]+)/i);
+            if (m) {
+              const p = Date.parse(m[1]);
+              if (!isNaN(p)) exp = p;
+            }
+            if (exp && nowMs > exp) {
+              await env.RADAR_DB.prepare("DELETE FROM suppression WHERE key = ?").bind(item.key).run();
+            }
+          }
+        } catch (e) {
+          console.warn("[fix-suppression] soft purge error:", e);
         }
 
         // (b) Reactivate prospects with cooldown_until > 40 days and score >= 50
@@ -2622,8 +2648,8 @@ async function handleHealth(env: Env, headers: Record<string, string>, tenantId:
     circuit_breaker: circuitBreakerActive,
     circuit_breaker_reason: circuitBreakerReason,
     today: {
-      discovery: { used: budgetRow.discovery_units || 0, max: 30 },
-      enrichment: { used: budgetRow.enrichment_units || 0, max: 20 },
+      discovery: { used: budgetRow.discovery_units || 0, max: 45 },
+      enrichment: { used: budgetRow.enrichment_units || 0, max: 30 },
       AI: { used: budgetRow.ai_units || 0, max: 10 },
       Hunter: { used: budgetRow.hunter_units || 0, max: 8 },
       outreach: { used: budgetRow.outreach_units || 0, max: 3 }
@@ -3019,8 +3045,8 @@ async function handleStats(env: Env, headers: Record<string, string>): Promise<R
     circuit_breaker: circuitBreakerActive,
     circuit_breaker_reason: circuitBreakerReason,
     today: {
-      discovery: { used: budgetRow.discovery_units || 0, max: 30 },
-      enrichment: { used: budgetRow.enrichment_units || 0, max: 20 },
+      discovery: { used: budgetRow.discovery_units || 0, max: 45 },
+      enrichment: { used: budgetRow.enrichment_units || 0, max: 30 },
       AI: { used: budgetRow.ai_units || 0, max: 10 },
       Hunter: { used: budgetRow.hunter_units || 0, max: 8 },
       outreach: { used: budgetRow.outreach_units || 0, max: 3 }
@@ -7525,7 +7551,7 @@ export async function fetchGeoapifyBusinesses(
   try {
     const rect = `${geo.bbox[2]},${geo.bbox[0]},${geo.bbox[3]},${geo.bbox[1]}`; // lonMin,latMin,lonMax,latMax
     const url = `https://api.geoapify.com/v2/places?categories=${encodeURIComponent(profile.categories)}&filter=rect:${rect}&limit=100&apiKey=${encodeURIComponent(apiKey.trim())}`;
-    const res = await fetch(url, { signal: AbortSignal.timeout(9000) });
+    const res = await fetch(url, { signal: AbortSignal.timeout(14000) });
     if (!res.ok) return { businesses: [], status: `HTTP ${res.status} (skipped)` };
     const data: any = await res.json();
     const out: any[] = [];
@@ -9037,7 +9063,7 @@ async function scrapeWebsiteContact(url: string): Promise<{
     try {
       const res = await fetch(nextItem.url, {
         headers: { "User-Agent": "BveltRadar/1.0 (contact: radar@bvelt.app)" },
-        signal: AbortSignal.timeout(1500) // 1.5s timeout per page fetch
+        signal: AbortSignal.timeout(4500) // 4.5s — slow contractor sites otherwise yield 0 emails
       });
 
       if (!res.ok) continue;
@@ -9056,7 +9082,8 @@ async function scrapeWebsiteContact(url: string): Promise<{
         }
 
         if (!finalEmail) {
-          const emailRegex = /[a-zA-Z0-9._%+-]+@(?!gmail\.com)(?!yahoo\.com)(?!hotmail\.com)[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/gi;
+          // Many US trades only publish Gmail/Yahoo — do not exclude free mail on business sites
+          const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/gi;
           const matches = html.match(emailRegex);
           if (matches && matches.length > 0) {
             const validCandidates = matches
@@ -9853,12 +9880,39 @@ export async function checkSuppressedComposite(
   if (phone) keys.push(phone.replace(/[^0-9]/g, ""));
   keys.push(`${name.toLowerCase().trim()}_${city.toLowerCase().trim()}`.replace(/\s+/g, "_"));
 
+  const now = Date.now();
+  const SOFT_MS = 25 * 24 * 60 * 60 * 1000; // contacted cooldown max 25d
+
   for (const k of keys) {
     try {
       const match = await db.prepare("SELECT * FROM suppression WHERE key = ?").bind(k).first() as any;
-      if (match) {
-        return { suppressed: true, reason: match.reason };
+      if (!match) continue;
+      const reason = String(match.reason || "");
+      const reasonL = reason.toLowerCase();
+      const isHard =
+        reasonL.includes("bounce") ||
+        reasonL.includes("complaint") ||
+        reasonL.includes("unsubscribe") ||
+        reasonL.includes("spam") ||
+        reasonL.includes("invalid");
+      // Soft "Contacted on ..." rows: respect created_at / cooldown date, auto-expire
+      if (!isHard && (reasonL.includes("contacted on") || reasonL.includes("cooldown"))) {
+        let expireAt = 0;
+        const created = match.created_at ? Date.parse(match.created_at) : NaN;
+        if (!isNaN(created)) expireAt = created + SOFT_MS;
+        const untilMatch = reason.match(/cooldown until ([0-9T:\-.+Z]+)/i);
+        if (untilMatch) {
+          const parsed = Date.parse(untilMatch[1]);
+          if (!isNaN(parsed)) expireAt = parsed;
+        }
+        if (expireAt && now > expireAt) {
+          try {
+            await db.prepare("DELETE FROM suppression WHERE key = ?").bind(k).run();
+          } catch (_) {}
+          continue; // not suppressed anymore
+        }
       }
+      return { suppressed: true, reason: match.reason };
     } catch (e) {
       // safe fallback
     }
