@@ -6,6 +6,7 @@
  */
 
 import React, { useState, useEffect, useMemo } from 'react';
+import { toWhatsAppUrl, toSmsUrl, toTelUrl } from './phoneUtils';
 import { 
   BarChart, Bar, AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid
 } from 'recharts';
@@ -204,7 +205,7 @@ export function validateTenantAlignment(
     messages.push({ text: "La Descripción del ICP es demasiado breve para guiar al Radar adecuadamente.", severity: 'warning' });
   }
 
-  const parsedCities = cities.split(/[;,\n]/).map(c => c.trim()).filter(Boolean);
+  const parsedCities = cities.split(/[;\n]+/).map(c => c.trim()).filter(Boolean);
   if (!cities || parsedCities.length === 0) {
     fieldErrors.cities = "Las Ciudades de servicio son obligatorias.";
     messages.push({ text: "Faltan las Ciudades de Servicio (Service Areas). El Radar no puede realizar búsquedas sin ciudades.", severity: 'error' });
@@ -1180,16 +1181,46 @@ const submitDecision = async (prospectId: string, action: string) => {
   const saveTenantConfig = async (e: React.FormEvent) => {
     e.preventDefault();
     const cities = tenantCitiesText
-      .split(/[;,\n]/)
+      // Commas belong to labels such as "Austin, TX"; delimit only by semicolon/newline.
+      .split(/[;\n]+/)
       .map(s => s.trim())
       .filter(Boolean);
     if (cities.length === 0) {
       setTenantSaveStatus("Escribe al menos una ciudad (ej: Austin, TX; Round Rock, TX).");
       return;
     }
+    const parseArrayField = (value?: string): string[] => {
+      if (!value) return [];
+      try {
+        const parsed = JSON.parse(value);
+        if (Array.isArray(parsed)) return parsed.map(v => String(v).trim()).filter(Boolean);
+      } catch { /* legacy/free-text values are treated as a single item */ }
+      return value.trim() ? value.split(/[;\n]+/).map(v => v.trim()).filter(Boolean) : [];
+    };
+    const explicitCountries = parseArrayField(tenantForm.countries_json);
+    const inferredCountries = Array.from(new Set(cities.map(city => {
+      const parts = city.split(',').map(v => v.trim());
+      const last = (parts[parts.length - 1] || '').toUpperCase();
+      const third = (parts[2] || '').toUpperCase();
+      const candidate = third || last;
+      return ({ UK: 'GB', GB: 'GB', IE: 'IE', AU: 'AU', NZ: 'NZ', ZA: 'ZA', US: 'US', CA: 'CA' } as Record<string, string>)[candidate] || '';
+    }).filter(Boolean)));
+    const subniches = parseArrayField(tenantForm.subniches_json);
     const payload = {
       ...tenantForm,
-      cities_json: JSON.stringify(cities)
+      tenant_id: String(tenantForm.tenant_id || '').trim(),
+      cities_json: JSON.stringify(cities),
+      cities,
+      trades: subniches,
+      subniches,
+      services: parseArrayField(tenantForm.services_json),
+      service_areas: parseArrayField(tenantForm.service_areas_json).length
+        ? parseArrayField(tenantForm.service_areas_json) : cities,
+      countries: explicitCountries.length ? explicitCountries : (inferredCountries.length ? inferredCountries : ['US']),
+      regions: parseArrayField(tenantForm.regions_json),
+      languages: parseArrayField(tenantForm.languages_json).length ? parseArrayField(tenantForm.languages_json) : ['en'],
+      icp_keywords: parseArrayField(tenantForm.icp_keywords_json),
+      allowed_markets: parseArrayField(tenantForm.allowed_markets_json)
     };
     try {
       const res = await fetch(`${apiUrl}/api/tenants/config`, {
@@ -2179,9 +2210,9 @@ const submitDecision = async (prospectId: string, action: string) => {
                                 Correo
                               </a>
                             )}
-                            {p.phone && (
+                            {p.phone && toWhatsAppUrl(p.phone, p.draft_body || '') && (
                               <a 
-                                href={`https://wa.me/1${String(p.phone || '').replace(/\D/g, '')}?text=${encodeURIComponent(p.draft_body || '')}`}
+                                href={toWhatsAppUrl(p.phone, p.draft_body || '')!}
                                 target="_blank" 
                                 rel="noreferrer" 
                                 className="px-2.5 py-1 rounded-lg bg-emerald-950/50 border border-emerald-800/40 text-emerald-300 hover:bg-emerald-900/60 flex items-center gap-1 font-bold"
@@ -2191,12 +2222,25 @@ const submitDecision = async (prospectId: string, action: string) => {
                                 }}
                               >
                                 <MessageSquare className="w-3.5 h-3.5 text-emerald-400" />
-                                WhatsApp
+                                WhatsApp <span className="text-[8px] opacity-70">· no verificado</span>
                               </a>
                             )}
-                            {p.phone && (
-                              <a 
-                                href={`tel:${p.phone}`}
+                            {p.phone && toSmsUrl(p.phone, p.draft_body || '') && (
+                              <a
+                                href={toSmsUrl(p.phone, p.draft_body || '')!}
+                                className="px-2.5 py-1 rounded-lg bg-sky-950/50 border border-sky-800/40 text-sky-300 hover:bg-sky-900/60 flex items-center gap-1 font-bold"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setContactedProspects(prev => ({ ...prev, [p.id]: true }));
+                                }}
+                              >
+                                <MessageSquare className="w-3.5 h-3.5 text-sky-400" />
+                                SMS
+                              </a>
+                            )}
+                            {p.phone && toTelUrl(p.phone) && (
+                              <a
+                                href={toTelUrl(p.phone)!}
                                 className="px-2.5 py-1 rounded-lg bg-indigo-950/50 border border-indigo-800/40 text-indigo-300 hover:bg-indigo-900/60 flex items-center gap-1 font-bold"
                                 onClick={(e) => {
                                   e.stopPropagation();
@@ -2312,14 +2356,22 @@ const submitDecision = async (prospectId: string, action: string) => {
                                         <p><span className="text-slate-500">SMS:</span> {attackKits[p.id].sms}</p>
                                         <p className="whitespace-pre-wrap"><span className="text-slate-500">Llamada:</span>{'\n'}{attackKits[p.id].call_script}</p>
                                         <p><span className="text-slate-500">Siguiente:</span> {attackKits[p.id].next_action}</p>
-                                        {p.phone && (
+                                        {p.phone && toWhatsAppUrl(p.phone, attackKits[p.id].sms || '') && (
                                           <a
-                                            href={`https://wa.me/1${String(p.phone).replace(/\D/g, '')}?text=${encodeURIComponent(attackKits[p.id].sms || '')}`}
+                                            href={toWhatsAppUrl(p.phone, attackKits[p.id].sms || '')!}
                                             target="_blank"
                                             rel="noreferrer"
                                             className="inline-block px-2 py-1 rounded bg-emerald-950/50 border border-emerald-800 text-emerald-300 font-bold"
                                           >
-                                            WhatsApp con SMS del kit
+                                            WhatsApp con texto del kit · no verificado
+                                          </a>
+                                        )}
+                                        {p.phone && toSmsUrl(p.phone, attackKits[p.id].sms || '') && (
+                                          <a
+                                            href={toSmsUrl(p.phone, attackKits[p.id].sms || '')!}
+                                            className="inline-block ml-2 px-2 py-1 rounded bg-sky-950/50 border border-sky-800 text-sky-300 font-bold"
+                                          >
+                                            Abrir SMS con texto del kit
                                           </a>
                                         )}
                                       </>
@@ -2737,14 +2789,14 @@ const submitDecision = async (prospectId: string, action: string) => {
                         const body: any = {
                           user_id: tenantForm.tenant_id || "tenant_custom_01",
                           tenant_name: tenantForm.tenant_name || "Mi Empresa Cliente",
-                          trade: (tenantForm.niche === "property_management" ? "hvac" : (tenantForm.niche || "hvac")),
+                          trade: (tenantForm.industry || tenantForm.niche || "").trim(),
                           source: "free_analysis_ui"
                         };
                         if (lat != null && lon != null) {
                           body.lat = lat;
                           body.lon = lon;
                         } else if (tenantCitiesText) {
-                          body.city = tenantCitiesText.split(/[;,\n]/)[0].trim();
+                          body.city = tenantCitiesText.split(/[;\n]+/)[0].trim();
                         }
                         const r = await fetch(`${apiUrl}/api/bvelt/bootstrap`, {
                           method: "POST",

@@ -114,12 +114,14 @@ export interface Env {
   TENANT_REFRESH_EVERY_CRON?: string;
   RADAR_JOBS_PER_RUN?: string;
   AI?: { run(model: string, input: any): Promise<any> };
+  BVELT_INGEST_URL?: string;
+  BVELT_INGEST_KEY?: string;
 }
 
 export function getBudgetLimit(unitType: string): number {
   switch (unitType) {
-    case 'discovery_units': return 45;
-    case 'enrichment_units': return 30;
+    case 'discovery_units': return 30;
+    case 'enrichment_units': return 20;
     case 'ai_units': return 10;
     case 'hunter_units': return 8;
     case 'outreach_units': return 3;
@@ -2393,18 +2395,28 @@ export default {
         console.warn("[Radar Cron] digest failed:", e);
       }
     })();
+    const bemSync = (async () => {
+      try {
+        await Promise.allSettled([heal, tenantRefresh]);
+        await pushMarketObservationsToBem(env);
+      } catch (e) {
+        console.warn("[Radar Cron] bem sync error:", e);
+      }
+    })();
     if (ctx && typeof ctx.waitUntil === "function") {
       ctx.waitUntil(heal);
       ctx.waitUntil(tenantRefresh);
       ctx.waitUntil(followUps);
       ctx.waitUntil(reconcile);
       ctx.waitUntil(digest);
+      ctx.waitUntil(bemSync);
     } else {
       await heal;
       await tenantRefresh;
       await followUps;
       await reconcile;
       await digest;
+      await bemSync;
     }
   },
 
@@ -8990,6 +9002,120 @@ export async function sendRadarDigest(
   const tg = await notifyFounder(env, d.text);
   return { sent: !!tg.ok, verdict: d.verdict, headline: d.headline, data: d.data, telegram: tg };
 }
+
+/**
+ * Push 24-hour market observations from D1 to BEM ingestion API
+ * and optionally notify Telegram via notifyOnce daily digest.
+ */
+export async function pushMarketObservationsToBem(env: Env): Promise<{
+  ok?: boolean;
+  skipped?: boolean;
+  reason?: string;
+  accepted?: number;
+  status?: number;
+}> {
+  const ingestUrl = env.BVELT_INGEST_URL ? String(env.BVELT_INGEST_URL).trim() : "";
+  const ingestKey = env.BVELT_INGEST_KEY ? String(env.BVELT_INGEST_KEY).trim() : "";
+
+  if (!ingestUrl || !ingestKey) {
+    return { skipped: true, reason: "missing_config" };
+  }
+
+  const day = new Date().toISOString().split("T")[0];
+
+  try {
+    const rows = await env.RADAR_DB.prepare(`
+      SELECT id, tenant_id, name, city, trade, website, phone, email, score, outcome, status, created_at
+      FROM prospects
+      WHERE created_at >= datetime('now', '-1 day')
+      ORDER BY created_at DESC
+      LIMIT 500
+    `).all();
+
+    const results = (rows?.results || []) as any[];
+
+    const items = results.map(row => {
+      const tid = row.tenant_id;
+      const isFounder = !tid || tid === "" || tid === "founder";
+      const websiteStr = row.website ? String(row.website).trim() : "";
+      const phoneStr = row.phone ? String(row.phone).trim() : "";
+      const emailStr = row.email ? String(row.email).trim() : "";
+      const parsedScore = Number(row.score);
+
+      return {
+        mode: isFounder ? "founder" : "tenant",
+        tenant_id: tid || "founder",
+        city: row.city || "",
+        trade: row.trade || "",
+        business_name: row.name || "",
+        has_website: Boolean(websiteStr && websiteStr.length > 3),
+        has_phone: Boolean(phoneStr && phoneStr.length > 0),
+        has_email: Boolean(emailStr && emailStr.length > 0),
+        score: (!isNaN(parsedScore) && row.score !== null && row.score !== undefined) ? parsedScore : null,
+        outcome: row.outcome || row.status || null,
+        identity_key: String(row.id),
+        source: "bvelt-radar"
+      };
+    });
+
+    const payload = {
+      source: "bvelt-radar",
+      observed_at: new Date().toISOString(),
+      run_id: `daily-${day}`,
+      items
+    };
+
+    let res: Response;
+    try {
+      res = await fetch(ingestUrl, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${ingestKey}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(12000)
+      });
+    } catch (fetchErr: any) {
+      console.warn(`[BEM Ingest] Network/Timeout error sending to ${ingestUrl}:`, fetchErr?.message || fetchErr);
+      return { ok: false, reason: fetchErr?.message || "fetch_failed" };
+    }
+
+    if (!res.ok) {
+      console.warn(`[BEM Ingest] Server returned status ${res.status}`);
+      return { ok: false, status: res.status };
+    }
+
+    // Tarea B — Telegram digest (máx 1 vez al día)
+    let founderCount = 0;
+    let tenantCount = 0;
+    let withoutWebCount = 0;
+    let withPhoneCount = 0;
+
+    for (const item of items) {
+      if (item.mode === "founder") founderCount++;
+      else tenantCount++;
+      if (!item.has_website) withoutWebCount++;
+      if (item.has_phone) withPhoneCount++;
+    }
+
+    const digestText = [
+      "BEM feed diario",
+      `Prospectos enviados: ${items.length}`,
+      `Founder: ${founderCount} | Tenant: ${tenantCount}`,
+      `Sin web: ${withoutWebCount} | Con teléfono: ${withPhoneCount}`,
+      `OK ingest`
+    ].join("\n");
+
+    await notifyOnce(env, `bem_daily_digest_${day}`, digestText);
+
+    return { ok: true, accepted: items.length, status: res.status };
+  } catch (err: any) {
+    console.warn("[BEM Ingest] Failed to process market observations:", err);
+    return { ok: false, reason: err?.message || String(err) };
+  }
+}
+
 
 
 export async function notifyFounder(

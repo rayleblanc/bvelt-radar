@@ -1126,6 +1126,105 @@ tests.push({
   }
 });
 
+// Test 39: pushMarketObservationsToBem safely handles missing config and formats payload correctly
+tests.push({
+  name: "pushMarketObservationsToBem skips cleanly without config and sends observations when configured",
+  run: async () => {
+    const { pushMarketObservationsToBem } = await import('./worker');
+
+    // 1. Without configuration
+    const emptyEnv = { RADAR_DB: {} as any } as any;
+    const skippedRes = await pushMarketObservationsToBem(emptyEnv);
+    assert(skippedRes.skipped === true, "Should return skipped: true when BVELT_INGEST_URL/KEY are missing");
+    assert(skippedRes.reason === "missing_config", "Reason should be missing_config");
+
+    // 2. With configuration & mock database
+    const mockProspects = [
+      {
+        id: "p_1",
+        tenant_id: "founder",
+        name: "Acme HVAC",
+        city: "Austin, TX",
+        trade: "hvac",
+        website: "https://acmehvac.com",
+        phone: "+15125550100",
+        email: "contact@acmehvac.com",
+        score: 82,
+        outcome: "sent",
+        status: "sent",
+        created_at: new Date().toISOString()
+      },
+      {
+        id: "p_2",
+        tenant_id: "t_tenant123",
+        name: "Lone Star Plumbing",
+        city: "Dallas, TX",
+        trade: "plumbing",
+        website: "",
+        phone: "+12145550200",
+        email: "",
+        score: 65,
+        outcome: null,
+        status: "queued",
+        created_at: new Date().toISOString()
+      }
+    ];
+
+    const tracker = { postCalled: false };
+    let postBody: any = null;
+    let authHeader: string = "";
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: any, init?: any) => {
+      if (String(url).includes("bvelt.app/api/radar/observations")) {
+        tracker.postCalled = true;
+        authHeader = init?.headers?.["Authorization"] || "";
+        postBody = JSON.parse(init?.body || "{}");
+        return new Response(JSON.stringify({ ok: true, accepted: 2 }), { status: 200 });
+      }
+      return originalFetch(url, init);
+    }) as any;
+
+    try {
+      const configuredEnv: any = {
+        BVELT_INGEST_URL: "https://bvelt.app/api/radar/observations",
+        BVELT_INGEST_KEY: "test_ingest_key_123",
+        TELEGRAM_BOT_TOKEN: "",
+        TELEGRAM_CHAT_ID: "",
+        RADAR_DB: {
+          prepare: (sql: string) => ({
+            all: async () => ({ results: mockProspects })
+          })
+        }
+      };
+
+      const pushRes = await pushMarketObservationsToBem(configuredEnv);
+      assert(pushRes.ok === true, "Push should succeed with HTTP 200");
+      assert(pushRes.accepted === 2, "Should report 2 accepted items");
+      assert(tracker.postCalled === true, "POST fetch must have been called");
+      assert(authHeader === "Bearer test_ingest_key_123", "Authorization header must be Bearer key");
+      assert(postBody.source === "bvelt-radar", "Payload source must be bvelt-radar");
+      assert(postBody.items.length === 2, "Payload must include 2 items");
+
+      const item1 = postBody.items[0];
+      assert(item1.mode === "founder", "Item 1 mode should be founder");
+      assert(item1.has_website === true, "Item 1 has_website should be true");
+      assert(item1.has_phone === true, "Item 1 has_phone should be true");
+      assert(item1.has_email === true, "Item 1 has_email should be true");
+      assert(item1.score === 82, "Item 1 score should be 82");
+
+      const item2 = postBody.items[1];
+      assert(item2.mode === "tenant", "Item 2 mode should be tenant");
+      assert(item2.tenant_id === "t_tenant123", "Item 2 tenant_id should match");
+      assert(item2.has_website === false, "Item 2 without website should have has_website false");
+      assert(item2.has_email === false, "Item 2 without email should have has_email false");
+      assert(item2.score === 65, "Item 2 score should be 65");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  }
+});
+
 // Run all test cases
 async function runTests() {
 
