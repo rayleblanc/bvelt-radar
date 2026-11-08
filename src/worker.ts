@@ -1876,16 +1876,16 @@ export default {
             updated_at = excluded.updated_at
         `).bind(
           tenantId,
-          body.tenant_name || "Bvelt Client",
-          body.industry || "General",
-          body.niche || "Target Prospect",
-          JSON.stringify(body.subniches || []),
-          JSON.stringify(body.services || []),
-          JSON.stringify(body.service_areas || []),
-          JSON.stringify(body.countries || ["US"]),
-          JSON.stringify(body.regions || []),
-          JSON.stringify(body.cities || []),
-          JSON.stringify(body.languages || ["en"]),
+          body.tenant_name || body.business_name || "",
+          body.industry || "",
+          body.niche || "",
+          JSON.stringify(Array.isArray(body.subniches) ? body.subniches : []),
+          JSON.stringify(Array.isArray(body.services) ? body.services : []),
+          JSON.stringify(Array.isArray(body.service_areas) ? body.service_areas : []),
+          JSON.stringify(Array.isArray(body.countries) ? body.countries : []),
+          JSON.stringify(Array.isArray(body.regions) ? body.regions : []),
+          JSON.stringify(Array.isArray(body.cities) ? body.cities : (body.city ? [body.city] : [])),
+          JSON.stringify(Array.isArray(body.languages) ? body.languages : []),
           body.icp_description || "",
           JSON.stringify(body.icp_keywords || []),
           body.minimum_score || 50,
@@ -1900,6 +1900,55 @@ export default {
         // Saving a profile must never launch discovery. Tenant discovery is
         // explicitly requested by the user or triggered by a recent app session.
         return Response.json({ success: true, tenant_id: tenantId, run_id: null, message: "Tenant config saved. Prospecting has not started." }, { headers: corsHeaders });
+      }
+
+      // 16a2. Explicit and activity-triggered Tenant prospecting.
+      // POST /api/tenants/search { tenant_id, trigger: "manual" | "activity" }
+      if ((path === "/api/tenants/search" || path === "/tenants/search") && method === "POST") {
+        const auth = resolveTenantAuthContext(request, env, serviceKey, validSessionHash);
+        if (!auth.authorized) return Response.json({ error: "Unauthorized" }, { status: 401, headers: corsHeaders });
+        const body: any = await request.json().catch(() => ({}));
+        const tenantId = String(body.tenant_id || auth.tenantId || "").trim();
+        const trigger = body.trigger === "activity" ? "activity" : "manual";
+        if (!tenantId || tenantId === "founder") return Response.json({ error: "tenant_id_required" }, { status: 400, headers: corsHeaders });
+        if (!auth.canAccessTenant(tenantId)) return Response.json({ error: "Forbidden" }, { status: 403, headers: corsHeaders });
+
+        const config: any = await env.RADAR_DB.prepare("SELECT tenant_id, niche, subniches_json, cities_json, countries_json, languages_json FROM tenant_config WHERE tenant_id = ?").bind(tenantId).first();
+        if (!config) return Response.json({ error: "tenant_configuration_not_found" }, { status: 404, headers: corsHeaders });
+        let cities: string[] = [];
+        let niches: string[] = [];
+        try { cities = JSON.parse(config.cities_json || "[]"); } catch {}
+        try { niches = JSON.parse(config.subniches_json || "[]"); } catch {}
+        if (!niches.length && config.niche) niches = [String(config.niche)];
+        cities = cities.map(v => String(v).trim()).filter(Boolean);
+        niches = niches.map(v => String(v).trim()).filter(Boolean);
+        if (!cities.length || !niches.length) {
+          return Response.json({ error: "tenant_profile_incomplete", missing_fields: [!niches.length ? "niche" : null, !cities.length ? "city" : null].filter(Boolean) }, { status: 409, headers: corsHeaders });
+        }
+
+        await env.RADAR_DB.prepare("CREATE TABLE IF NOT EXISTS tenant_refresh_log (tenant_id TEXT PRIMARY KEY, last_at TEXT NOT NULL)").run();
+        const previous: any = await env.RADAR_DB.prepare("SELECT last_at FROM tenant_refresh_log WHERE tenant_id = ?").bind(tenantId).first();
+        if (trigger === "activity" && previous?.last_at && Date.now() - Date.parse(previous.last_at) < 6 * 60 * 60 * 1000) {
+          return Response.json({ success: true, status: "recent_results_available", tenant_id: tenantId, last_started_at: previous.last_at }, { headers: corsHeaders });
+        }
+        if (previous?.last_at && Date.now() - Date.parse(previous.last_at) < 60 * 1000) {
+          return Response.json({ success: true, status: "already_started", tenant_id: tenantId }, { headers: corsHeaders });
+        }
+        const now = new Date().toISOString();
+        await env.RADAR_DB.prepare("INSERT INTO tenant_refresh_log (tenant_id, last_at) VALUES (?, ?) ON CONFLICT(tenant_id) DO UPDATE SET last_at = excluded.last_at").bind(tenantId, now).run();
+        try {
+          const runResult = await startProspectingRun(env, "tenant", tenantId, {
+            cities: cities.join(";"),
+            trades: niches.join(";"),
+            countries: config.countries_json ? JSON.parse(config.countries_json).join(";") : null,
+            languages: config.languages_json ? JSON.parse(config.languages_json).join(";") : null,
+            min_score: null
+          }, true);
+          return Response.json({ success: true, status: "started", tenant_id: tenantId, run_id: runResult.run_id, trigger }, { headers: corsHeaders });
+        } catch (error: any) {
+          await env.RADAR_DB.prepare("DELETE FROM tenant_refresh_log WHERE tenant_id = ? AND last_at = ?").bind(tenantId, now).run();
+          return Response.json({ error: error?.message || "tenant_search_failed" }, { status: 500, headers: corsHeaders });
+        }
       }
 
       // 16a2. Tenant leads CSV export
