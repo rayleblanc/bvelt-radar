@@ -56,3 +56,5 @@ enabled = true
 # Workers AI: Clef-flash classify + Llama copy fallback (10k Neurons/day free)
 [ai]
 binding = "AI"
+
+[previews]
