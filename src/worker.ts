@@ -233,7 +233,8 @@ export async function fetchPermitContractors(city: string, trade: string): Promi
       const issuedAt = dateValue ? Date.parse(String(dateValue)) : NaN;
       if (!Number.isFinite(issuedAt) || issuedAt < cutoff || issuedAt > Date.now() + 24 * 60 * 60 * 1000) continue;
       const description = [permit.description, permit.work_description, permit.permit_type].filter(Boolean).join(" ");
-      if (!tradePattern.test(`${name} ${description}`)) continue;
+      const permitText = `${name} ${description}`.toLowerCase().replace(/[_-]+/g, " ");
+      if (tradePattern ? !tradePattern.test(permitText) : !tradeKey || !permitText.includes(tradeKey)) continue;
       results.push({
         name,
         phone: permit.contractor_phone || permit.phone || null,
