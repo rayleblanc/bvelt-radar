@@ -9909,8 +9909,8 @@ export async function pushMarketObservationsToBem(env: Env): Promise<{
       SELECT id, tenant_id, name, city, trade, website, phone, email, score, outcome, status, created_at
       FROM prospects
       WHERE (tenant_id IS NULL OR tenant_id = '' OR tenant_id = 'founder')
-        AND (created_at > ? OR (created_at = ? AND id > ?))
-      ORDER BY created_at ASC, id ASC
+        AND (datetime(created_at) > datetime(?) OR (datetime(created_at) = datetime(?) AND id > ?))
+      ORDER BY datetime(created_at) ASC, id ASC
       LIMIT 500
     `).bind(cursorAt, cursorAt, cursorId).all();
 
