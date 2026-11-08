@@ -9889,14 +9889,30 @@ export async function pushMarketObservationsToBem(env: Env): Promise<{
   const day = new Date().toISOString().split("T")[0];
 
   try {
+    await env.RADAR_DB.prepare(`
+      CREATE TABLE IF NOT EXISTS radar_bem_sync_state (
+        scope TEXT PRIMARY KEY,
+        last_synced_at TEXT NOT NULL,
+        last_synced_id TEXT NOT NULL DEFAULT '',
+        updated_at TEXT NOT NULL
+      )
+    `).run();
+    const syncState = await env.RADAR_DB.prepare(
+      "SELECT last_synced_at, last_synced_id FROM radar_bem_sync_state WHERE scope = 'founder'"
+    ).first() as any;
+    // First activation backfills the latest 24 hours. Later runs advance a
+    // stable (created_at,id) cursor so the same Founder observations are not
+    // re-counted in BEM on every cron execution.
+    const cursorAt = String(syncState?.last_synced_at || new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString());
+    const cursorId = String(syncState?.last_synced_id || "");
     const rows = await env.RADAR_DB.prepare(`
       SELECT id, tenant_id, name, city, trade, website, phone, email, score, outcome, status, created_at
       FROM prospects
       WHERE (tenant_id IS NULL OR tenant_id = '' OR tenant_id = 'founder')
-        AND created_at >= datetime('now', '-1 day')
-      ORDER BY created_at DESC
+        AND (created_at > ? OR (created_at = ? AND id > ?))
+      ORDER BY created_at ASC, id ASC
       LIMIT 500
-    `).all();
+    `).bind(cursorAt, cursorAt, cursorId).all();
 
     const results = (rows?.results || []) as any[];
 
@@ -9925,10 +9941,14 @@ export async function pushMarketObservationsToBem(env: Env): Promise<{
       };
     });
 
+    if (items.length === 0) {
+      return { ok: true, skipped: true, reason: "no_new_founder_observations", accepted: 0 };
+    }
+
     const payload = {
       source: "bvelt-radar",
       observed_at: new Date().toISOString(),
-      run_id: `daily-${day}`,
+      run_id: `founder-cursor-${day}-${founderOnly[founderOnly.length - 1]?.id || "empty"}`,
       items
     };
 
@@ -9951,6 +9971,19 @@ export async function pushMarketObservationsToBem(env: Env): Promise<{
     if (!res.ok) {
       console.warn(`[BEM Ingest] Server returned status ${res.status}`);
       return { ok: false, status: res.status };
+    }
+
+    // Advance the cursor only after Bvelt confirms the batch was accepted.
+    const lastAccepted = founderOnly[founderOnly.length - 1];
+    if (lastAccepted?.created_at && lastAccepted?.id) {
+      await env.RADAR_DB.prepare(`
+        INSERT INTO radar_bem_sync_state (scope, last_synced_at, last_synced_id, updated_at)
+        VALUES ('founder', ?, ?, ?)
+        ON CONFLICT(scope) DO UPDATE SET
+          last_synced_at = excluded.last_synced_at,
+          last_synced_id = excluded.last_synced_id,
+          updated_at = excluded.updated_at
+      `).bind(String(lastAccepted.created_at), String(lastAccepted.id), new Date().toISOString()).run();
     }
 
     // Tarea B — Telegram digest (máx 1 vez al día, Founder observations)
