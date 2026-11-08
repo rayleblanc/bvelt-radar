@@ -4425,6 +4425,18 @@ export async function startProspectingRun(
   const dayOfYear = getDayOfYear(new Date());
   const { activeCities, activeTrades, pairs } = await getPriorityTargets(dayOfYear, env, mode, tenantId, overrides);
 
+  if (mode === "tenant" && (!activeTrades || activeTrades.length === 0)) {
+    return {
+      run_id: "no_buyer_segments",
+      jobs_enqueued: 0,
+      active_cities: activeCities || [],
+      active_trades: [],
+      diagnostics: {
+        reason: "No buyer segments could be derived from this tenant's business profile. Add a supported niche or configure ICP buyer segments before discovery."
+      }
+    };
+  }
+
   // Abort early if no valid cities (tenant without config, or empty founder markets)
   if ((!activeCities || activeCities.length === 0) && (!pairs || pairs.length === 0)) {
     const reason = mode === "tenant"
@@ -6869,26 +6881,32 @@ export async function getPriorityTargets(
       if (tenantConfig) {
         try {
           config.geographies = JSON.parse(tenantConfig.cities_json || '[]');
-          config.niches = JSON.parse(tenantConfig.trades_json || '[]');
+          // Tenant discovery targets the tenant's BUYERS, not its own trade or
+          // Founder defaults. trades_json is not part of the tenant_config schema.
+          config.niches = [];
           config.mode = "tenant";
           config.target = `tenant_${tenantId}_customers`;
-          if (tenantConfig.countries_json) config.countries = JSON.parse(tenantConfig.countries_json);
-          if (tenantConfig.languages_json) config.languages = JSON.parse(tenantConfig.languages_json);
-          
-          // If niches are empty, use expandTenantIcp or fallback to TENANT_TARGET_MAP
-          if (config.niches.length === 0) {
-            if (!skipPicks) {
-              const expanded = await expandTenantIcp(env, tenantConfig);
-              if (expanded && expanded.segments && expanded.segments.length > 0) {
-                config.niches = expanded.segments.map(s => s.label);
-              } else if (tenantConfig.niche) {
-                const trade = tenantConfig.niche.toLowerCase();
-                config.niches = TENANT_TARGET_MAP[trade] || ["property management", "real estate"];
-              }
-            } else if (tenantConfig.niche) {
-              const trade = tenantConfig.niche.toLowerCase();
-              config.niches = TENANT_TARGET_MAP[trade] || ["property management", "real estate"];
+          config.countries = JSON.parse(tenantConfig.countries_json || '[]');
+          config.languages = JSON.parse(tenantConfig.languages_json || '[]');
+          config.services = JSON.parse(tenantConfig.services_json || '[]');
+          config.icp = {
+            description: String(tenantConfig.icp_description || ""),
+            keywords: JSON.parse(tenantConfig.icp_keywords_json || '[]')
+          };
+          config.min_score = Number(tenantConfig.minimum_score ?? 50);
+          config.max_daily_outreach = 0;
+
+          // Prefer an AI-generated ICP of likely recurring buyers. Use the
+          // curated map only for recognized trades; unknown trades fail closed.
+          if (!skipPicks) {
+            const expanded = await expandTenantIcp(env, tenantConfig);
+            if (expanded?.segments?.length) {
+              config.niches = expanded.segments.map(s => s.label);
             }
+          }
+          if (config.niches.length === 0 && tenantConfig.niche) {
+            const tradeKey = String(tenantConfig.niche).trim().toLowerCase().replace(/\\s+/g, "_");
+            config.niches = TENANT_TARGET_MAP[tradeKey] || TENANT_TARGET_MAP[String(tenantConfig.niche).trim().toLowerCase()] || [];
           }
         } catch (e) {
           console.error("Error parsing tenant config: ", e);
@@ -6896,15 +6914,15 @@ export async function getPriorityTargets(
 
         const citiesList = JSON.parse(tenantConfig.cities_json || '[]');
         const centerLabel = citiesList[0] || null;
-        if (centerLabel && !skipPicks) {
+        if (centerLabel && !skipPicks && config.niches.length > 0) {
           try {
             tenantPicks = await pickTargets(env.RADAR_DB, {
               tenantId,
-              trades: config.niches.length > 0 ? config.niches : ["property management"],
+              trades: config.niches,
               count: 6,
               centerLabel,
               serviceRadiusKm: Number(tenantConfig.service_radius_km || 60),
-              countries: ["US", "CA"],
+              countries: config.countries,
               allowedCities: citiesList
             });
           } catch (e) {
@@ -6928,10 +6946,7 @@ export async function getPriorityTargets(
     // Tenant mode without tenant_id — refuse to invent data
     config.geographies = [];
     config.niches = [];
-    config.icp = {
-      description: "Local B2B businesses with recurrent maintenance needs.",
-      keywords: ["property management", "estate agent", "hotel"]
-    };
+    config.icp = { description: "", keywords: [] };
   } else {
     // Founder mode
     if (env.FOUNDING_CITIES) {
