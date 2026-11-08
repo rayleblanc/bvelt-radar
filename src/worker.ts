@@ -9889,7 +9889,7 @@ export async function pushMarketObservationsToBem(env: Env): Promise<{
     // First activation backfills the latest 24 hours. Later runs advance a
     // stable (created_at,id) cursor so the same Founder observations are not
     // re-counted in BEM on every cron execution.
-    const cursorAt = String(syncState?.last_synced_at || new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString());
+    const cursorAt = String(syncState?.last_synced_at || "1970-01-01T00:00:00.000Z");
     const cursorId = String(syncState?.last_synced_id || "");
     const rows = await env.RADAR_DB.prepare(`
       SELECT id, tenant_id, name, city, trade, website, phone, email, score, outcome, status, created_at
