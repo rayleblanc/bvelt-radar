@@ -1941,19 +1941,49 @@ export default {
         try {
           const runResult = await startProspectingRun(env, "tenant", tenantId, {
             cities: cities.join(";"),
-            // Leave trades unset so getPriorityTargets expands the tenant's own business niche
-            // through TENANT_TARGET_MAP instead of prospecting for more businesses like itself.
+            // Leave trades unset so getPriorityTargets derives the tenant's buyer segments.
             trades: null,
             countries: config.countries_json ? JSON.parse(config.countries_json).join(";") : null,
             languages: config.languages_json ? JSON.parse(config.languages_json).join(";") : null,
             min_score: null
           }, true);
+
+          if (runResult.run_id === "no_buyer_segments" || runResult.run_id === "no_cities") {
+            await env.RADAR_DB.prepare("DELETE FROM tenant_refresh_log WHERE tenant_id = ? AND last_at = ?").bind(tenantId, now).run();
+            return Response.json({
+              success: false,
+              status: runResult.run_id,
+              tenant_id: tenantId,
+              diagnostics: runResult.diagnostics
+            }, { status: 409, headers: corsHeaders });
+          }
+          if (runResult.run_id === "paused") {
+            await env.RADAR_DB.prepare("DELETE FROM tenant_refresh_log WHERE tenant_id = ? AND last_at = ?").bind(tenantId, now).run();
+            return Response.json({
+              success: false,
+              status: "paused",
+              tenant_id: tenantId,
+              diagnostics: runResult.diagnostics
+            }, { status: 503, headers: corsHeaders });
+          }
+
           const syncResult = await sendTenantObservationsToBvelt(env, tenantId, { limit: 100 }).catch(() => ({
             skipped: true,
             reason: "tenant_ingest_sync_failed",
             tenant_id: tenantId
           }));
-          return Response.json({ success: true, status: "started", tenant_id: tenantId, run_id: runResult.run_id, trigger, sync: syncResult }, { headers: corsHeaders });
+          return Response.json({
+            success: true,
+            status: runResult.jobs_enqueued > 0 ? "started" : "no_new_jobs",
+            tenant_id: tenantId,
+            run_id: runResult.run_id,
+            jobs_enqueued: runResult.jobs_enqueued,
+            active_cities: runResult.active_cities,
+            active_trades: runResult.active_trades,
+            diagnostics: runResult.diagnostics,
+            trigger,
+            sync: syncResult
+          }, { headers: corsHeaders });
         } catch (error: any) {
           await env.RADAR_DB.prepare("DELETE FROM tenant_refresh_log WHERE tenant_id = ? AND last_at = ?").bind(tenantId, now).run();
           return Response.json({ error: error?.message || "tenant_search_failed" }, { status: 500, headers: corsHeaders });
