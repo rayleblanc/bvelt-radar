@@ -1,6 +1,6 @@
 declare const process: any;
 
-import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem } from './worker';
+import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, resolveTenantBuyerSegments } from './worker';
 import { DEFAULT_FOUNDER_MISSION, MissionConfig } from './worker';
 import { fetchPermitContractors } from './permitSources';
 
@@ -22,6 +22,18 @@ function assert(condition: boolean, message: string) {
     throw new Error(message);
   }
 }
+
+tests.push({
+  name: "Tenant buyer segments never fall back to the tenant's own trade or generic unrelated markets",
+  run: () => {
+    const hvacBuyers = resolveTenantBuyerSegments("HVAC");
+    assert(hvacBuyers.length > 0, "Known tenant trade should resolve buyer segments");
+    assert(!hvacBuyers.some(value => value.toLowerCase() === "hvac"), "Tenant must not prospect for more HVAC businesses");
+    assert(resolveTenantBuyerSegments("specialized unknown service").length === 0, "Unknown trade must fail closed instead of defaulting to property management");
+    const aiSegments = resolveTenantBuyerSegments("unknown", ["medical clinics", "property groups"]);
+    assert(aiSegments.length === 2 && aiSegments[0] === "medical clinics", "Validated AI buyer segments must take precedence");
+  }
+});
 
 // Test 1: Market-Agnostic config rotation with custom geographies, countries, and niches
 tests.push({
@@ -1269,7 +1281,7 @@ tests.push({
         const tenantRes = await sendTenantObservationsToBvelt(tenantEnv, "t_tenant123");
         assert(tenantRes.ok === true, "Tenant observation push must succeed");
         assert(tenantRes.sent_count === 1, "Should send 1 tenant prospect");
-        assert(tenantPostCalled === true, "Fetch must be invoked for tenant push");
+        assert(Boolean(tenantPostCalled), "Fetch must be invoked for tenant push");
         assert(tenantHeaderTenantId === "t_tenant123", "X-Bvelt-Tenant-Id header must match tenant ID");
         assert(tenantPostBody.tenant_id === "t_tenant123", "Payload tenant_id must be t_tenant123");
         assert(tenantPostBody.items[0].name === "Lone Star Plumbing", "Item should be Lone Star Plumbing");
@@ -2091,6 +2103,39 @@ tests.push({
     assert(parsedSignals.scrapling !== undefined, "Canonical scrapling property must exist");
     assert(parsedSignals.signals?.scrapling !== undefined, "Canonical signals.scrapling property must exist");
     assert(parsedSignals.scrapling.facts.page_title === "Test Business Homepage", "Facts must include extracted page_title");
+  }
+});
+
+// Test 45: Tenant auth is scoped; ingestion credentials cannot access admin routes.
+tests.push({
+  name: "Tenant auth: Radar service is tenant-scoped and ingest key is not an admin credential",
+  run: async () => {
+    const env: any = {
+      FOUNDER_SERVICE_KEY: "founder-secret",
+      RADAR_SERVICE_KEY: "radar-service-secret",
+      BVELT_INGEST_KEY: "ingest-only-secret"
+    };
+    const tenantRequest = new Request("https://radar.test/api/tenants/config", {
+      headers: { "Authorization": "Bearer radar-service-secret", "X-Tenant-Id": "tenant_alpha" }
+    });
+    const tenantAuth = resolveTenantAuthContext(tenantRequest, env, "founder-secret", "");
+    assert(tenantAuth.authorized, "Radar service with explicit tenant scope must authenticate");
+    assert(tenantAuth.canAccessTenant("tenant_alpha"), "Radar service must access its declared tenant");
+    assert(!tenantAuth.canAccessTenant("tenant_beta"), "Radar service must not cross tenant boundaries");
+    assert(!tenantAuth.canAccessTenant("founder"), "Radar service must not access Founder scope");
+
+    const ingestRequest = new Request("https://radar.test/api/tenants/config", {
+      headers: { "Authorization": "Bearer ingest-only-secret", "X-Tenant-Id": "tenant_alpha" }
+    });
+    const ingestAuth = resolveTenantAuthContext(ingestRequest, env, "founder-secret", "");
+    assert(!ingestAuth.authorized, "BEM ingestion key must not authenticate tenant/admin APIs");
+    assert(!isAuthorized(ingestRequest, env, "founder-secret", ""), "BEM ingestion key must not authorize /run or admin routes");
+
+    const founderRequest = new Request("https://radar.test/api/tenants/config", {
+      headers: { "Authorization": "Bearer founder-secret" }
+    });
+    const founderAuth = resolveTenantAuthContext(founderRequest, env, "founder-secret", "");
+    assert(founderAuth.authorized && founderAuth.canAccessTenant("tenant_beta"), "Founder credential retains administrative access");
   }
 });
 

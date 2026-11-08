@@ -121,6 +121,8 @@ export interface Env {
   RADAR_RESEARCH_REPOSITORY?: string;
   RADAR_SIDECAR_CALLBACK_KEY?: string;
   RADAR_SERVICE_KEY?: string;
+  BVELT_TENANT_INGEST_URL?: string;
+  BVELT_TENANT_INGEST_KEY?: string;
 }
 
 export function getBudgetLimit(unitType: string): number {
@@ -415,6 +417,24 @@ const TENANT_TARGET_MAP: Record<string, string[]> = {
   locksmith: ["property management", "apartment complex", "hotel", "real estate", "facility manager"],
 };
 
+export function resolveTenantBuyerSegments(
+  niche: string,
+  expandedSegments: Array<string | { label?: string }> = []
+): string[] {
+  const expanded = Array.from(new Set(
+    expandedSegments
+      .map(segment => typeof segment === "string" ? segment : String(segment?.label || ""))
+      .map(label => label.trim())
+      .filter(Boolean)
+  ));
+  if (expanded.length) return expanded.slice(0, 6);
+
+  const normalized = String(niche || "").trim().toLowerCase();
+  const key = normalized.replace(/\\s+/g, "_");
+  const mapped = TENANT_TARGET_MAP[key] || TENANT_TARGET_MAP[normalized] || [];
+  return [...mapped];
+}
+
 // OSM Tag mappings by trade for high-precision Overpass queries (contractor field operators, not retail stores)
 const OVERPASS_TRADE_TAGS: Record<string, string[]> = {
   plumbing: [
@@ -500,12 +520,10 @@ export function isAuthorized(request: Request, env: Env, serviceKey?: string, va
     return true;
   }
   const bearerToken = authHeader && authHeader.startsWith("Bearer ") ? authHeader.split(" ")[1] : null;
-  if (bearerToken) {
-    if (serviceKey && bearerToken === serviceKey) return true;
-    if (env.FOUNDER_SERVICE_KEY && bearerToken === env.FOUNDER_SERVICE_KEY) return true;
-    if (env.RADAR_SERVICE_KEY && bearerToken === env.RADAR_SERVICE_KEY) return true;
-    if (env.BVELT_INGEST_KEY && bearerToken === env.BVELT_INGEST_KEY) return true;
-  }
+  // Only the founder credential may access global/admin routes. Service ingestion
+  // credentials are deliberately not accepted here.
+  if (bearerToken && ((serviceKey && bearerToken === serviceKey) ||
+      (env.FOUNDER_SERVICE_KEY && bearerToken === env.FOUNDER_SERVICE_KEY))) return true;
   return false;
 }
 
@@ -527,42 +545,31 @@ export function resolveTenantAuthContext(
   const sessionCookie = parsedCookies["bvelt_session"];
   const tenantCookie = parsedCookies["bvelt_tenant_id"];
 
-  // 1. Service-to-service key (RADAR_SERVICE_KEY, FOUNDER_SERVICE_KEY, BVELT_INGEST_KEY)
-  const isService = Boolean(
-    bearerToken && (
-      (serviceKey && bearerToken === serviceKey) ||
-      (env.FOUNDER_SERVICE_KEY && bearerToken === env.FOUNDER_SERVICE_KEY) ||
-      (env.RADAR_SERVICE_KEY && bearerToken === env.RADAR_SERVICE_KEY) ||
-      (env.BVELT_INGEST_KEY && bearerToken === env.BVELT_INGEST_KEY)
-    )
-  );
-
-  // 2. Founder session (verified session cookie)
+  // Founder credentials retain global administrative access. RADAR_SERVICE_KEY
+  // is restricted to the single tenant explicitly supplied by the trusted Bvelt
+  // server-to-server caller. The ingestion key is never an API authentication key.
+  const isFounderService = Boolean(bearerToken && (
+    (serviceKey && bearerToken === serviceKey) ||
+    (env.FOUNDER_SERVICE_KEY && bearerToken === env.FOUNDER_SERVICE_KEY)
+  ));
+  const isRadarService = Boolean(bearerToken && env.RADAR_SERVICE_KEY && bearerToken === env.RADAR_SERVICE_KEY);
+  const isService = isFounderService || isRadarService;
   const isFounderSession = Boolean(validSessionHash && sessionCookie === validSessionHash);
-
-  // 3. Tenant scoping
   const headerTenantId = request.headers.get("X-Tenant-Id") || request.headers.get("x-tenant-id");
-  let callerTenantId: string | null = null;
-  if (isFounderSession) {
-    callerTenantId = "founder";
-  } else if (tenantCookie) {
-    callerTenantId = tenantCookie;
-  } else if (headerTenantId) {
-    callerTenantId = headerTenantId;
-  }
-
-  const authorized = isService || isFounderSession;
+  const callerTenantId: string | null = isFounderSession || isFounderService
+    ? "founder"
+    : (headerTenantId || tenantCookie || null);
+  const authorized = isFounderService || isFounderSession || (isRadarService && !!callerTenantId && callerTenantId !== "founder");
 
   return {
     authorized,
     isService,
-    isFounderSession,
+    isFounderSession: isFounderSession || isFounderService,
     tenantId: callerTenantId,
     canAccessTenant: (targetTenant: string | null | undefined): boolean => {
-      if (!authorized) return false;
-      if (isService || isFounderSession) return true;
-      if (!targetTenant) return false;
-      return callerTenantId === targetTenant;
+      if (!authorized || !targetTenant) return false;
+      if (isFounderService || isFounderSession) return true;
+      return isRadarService && callerTenantId === targetTenant && targetTenant !== "founder";
     }
   };
 }
@@ -583,7 +590,7 @@ export default {
     const corsHeaders: Record<string, string> = {
       "Access-Control-Allow-Origin": allowOriginHeader,
       "Access-Control-Allow-Methods": "GET, POST, OPTIONS, DELETE",
-      "Access-Control-Allow-Headers": "Content-Type, Authorization",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Tenant-Id",
       "Access-Control-Allow-Credentials": "true"
     };
 
@@ -1840,7 +1847,7 @@ export default {
           const tenant = await env.RADAR_DB.prepare("SELECT * FROM tenant_config WHERE tenant_id = ?").bind(tenantId).first();
           return Response.json(tenant || { error: "Tenant config not found" }, { headers: corsHeaders });
         }
-        if (!auth.isService && !auth.isFounderSession) {
+        if (!auth.isFounderSession) {
           return Response.json({ error: "Forbidden: tenant listing requires administrative privileges" }, { status: 403, headers: corsHeaders });
         }
         const tenants = await env.RADAR_DB.prepare("SELECT * FROM tenant_config ORDER BY tenant_id ASC").all();
@@ -1889,20 +1896,20 @@ export default {
             updated_at = excluded.updated_at
         `).bind(
           tenantId,
-          body.tenant_name || "Bvelt Client",
-          body.industry || "General",
-          body.niche || "Target Prospect",
-          JSON.stringify(body.subniches || []),
-          JSON.stringify(body.services || []),
-          JSON.stringify(body.service_areas || []),
-          JSON.stringify(body.countries || ["US"]),
-          JSON.stringify(body.regions || []),
-          JSON.stringify(body.cities || []),
-          JSON.stringify(body.languages || ["en"]),
+          body.tenant_name || body.business_name || "",
+          body.industry || "",
+          body.niche || "",
+          JSON.stringify(Array.isArray(body.subniches) ? body.subniches : []),
+          JSON.stringify(Array.isArray(body.services) ? body.services : []),
+          JSON.stringify(Array.isArray(body.service_areas) ? body.service_areas : []),
+          JSON.stringify(Array.isArray(body.countries) ? body.countries : []),
+          JSON.stringify(Array.isArray(body.regions) ? body.regions : []),
+          JSON.stringify(Array.isArray(body.cities) ? body.cities : (body.city ? [body.city] : [])),
+          JSON.stringify(Array.isArray(body.languages) ? body.languages : []),
           body.icp_description || "",
           JSON.stringify(body.icp_keywords || []),
-          body.minimum_score || 50,
-          body.daily_outreach_limit || 10,
+          body.minimum_score ?? 50,
+          body.daily_outreach_limit ?? 10,
           JSON.stringify(body.allowed_markets || []),
           body.campaign_goal || "",
           body.messaging_angle || "",
@@ -1910,19 +1917,95 @@ export default {
           timestamp
         ).run();
 
-        let runId = null;
-        try {
-          const runPromise = startProspectingRun(env, "tenant", tenantId, undefined, true);
-          if (ctx && typeof ctx.waitUntil === "function") {
-            ctx.waitUntil(runPromise);
-          }
-          const runRes = await runPromise;
-          runId = runRes.run_id;
-        } catch (e) {
-          console.error("Error executing tenant prospecting run on config save:", e);
+        // Saving a profile must never launch discovery. Tenant discovery is
+        // explicitly requested by the user or triggered by a recent app session.
+        return Response.json({ success: true, tenant_id: tenantId, run_id: null, message: "Tenant config saved. Prospecting has not started." }, { headers: corsHeaders });
+      }
+
+      // 16a2. Explicit and activity-triggered Tenant prospecting.
+      // POST /api/tenants/search { tenant_id, trigger: "manual" | "activity" }
+      if ((path === "/api/tenants/search" || path === "/tenants/search") && method === "POST") {
+        const auth = resolveTenantAuthContext(request, env, serviceKey, validSessionHash);
+        if (!auth.authorized) return Response.json({ error: "Unauthorized" }, { status: 401, headers: corsHeaders });
+        const body: any = await request.json().catch(() => ({}));
+        const tenantId = String(body.tenant_id || auth.tenantId || "").trim();
+        const trigger = body.trigger === "activity" ? "activity" : "manual";
+        if (!tenantId || tenantId === "founder") return Response.json({ error: "tenant_id_required" }, { status: 400, headers: corsHeaders });
+        if (!auth.canAccessTenant(tenantId)) return Response.json({ error: "Forbidden" }, { status: 403, headers: corsHeaders });
+
+        const config: any = await env.RADAR_DB.prepare("SELECT tenant_id, niche, subniches_json, cities_json, countries_json, languages_json FROM tenant_config WHERE tenant_id = ?").bind(tenantId).first();
+        if (!config) return Response.json({ error: "tenant_configuration_not_found" }, { status: 404, headers: corsHeaders });
+        let cities: string[] = [];
+        let niches: string[] = [];
+        try { cities = JSON.parse(config.cities_json || "[]"); } catch {}
+        try { niches = JSON.parse(config.subniches_json || "[]"); } catch {}
+        if (!niches.length && config.niche) niches = [String(config.niche)];
+        cities = cities.map(v => String(v).trim()).filter(Boolean);
+        niches = niches.map(v => String(v).trim()).filter(Boolean);
+        if (!cities.length || !niches.length) {
+          return Response.json({ error: "tenant_profile_incomplete", missing_fields: [!niches.length ? "niche" : null, !cities.length ? "city" : null].filter(Boolean) }, { status: 409, headers: corsHeaders });
         }
 
-        return Response.json({ success: true, tenant_id: tenantId, run_id: runId, message: "Tenant config saved successfully." }, { headers: corsHeaders });
+        await env.RADAR_DB.prepare("CREATE TABLE IF NOT EXISTS tenant_refresh_log (tenant_id TEXT PRIMARY KEY, last_at TEXT NOT NULL)").run();
+        const previous: any = await env.RADAR_DB.prepare("SELECT last_at FROM tenant_refresh_log WHERE tenant_id = ?").bind(tenantId).first();
+        if (trigger === "activity" && previous?.last_at && Date.now() - Date.parse(previous.last_at) < 6 * 60 * 60 * 1000) {
+          return Response.json({ success: true, status: "recent_results_available", tenant_id: tenantId, last_started_at: previous.last_at }, { headers: corsHeaders });
+        }
+        if (previous?.last_at && Date.now() - Date.parse(previous.last_at) < 60 * 1000) {
+          return Response.json({ success: true, status: "already_started", tenant_id: tenantId }, { headers: corsHeaders });
+        }
+        const now = new Date().toISOString();
+        await env.RADAR_DB.prepare("INSERT INTO tenant_refresh_log (tenant_id, last_at) VALUES (?, ?) ON CONFLICT(tenant_id) DO UPDATE SET last_at = excluded.last_at").bind(tenantId, now).run();
+        try {
+          const runResult = await startProspectingRun(env, "tenant", tenantId, {
+            cities: cities.join(";"),
+            // Leave trades unset so getPriorityTargets derives the tenant's buyer segments.
+            trades: null,
+            countries: config.countries_json ? JSON.parse(config.countries_json).join(";") : null,
+            languages: config.languages_json ? JSON.parse(config.languages_json).join(";") : null,
+            min_score: null
+          }, true);
+
+          if (runResult.run_id === "no_buyer_segments" || runResult.run_id === "no_cities") {
+            await env.RADAR_DB.prepare("DELETE FROM tenant_refresh_log WHERE tenant_id = ? AND last_at = ?").bind(tenantId, now).run();
+            return Response.json({
+              success: false,
+              status: runResult.run_id,
+              tenant_id: tenantId,
+              diagnostics: runResult.diagnostics
+            }, { status: 409, headers: corsHeaders });
+          }
+          if (runResult.run_id === "paused") {
+            await env.RADAR_DB.prepare("DELETE FROM tenant_refresh_log WHERE tenant_id = ? AND last_at = ?").bind(tenantId, now).run();
+            return Response.json({
+              success: false,
+              status: "paused",
+              tenant_id: tenantId,
+              diagnostics: runResult.diagnostics
+            }, { status: 503, headers: corsHeaders });
+          }
+
+          const syncResult = await sendTenantObservationsToBvelt(env, tenantId, { limit: 100 }).catch(() => ({
+            skipped: true,
+            reason: "tenant_ingest_sync_failed",
+            tenant_id: tenantId
+          }));
+          return Response.json({
+            success: true,
+            status: runResult.jobs_enqueued > 0 ? "started" : "no_new_jobs",
+            tenant_id: tenantId,
+            run_id: runResult.run_id,
+            jobs_enqueued: runResult.jobs_enqueued,
+            active_cities: runResult.active_cities,
+            active_trades: runResult.active_trades,
+            diagnostics: runResult.diagnostics,
+            trigger,
+            sync: syncResult
+          }, { headers: corsHeaders });
+        } catch (error: any) {
+          await env.RADAR_DB.prepare("DELETE FROM tenant_refresh_log WHERE tenant_id = ? AND last_at = ?").bind(tenantId, now).run();
+          return Response.json({ error: error?.message || "tenant_search_failed" }, { status: 500, headers: corsHeaders });
+        }
       }
 
       // 16a2. Tenant leads CSV export
@@ -2063,6 +2146,10 @@ export default {
         } catch (e) {
           console.warn("[Outcome] Failed to update prospects outcome (missing migration?):", e);
         }
+
+        await sendTenantObservationsToBvelt(env, tenant_id, {
+          prospectIds: [String(prospect_id)]
+        }).catch((error) => console.warn("[Tenant Bvelt Sync] Outcome sync failed:", error));
 
         if ((outcome === "replied" || outcome === "won") && prospect.city && prospect.trade) {
           try {
@@ -2699,50 +2786,9 @@ export default {
         console.warn("[Radar Cron] opportunity heal failed:", e);
       }
     })();
-    // Refresco de tenants: antes el cron solo corría el modo founder, y los clientes de Bvelt
-    // dejaban de recibir leads nuevos después del primer bootstrap.
-    const tenantRefresh = (async () => {
-      try {
-        await pruneRadarCache(env);
-        await run.catch(() => undefined);
-        // Reparto justo (round-robin): se refresca primero al tenant que lleva más tiempo sin refresco.
-        // Antes: siempre los 3 más recientes => con 200 clientes, el resto nunca se actualizaba.
-        const maxTenants = Math.max(0, Math.min(10, parseInt((env as any).TENANT_REFRESH_PER_CRON || "2", 10) || 2));
-        if (maxTenants === 0) return;
-        await env.RADAR_DB.prepare(`CREATE TABLE IF NOT EXISTS tenant_refresh_log (tenant_id TEXT PRIMARY KEY, last_at TEXT NOT NULL)`).run();
-        const rows = await env.RADAR_DB.prepare(`
-          SELECT c.tenant_id, c.niche, c.subniches_json, c.cities_json
-          FROM tenant_config c
-          LEFT JOIN tenant_refresh_log l ON l.tenant_id = c.tenant_id
-          WHERE c.tenant_id IS NOT NULL AND c.tenant_id != '' AND c.tenant_id != 'founder'
-          ORDER BY COALESCE(l.last_at, '') ASC, c.updated_at ASC
-          LIMIT ?
-        `).bind(maxTenants).all();
-        const dayOfYear = Math.floor((Date.now() - Date.UTC(new Date().getUTCFullYear(), 0, 0)) / 86400000);
-        for (const t of (rows.results || []) as any[]) {
-          let city = "";
-          try { city = String((JSON.parse(t.cities_json || "[]") as any[])[0] || ""); } catch { /* ignore */ }
-          if (!city) continue;
-          // Rota entre TODOS los compradores del cliente (administradores, HOA, hoteles...), no solo uno
-          let pool: string[] = [];
-          try { pool = (JSON.parse(t.subniches_json || "[]") as any[]).map(x => String(x).toLowerCase()); } catch { /* ignore */ }
-          if (!pool.length && t.niche) pool = [String(t.niche).toLowerCase()];
-          const pick = pool.length ? pool[dayOfYear % pool.length] : "property management";
-          const trade = /hotel|motel|resort|inn\b/.test(pick) ? "hotel" : /hoa|homeowner/.test(pick) ? "hoa" : "property management";
-          try {
-            await startProspectingRun(env, "tenant", t.tenant_id, {
-              cities: city, trades: trade, countries: null, languages: null, min_score: null
-            });
-            await env.RADAR_DB.prepare(`INSERT OR REPLACE INTO tenant_refresh_log (tenant_id, last_at) VALUES (?, ?)`)
-              .bind(t.tenant_id, new Date().toISOString()).run();
-          } catch (e) {
-            console.warn("[Radar Cron] tenant refresh failed for", t.tenant_id, e);
-          }
-        }
-      } catch (e) {
-        console.warn("[Radar Cron] tenant refresh error:", e);
-      }
-    })();
+    // Tenant prospecting is demand-driven. The global Cron must never start
+    // discovery for customer tenants; it only runs Founder and maintenance work.
+    const tenantRefresh = Promise.resolve();
     const followUps = (async () => {
       try {
         if (!env.RADAR_DB) return;
@@ -2788,7 +2834,7 @@ export default {
     // Latido + alerta de bloqueo: sin esto, un radar bloqueado o sin resultados se ve igual que uno muerto.
     const digest = (async () => {
       try {
-        await Promise.allSettled([heal, tenantRefresh]);
+        await heal.catch(() => undefined);
         const hour = new Date((event as any)?.scheduledTime || Date.now()).getUTCHours();
         await sendRadarDigest(env, { scheduledHourUtc: hour });
       } catch (e) {
@@ -4427,6 +4473,18 @@ export async function startProspectingRun(
   const dayOfYear = getDayOfYear(new Date());
   const { activeCities, activeTrades, pairs } = await getPriorityTargets(dayOfYear, env, mode, tenantId, overrides);
 
+  if (mode === "tenant" && (!activeTrades || activeTrades.length === 0)) {
+    return {
+      run_id: "no_buyer_segments",
+      jobs_enqueued: 0,
+      active_cities: activeCities || [],
+      active_trades: [],
+      diagnostics: {
+        reason: "No buyer segments could be derived from this tenant's business profile. Add a supported niche or configure ICP buyer segments before discovery."
+      }
+    };
+  }
+
   // Abort early if no valid cities (tenant without config, or empty founder markets)
   if ((!activeCities || activeCities.length === 0) && (!pairs || pairs.length === 0)) {
     const reason = mode === "tenant"
@@ -6046,6 +6104,9 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
 
   if (isTenant) {
     await env.RADAR_DB.prepare("UPDATE prospects SET status = 'qualified' WHERE id = ?").bind(prospect_id).run();
+    await sendTenantObservationsToBvelt(env, String(job.tenant_id || ""), {
+      prospectIds: [String(prospect_id)]
+    }).catch((error) => console.warn("[Tenant Bvelt Sync] Qualified prospect sync failed:", error));
     return;
   }
 
@@ -6868,42 +6929,44 @@ export async function getPriorityTargets(
       if (tenantConfig) {
         try {
           config.geographies = JSON.parse(tenantConfig.cities_json || '[]');
-          config.niches = JSON.parse(tenantConfig.trades_json || '[]');
+          // Tenant discovery targets the tenant's BUYERS, not its own trade or
+          // Founder defaults. trades_json is not part of the tenant_config schema.
+          config.niches = [];
           config.mode = "tenant";
           config.target = `tenant_${tenantId}_customers`;
-          if (tenantConfig.countries_json) config.countries = JSON.parse(tenantConfig.countries_json);
-          if (tenantConfig.languages_json) config.languages = JSON.parse(tenantConfig.languages_json);
-          
-          // If niches are empty, use expandTenantIcp or fallback to TENANT_TARGET_MAP
-          if (config.niches.length === 0) {
-            if (!skipPicks) {
-              const expanded = await expandTenantIcp(env, tenantConfig);
-              if (expanded && expanded.segments && expanded.segments.length > 0) {
-                config.niches = expanded.segments.map(s => s.label);
-              } else if (tenantConfig.niche) {
-                const trade = tenantConfig.niche.toLowerCase();
-                config.niches = TENANT_TARGET_MAP[trade] || ["property management", "real estate"];
-              }
-            } else if (tenantConfig.niche) {
-              const trade = tenantConfig.niche.toLowerCase();
-              config.niches = TENANT_TARGET_MAP[trade] || ["property management", "real estate"];
-            }
+          config.countries = JSON.parse(tenantConfig.countries_json || '[]');
+          config.languages = JSON.parse(tenantConfig.languages_json || '[]');
+          config.services = JSON.parse(tenantConfig.services_json || '[]');
+          config.icp = {
+            description: String(tenantConfig.icp_description || ""),
+            keywords: JSON.parse(tenantConfig.icp_keywords_json || '[]')
+          };
+          config.min_score = Number(tenantConfig.minimum_score ?? 50);
+          config.max_daily_outreach = 0;
+
+          // Prefer an AI-generated ICP of likely recurring buyers. Use the
+          // curated map only for recognized trades; unknown trades fail closed.
+          let expandedBuyerSegments: Array<{ label: string }> = [];
+          if (!skipPicks) {
+            const expanded = await expandTenantIcp(env, tenantConfig);
+            if (expanded?.segments?.length) expandedBuyerSegments = expanded.segments;
           }
+          config.niches = resolveTenantBuyerSegments(tenantConfig.niche || "", expandedBuyerSegments);
         } catch (e) {
           console.error("Error parsing tenant config: ", e);
         }
 
         const citiesList = JSON.parse(tenantConfig.cities_json || '[]');
         const centerLabel = citiesList[0] || null;
-        if (centerLabel && !skipPicks) {
+        if (centerLabel && !skipPicks && config.niches.length > 0) {
           try {
             tenantPicks = await pickTargets(env.RADAR_DB, {
               tenantId,
-              trades: config.niches.length > 0 ? config.niches : ["property management"],
+              trades: config.niches,
               count: 6,
               centerLabel,
               serviceRadiusKm: Number(tenantConfig.service_radius_km || 60),
-              countries: ["US", "CA"],
+              countries: config.countries,
               allowedCities: citiesList
             });
           } catch (e) {
@@ -6927,10 +6990,7 @@ export async function getPriorityTargets(
     // Tenant mode without tenant_id — refuse to invent data
     config.geographies = [];
     config.niches = [];
-    config.icp = {
-      description: "Local B2B businesses with recurrent maintenance needs.",
-      keywords: ["property management", "estate agent", "hotel"]
-    };
+    config.icp = { description: "", keywords: [] };
   } else {
     // Founder mode
     if (env.FOUNDING_CITIES) {
@@ -9812,7 +9872,7 @@ export async function pushMarketObservationsToBem(env: Env): Promise<{
 export async function sendTenantObservationsToBvelt(
   env: Env,
   tenantId: string,
-  options?: { limit?: number; since?: string }
+  options?: { limit?: number; since?: string; prospectIds?: string[] }
 ): Promise<{
   ok?: boolean;
   skipped?: boolean;
@@ -9820,25 +9880,32 @@ export async function sendTenantObservationsToBvelt(
   sent_count?: number;
   tenant_id: string;
 }> {
-  if (!tenantId || tenantId === "founder") {
+  if (!tenantId || !tenantId.startsWith("bvelt_")) {
     return { skipped: true, reason: "tenant_id_required", tenant_id: tenantId };
   }
-  const ingestUrl = (env as any).BVELT_TENANT_INGEST_URL || env.BVELT_INGEST_URL;
-  const ingestKey = (env as any).BVELT_TENANT_INGEST_KEY || env.BVELT_INGEST_KEY || env.RADAR_SERVICE_KEY;
+  const ingestUrl = (env as any).BVELT_TENANT_INGEST_URL;
+  const ingestKey = (env as any).BVELT_TENANT_INGEST_KEY;
   if (!ingestUrl || !ingestKey) {
-    return { skipped: true, reason: "missing_tenant_ingest_config", tenant_id: tenantId };
+    return { skipped: true, reason: "missing_dedicated_tenant_ingest_config", tenant_id: tenantId };
   }
-  const limit = options?.limit || 100;
+  const limit = Math.min(500, Math.max(1, options?.limit || 100));
   const sinceClause = options?.since ? "AND created_at >= ?" : "";
+  const prospectIds = Array.isArray(options?.prospectIds)
+    ? options!.prospectIds!.map(id => String(id).trim()).filter(Boolean).slice(0, 100)
+    : [];
+  const idsClause = prospectIds.length ? `AND id IN (${prospectIds.map(() => "?").join(",")})` : "";
   const params: any[] = [tenantId];
   if (options?.since) params.push(options.since);
+  params.push(...prospectIds);
   params.push(limit);
 
   const rows = await env.RADAR_DB.prepare(`
     SELECT id, tenant_id, name, city, trade, website, phone, email, score, status, tenant_outcome, bvelt_angle, created_at
     FROM prospects
     WHERE tenant_id = ?
+      AND mode = 'tenant'
       ${sinceClause}
+      ${idsClause}
     ORDER BY created_at DESC
     LIMIT ?
   `).bind(...params).all();
@@ -9866,10 +9933,11 @@ export async function sendTenantObservationsToBvelt(
 
   const payload = {
     source: "bvelt-radar",
+    mode: "tenant",
     tenant_id: tenantId,
     timestamp: new Date().toISOString(),
     count: items.length,
-    items
+    items: items.map(item => ({ ...item, mode: "tenant", tenant_id: tenantId }))
   };
 
   try {
