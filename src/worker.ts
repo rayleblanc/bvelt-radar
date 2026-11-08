@@ -417,6 +417,24 @@ const TENANT_TARGET_MAP: Record<string, string[]> = {
   locksmith: ["property management", "apartment complex", "hotel", "real estate", "facility manager"],
 };
 
+export function resolveTenantBuyerSegments(
+  niche: string,
+  expandedSegments: Array<string | { label?: string }> = []
+): string[] {
+  const expanded = Array.from(new Set(
+    expandedSegments
+      .map(segment => typeof segment === "string" ? segment : String(segment?.label || ""))
+      .map(label => label.trim())
+      .filter(Boolean)
+  ));
+  if (expanded.length) return expanded.slice(0, 6);
+
+  const normalized = String(niche || "").trim().toLowerCase();
+  const key = normalized.replace(/\\s+/g, "_");
+  const mapped = TENANT_TARGET_MAP[key] || TENANT_TARGET_MAP[normalized] || [];
+  return [...mapped];
+}
+
 // OSM Tag mappings by trade for high-precision Overpass queries (contractor field operators, not retail stores)
 const OVERPASS_TRADE_TAGS: Record<string, string[]> = {
   plumbing: [
@@ -6928,16 +6946,12 @@ export async function getPriorityTargets(
 
           // Prefer an AI-generated ICP of likely recurring buyers. Use the
           // curated map only for recognized trades; unknown trades fail closed.
+          let expandedBuyerSegments: Array<{ label: string }> = [];
           if (!skipPicks) {
             const expanded = await expandTenantIcp(env, tenantConfig);
-            if (expanded?.segments?.length) {
-              config.niches = expanded.segments.map(s => s.label);
-            }
+            if (expanded?.segments?.length) expandedBuyerSegments = expanded.segments;
           }
-          if (config.niches.length === 0 && tenantConfig.niche) {
-            const tradeKey = String(tenantConfig.niche).trim().toLowerCase().replace(/\\s+/g, "_");
-            config.niches = TENANT_TARGET_MAP[tradeKey] || TENANT_TARGET_MAP[String(tenantConfig.niche).trim().toLowerCase()] || [];
-          }
+          config.niches = resolveTenantBuyerSegments(tenantConfig.niche || "", expandedBuyerSegments);
         } catch (e) {
           console.error("Error parsing tenant config: ", e);
         }
