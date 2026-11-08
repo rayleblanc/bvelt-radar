@@ -6,7 +6,7 @@
 - `BVELT_TENANT_INGEST_KEY` — secret matching Bvelt's separate `RADAR_TENANT_INGEST_KEY`.
 - `RADAR_SERVICE_KEY` — separate secret matching Bvelt's outbound `RADAR_SERVICE_KEY`; it must not be replaced with or aliased to `FOUNDER_SERVICE_KEY`.
 
-`wrangler.toml` uses `keep_vars = true` to retain Dashboard-managed plaintext variables during Wrangler deployments. It also declares required secrets so Wrangler refuses to deploy this integration when its service credentials are missing. `keep_vars` does not create missing bindings. Wrangler secrets are not removed by ordinary deploys.
+`wrangler.toml` uses `keep_vars = true` to retain Dashboard-managed plaintext variables during Wrangler deployments. `BVELT_TENANT_INGEST_URL` is also defined in the config. The file declares required secrets so Wrangler refuses to deploy this integration when its service credentials are missing. `keep_vars` does not create missing secrets. Cloudflare documents that encrypted secrets are not deleted by ordinary Wrangler deploys; deletion requires an explicit secret-delete operation.
 
 These are separate from:
 - `RADAR_SERVICE_KEY`, which authenticates Bvelt's server-side calls into Radar.
