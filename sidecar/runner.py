@@ -10,6 +10,9 @@ import urllib.request
 from typing import Any
 
 from sidecar.radar_sidecar.scraper import scrape_candidates
+import sidecar.radar_sidecar.scraper as scraper_state
+
+EXTRACTOR_VERSION = "bvelt-scrapling-1.1.0"
 
 
 def _api_request(url: str, key: str, method: str = "GET", payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -41,6 +44,7 @@ def _api_request(url: str, key: str, method: str = "GET", payload: dict[str, Any
 
 
 def main() -> int:
+    started = time.monotonic()
     worker_url = os.environ.get("RADAR_WORKER_URL", "").strip().rstrip("/")
     callback_key = os.environ.get("RADAR_SIDECAR_CALLBACK_KEY", "").strip()
     run_id = os.environ.get("RADAR_RUN_ID", "").strip()
@@ -75,15 +79,25 @@ def main() -> int:
         elif not evidence:
             print("No evidence extracted from eligible public business websites.")
 
+        deferred = int(getattr(scraper_state, "DEADLINE_SKIPPED_CANDIDATES", 0) or 0)
+        elapsed = round(time.monotonic() - started, 1)
+        if deferred:
+            print(f"Partial run: {deferred} candidates deferred by soft deadline after {elapsed}s.")
+        else:
+            print(f"Research finished in {elapsed}s with {len(evidence)} evidence records.")
+
         callback_payload = {
             "run_id": run_id,
             "mode": mode,
             "tenant_id": tenant_id,
-            "extractor_version": "bvelt-scrapling-1.0.0",
+            "extractor_version": EXTRACTOR_VERSION,
             "run_status": "completed",
             "status": "completed",
             "candidates_received": len(candidates),
             "records": evidence,
+            "elapsed_seconds": elapsed,
+            "candidates_deferred": deferred,
+            "soft_deadline_exceeded": deferred > 0,
         }
     except Exception as exc:
         print(f"Research runner encountered fatal error during extraction: {exc}", file=sys.stderr)
@@ -91,12 +105,13 @@ def main() -> int:
             "run_id": run_id,
             "mode": mode,
             "tenant_id": tenant_id,
-            "extractor_version": "bvelt-scrapling-1.0.0",
+            "extractor_version": EXTRACTOR_VERSION,
             "run_status": "failed",
             "status": "failed",
             "error": str(exc),
             "candidates_received": len(candidates),
             "records": [],
+            "elapsed_seconds": round(time.monotonic() - started, 1),
         }
 
     # Always callback, including an empty or failed result, so Radar can update the dispatch
