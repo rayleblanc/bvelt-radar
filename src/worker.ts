@@ -17,6 +17,7 @@ import { auditDomainSecurityAndMx, auditWebsitePerformance, auditCityWeatherEmer
 import { pickTargets, findPlace, findNearestPlace, formatPlaceLabel, markSearched, placeKey, radiusKm, haversineKm } from './geoFrontier';
 import { sanitizeEmail, sanitizeProspectEmail, isOffIcpName, hasMxRecords } from './emailSanitizer';
 import { dispatchScraplingResearch } from './research/githubActions';
+import { fetchPermitContractors as fetchMunicipalPermitContractors } from './permitSources';
 
 // Global type declarations for Cloudflare Worker compilation
 declare global {
@@ -192,6 +193,35 @@ export async function fetchPublicPermits(city: string): Promise<any[]> {
 
 export async function fetchPermitContractors(city: string, trade: string): Promise<any[]> {
   try {
+    // Prefer the verified multi-city Socrata catalog; it groups contractors,
+    // filters by trade and enforces the 90-day evidence window.
+    const municipal = await fetchMunicipalPermitContractors(city, trade, 60);
+    if (municipal.length) {
+      return municipal.map(item => ({
+        name: item.name,
+        phone: item.phone,
+        city: item.city || city,
+        zip: item.zip,
+        trade: item.trade || trade,
+        permits_90d: item.permits_90d,
+        last_issued: item.last_issued,
+        source: "permits"
+      }));
+    }
+
+    // Preserve the original Orlando feed as a fallback, but never label an
+    // undated or stale permit as recent activity.
+    const permits = await fetchPublicPermits(city);
+    if (!Array.isArray(permits)) return [];
+    const cutoff = Date.now() - 90 * 24 * 60 * 60 * 1000;
+    const tradeKey = String(trade || "").toLowerCase().replace(/[_-]+/g, " ");
+    const tradePattern = tradeKey.includes("hvac") ? /hvac|air|heating|cooling|mechanical/i
+      : tradeKey.includes("plumb") ? /plumb|drain|sewer/i
+      : tradeKey.includes("roof") ? /roof/i
+      : tradeKey.includes("electric") ? /electric/i
+      : tradeKey.includes("landscap") || tradeKey.includes("lawn") ? /landscap|lawn|irrigat/i
+      : new RegExp(tradeKey.replace(/[.*+?^${}()|[\]\\]/g, "\\export async function fetchPermitContractors(city: string, trade: string): Promise<any[]> {
+  try {
     const permits = await fetchPublicPermits(city);
     if (!permits || !Array.isArray(permits)) return [];
     const results: any[] = [];
@@ -207,6 +237,30 @@ export async function fetchPermitContractors(city: string, trade: string): Promi
     }
     return results;
   } catch {
+    return [];
+  }
+}"), "i");
+    const results: any[] = [];
+    for (const permit of permits) {
+      const name = String(permit.contractor_name || permit.company_name || permit.applicant_name || "").trim();
+      if (!name) continue;
+      const dateValue = permit.issued_date || permit.issue_date || permit.issuance_date || permit.permit_date;
+      const issuedAt = dateValue ? Date.parse(String(dateValue)) : NaN;
+      if (!Number.isFinite(issuedAt) || issuedAt < cutoff || issuedAt > Date.now() + 24 * 60 * 60 * 1000) continue;
+      const description = [permit.description, permit.work_description, permit.permit_type].filter(Boolean).join(" ");
+      if (!tradePattern.test(`${name} ${description}`)) continue;
+      results.push({
+        name,
+        phone: permit.contractor_phone || permit.phone || null,
+        city: permit.city || city,
+        permits_90d: 1,
+        last_issued: new Date(issuedAt).toISOString(),
+        source: "permits"
+      });
+    }
+    return results;
+  } catch (error) {
+    console.warn("[Permits] Municipal lookup failed:", error);
     return [];
   }
 }
@@ -430,7 +484,7 @@ export function resolveTenantBuyerSegments(
   if (expanded.length) return expanded.slice(0, 6);
 
   const normalized = String(niche || "").trim().toLowerCase();
-  const key = normalized.replace(/\\s+/g, "_");
+  const key = normalized.replace(/\s+/g, "_");
   const mapped = TENANT_TARGET_MAP[key] || TENANT_TARGET_MAP[normalized] || [];
   return [...mapped];
 }
@@ -1017,11 +1071,19 @@ export default {
       const webhookSecret = (((env as any).WEBHOOK_SECRET || env.TELEGRAM_WEBHOOK_SECRET || "") as string).trim() || undefined;
       const webhookOk = isWebhookPath && !!webhookSecret && url.searchParams.get("token") === webhookSecret;
       const isResearchCallbackPath = path.startsWith("/api/research/") || path.startsWith("/research/");
+      // These routes authenticate again with resolveTenantAuthContext and enforce
+      // exact tenant ownership before reading or mutating tenant data. They must
+      // reach that guard instead of being rejected by the Founder-only gate.
+      const isTenantScopedRequest =
+        ((method === "GET" || method === "POST") && ["/api/tenants/config", "/tenants/config"].includes(path)) ||
+        (method === "POST" && ["/api/tenants/search", "/tenants/search", "/api/bvelt/bootstrap", "/bvelt/bootstrap", "/api/prospects/outcome", "/prospects/outcome"].includes(path)) ||
+        (method === "GET" && ["/api/tenants/leads.csv", "/tenants/leads.csv", "/api/bvelt/leads", "/bvelt/leads"].includes(path));
+
       if (isResearchCallbackPath) {
         if (!isSidecarCallbackAuthorized(request, env)) {
           return Response.json({ error: "Unauthorized. Missing or invalid callback key." }, { status: 401, headers: corsHeaders });
         }
-      } else if (!authorized && !webhookOk) {
+      } else if (!authorized && !webhookOk && !isTenantScopedRequest) {
         return Response.json({ error: "Unauthorized. Missing or invalid service key." }, { status: 401, headers: corsHeaders });
       }
 
@@ -3097,18 +3159,31 @@ export async function maybeDispatchSidecarResearch(
     // 3 & 4. Atomic reservation in D1 before calling GitHub Actions using UNIQUE(run_id, tenant_id)
     const now = new Date().toISOString();
     const existingDispatch = (await env.RADAR_DB.prepare(`
-      SELECT id, status, attempts FROM sidecar_dispatches WHERE run_id = ? AND tenant_id = ?
+      SELECT id, status, attempts, updated_at FROM sidecar_dispatches WHERE run_id = ? AND tenant_id = ?
     `).bind(runId, t).first()) as any;
 
     let dispatchId: string;
     if (existingDispatch) {
-      // If already queued, running, completed, or dispatching, skip (idempotent)
-      if (['queued', 'running', 'completed', 'dispatching'].includes(existingDispatch.status)) {
-        console.log(`[maybeDispatchSidecarResearch] Sidecar research already in status '${existingDispatch.status}' for run ${runId}, tenant ${t}`);
-        return false;
+      // Completed work is immutable. A queued/running dispatch that never calls
+      // back is recoverable after the workflow's 25-minute hard timeout plus grace.
+      if (existingDispatch.status === 'completed') return false;
+      if (['queued', 'running', 'dispatching'].includes(existingDispatch.status)) {
+        const lastUpdate = Date.parse(String(existingDispatch.updated_at || ""));
+        const stale = !Number.isFinite(lastUpdate) || Date.now() - lastUpdate > 40 * 60 * 1000;
+        if (!stale || Number(existingDispatch.attempts || 0) >= 3) {
+          console.log(`[maybeDispatchSidecarResearch] Dispatch remains ${existingDispatch.status}; stale=${stale}, attempts=${existingDispatch.attempts}`);
+          return false;
+        }
+        dispatchId = existingDispatch.id;
+        const reclaimed = await env.RADAR_DB.prepare(`
+          UPDATE sidecar_dispatches
+          SET status = 'dispatching', attempts = attempts + 1, last_error = 'STALE_DISPATCH_RECOVERED', updated_at = ?
+          WHERE id = ? AND status = ? AND updated_at = ?
+        `).bind(now, dispatchId, existingDispatch.status, existingDispatch.updated_at).run();
+        if (!(reclaimed as any)?.meta?.changes) return false;
       }
       // If failed, allow controlled recovery (max 3 attempts)
-      if (existingDispatch.status === 'failed') {
+      else if (existingDispatch.status === 'failed') {
         if (existingDispatch.attempts >= 3) {
           console.warn(`[maybeDispatchSidecarResearch] Max retry attempts reached for run ${runId}, tenant ${t}`);
           return false;
@@ -8519,7 +8594,8 @@ export async function fetchLocalBusinessesWithDiagnostics(
   customOsmTags?: string[],
   mode: 'founder' | 'tenant' = 'founder'
 ): Promise<{ businesses: any[]; diagnostics: DiscoveryDiagnostics }> {
-  const cacheKey = `radar_cache_${city.replace(/[^a-z0-9]/gi, "_")}_${trade}_v3`.toLowerCase();
+  const tagScope = (customOsmTags || []).map(tag => String(tag).trim().toLowerCase()).filter(Boolean).sort().join("_").slice(0, 120);
+  const cacheKey = `radar_cache_${mode}_${city.replace(/[^a-z0-9]/gi, "_")}_${trade}_${tagScope}_v4`.toLowerCase();
   
   if (env.RADAR_DB) {
     try {
@@ -9767,7 +9843,10 @@ export async function pushMarketObservationsToBem(env: Env): Promise<{
   status?: number;
 }> {
   const ingestUrl = env.BVELT_INGEST_URL ? String(env.BVELT_INGEST_URL).trim() : "";
-  const ingestKey = env.BVELT_INGEST_KEY ? String(env.BVELT_INGEST_KEY).trim() : "";
+  // Bvelt's Founder observation receiver authenticates with RADAR_SERVICE_KEY.
+  // Keep the legacy alias for existing deployments, but use the shared service
+  // credential when BVELT_INGEST_KEY has not been provisioned.
+  const ingestKey = String(env.BVELT_INGEST_KEY || env.RADAR_SERVICE_KEY || "").trim();
 
   if (!ingestUrl || !ingestKey) {
     return { skipped: true, reason: "missing_config" };
