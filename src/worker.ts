@@ -220,26 +220,11 @@ export async function fetchPermitContractors(city: string, trade: string): Promi
       : tradeKey.includes("roof") ? /roof/i
       : tradeKey.includes("electric") ? /electric/i
       : tradeKey.includes("landscap") || tradeKey.includes("lawn") ? /landscap|lawn|irrigat/i
-      : new RegExp(tradeKey.replace(/[.*+?^${}()|[\]\\]/g, "\\export async function fetchPermitContractors(city: string, trade: string): Promise<any[]> {
-  try {
-    const permits = await fetchPublicPermits(city);
-    if (!permits || !Array.isArray(permits)) return [];
-    const results: any[] = [];
-    for (const p of permits) {
-      const name = p.contractor_name || p.company_name || p.applicant_name;
-      if (!name) continue;
-      results.push({
-        name,
-        phone: p.contractor_phone || p.phone || null,
-        city: p.city || city,
-        permits_90d: 1
-      });
-    }
-    return results;
-  } catch {
-    return [];
-  }
-}"), "i");
+      : tradeKey.includes("pest") ? /pest|exterminat/i
+      : tradeKey.includes("clean") ? /clean|janitorial/i
+      : tradeKey.includes("paint") ? /paint/i
+      : tradeKey.includes("pool") ? /pool/i
+      : null;
     const results: any[] = [];
     for (const permit of permits) {
       const name = String(permit.contractor_name || permit.company_name || permit.applicant_name || "").trim();
