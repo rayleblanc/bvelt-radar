@@ -4,7 +4,7 @@
  * Brand: every real email includes Bvelt icon + CTA https://bvelt.app/
  */
 
-import { sanitizeEmail } from './emailSanitizer';
+import { sanitizeEmail, hasMxRecords } from './emailSanitizer';
 
 /** Official product URL — never /demo?p= tokens */
 export const BVELT_SITE = 'https://bvelt.app/';
@@ -108,6 +108,20 @@ export async function dispatchEmail(options: EmailDispatchOptions): Promise<Emai
   }
 
   const to = sanitizeRes.email;
+
+  // Pre-send MX gate: a domain without MX records cannot receive email.
+  // hasMxRecords() is fail-open (DNS outages never halt outreach).
+  const mxOk = await hasMxRecords(to);
+  if (!mxOk) {
+    return {
+      success: false,
+      provider: 'simulated',
+      messageId: '',
+      status: 'failed',
+      error: 'Recipient domain has no MX records (recipient_domain_no_mx). Send cancelled.',
+    };
+  }
+
   const subject = (options.subject || 'Quick question from Bvelt').trim();
   const body = normalizeOutreachBody(options.body || '');
   const senderName = options.senderName || 'Rainer — Bvelt';
