@@ -1139,6 +1139,38 @@ export default {
         }
 
         
+        // (a1b) Selective retry of suppressions caused by sender-side Resend bounces
+        // (e.g. unverified onboarding@resend.dev domain). NOT part of the default self-heal:
+        // only runs when explicitly requested via POST /fix-suppression {"retry_resend_bounces": true}
+        // or ?retry_resend_bounces=true. Call it ONLY after the sender domain is verified in Resend.
+        let retriedResendBounces = 0;
+        let reactivatedBouncedProspects = 0;
+        try {
+          let reqBody: any = {};
+          try { reqBody = await request.json(); } catch { reqBody = {}; }
+          const retryFlag = String(reqBody?.retry_resend_bounces || url.searchParams.get("retry_resend_bounces") || "").trim().toLowerCase() === "true";
+          if (retryFlag) {
+            const bounceRows = await env.RADAR_DB.prepare(
+              "SELECT key FROM suppression WHERE lower(COALESCE(reason,'')) = 'resend_bounced'"
+            ).all();
+            const bouncedEmails: string[] = [];
+            for (const item of ((bounceRows.results || []) as any[])) {
+              await env.RADAR_DB.prepare("DELETE FROM suppression WHERE key = ?").bind(item.key).run();
+              retriedResendBounces++;
+              bouncedEmails.push(String(item.key).trim().toLowerCase());
+            }
+            if (bouncedEmails.length > 0) {
+              const placeholders = bouncedEmails.map(() => '?').join(',');
+              const react = await env.RADAR_DB.prepare(
+                `UPDATE prospects SET status = 'qualified', cooldown_until = NULL, updated_at = ? WHERE lower(COALESCE(email,'')) IN (${placeholders}) AND status IN ('suppressed','bounced')`
+              ).bind(new Date().toISOString(), ...bouncedEmails).run();
+              reactivatedBouncedProspects = react?.meta?.changes || 0;
+            }
+          }
+        } catch (e: any) {
+          console.warn("[fix-suppression] resend_bounced retry error:", e);
+        }
+
         // (a2) Purge soft "Contacted on" suppressions older than 25 days (fixes cooldown-until-2027 leftovers)
         try {
           const softRows = await env.RADAR_DB.prepare(
@@ -1181,6 +1213,8 @@ export default {
           success: true,
           deleted_invalid_suppressions: deletedInvalidSuppressions,
           reactivated_prospects: reactivatedProspects,
+          retried_resend_bounces: retriedResendBounces,
+          reactivated_bounced_prospects: reactivatedBouncedProspects,
           timestamp: new Date().toISOString()
         }, { headers: corsHeaders });
       }
