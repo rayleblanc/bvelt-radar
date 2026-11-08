@@ -17,6 +17,7 @@ import { auditDomainSecurityAndMx, auditWebsitePerformance, auditCityWeatherEmer
 import { pickTargets, findPlace, findNearestPlace, formatPlaceLabel, markSearched, placeKey, radiusKm, haversineKm } from './geoFrontier';
 import { sanitizeEmail, sanitizeProspectEmail, isOffIcpName, hasMxRecords } from './emailSanitizer';
 import { dispatchScraplingResearch } from './research/githubActions';
+import { fetchPermitContractors as fetchMunicipalPermitContractors } from './permitSources';
 
 // Global type declarations for Cloudflare Worker compilation
 declare global {
@@ -192,21 +193,60 @@ export async function fetchPublicPermits(city: string): Promise<any[]> {
 
 export async function fetchPermitContractors(city: string, trade: string): Promise<any[]> {
   try {
+    // Prefer the verified multi-city Socrata catalog; it groups contractors,
+    // filters by trade and enforces the 90-day evidence window.
+    const municipal = await fetchMunicipalPermitContractors(city, trade, 60);
+    if (municipal.length) {
+      return municipal.map(item => ({
+        name: item.name,
+        phone: item.phone,
+        city: item.city || city,
+        zip: item.zip,
+        trade: item.trade || trade,
+        permits_90d: item.permits_90d,
+        last_issued: item.last_issued,
+        source: "permits"
+      }));
+    }
+
+    // Preserve the original Orlando feed as a fallback, but never label an
+    // undated or stale permit as recent activity.
     const permits = await fetchPublicPermits(city);
-    if (!permits || !Array.isArray(permits)) return [];
+    if (!Array.isArray(permits)) return [];
+    const cutoff = Date.now() - 90 * 24 * 60 * 60 * 1000;
+    const tradeKey = String(trade || "").toLowerCase().replace(/[_-]+/g, " ");
+    const tradePattern = tradeKey.includes("hvac") ? /hvac|air|heating|cooling|mechanical/i
+      : tradeKey.includes("plumb") ? /plumb|drain|sewer/i
+      : tradeKey.includes("roof") ? /roof/i
+      : tradeKey.includes("electric") ? /electric/i
+      : tradeKey.includes("landscap") || tradeKey.includes("lawn") ? /landscap|lawn|irrigat/i
+      : tradeKey.includes("pest") ? /pest|exterminat/i
+      : tradeKey.includes("clean") ? /clean|janitorial/i
+      : tradeKey.includes("paint") ? /paint/i
+      : tradeKey.includes("pool") ? /pool/i
+      : null;
     const results: any[] = [];
-    for (const p of permits) {
-      const name = p.contractor_name || p.company_name || p.applicant_name;
+    for (const permit of permits) {
+      const name = String(permit.contractor_name || permit.company_name || permit.applicant_name || "").trim();
       if (!name) continue;
+      const dateValue = permit.issued_date || permit.issue_date || permit.issuance_date || permit.permit_date;
+      const issuedAt = dateValue ? Date.parse(String(dateValue)) : NaN;
+      if (!Number.isFinite(issuedAt) || issuedAt < cutoff || issuedAt > Date.now() + 24 * 60 * 60 * 1000) continue;
+      const description = [permit.description, permit.work_description, permit.permit_type].filter(Boolean).join(" ");
+      const permitText = `${name} ${description}`.toLowerCase().replace(/[_-]+/g, " ");
+      if (tradePattern ? !tradePattern.test(permitText) : !tradeKey || !permitText.includes(tradeKey)) continue;
       results.push({
         name,
-        phone: p.contractor_phone || p.phone || null,
-        city: p.city || city,
-        permits_90d: 1
+        phone: permit.contractor_phone || permit.phone || null,
+        city: permit.city || city,
+        permits_90d: 1,
+        last_issued: new Date(issuedAt).toISOString(),
+        source: "permits"
       });
     }
     return results;
-  } catch {
+  } catch (error) {
+    console.warn("[Permits] Municipal lookup failed:", error);
     return [];
   }
 }
@@ -430,7 +470,7 @@ export function resolveTenantBuyerSegments(
   if (expanded.length) return expanded.slice(0, 6);
 
   const normalized = String(niche || "").trim().toLowerCase();
-  const key = normalized.replace(/\\s+/g, "_");
+  const key = normalized.replace(/\s+/g, "_");
   const mapped = TENANT_TARGET_MAP[key] || TENANT_TARGET_MAP[normalized] || [];
   return [...mapped];
 }
@@ -1017,11 +1057,19 @@ export default {
       const webhookSecret = (((env as any).WEBHOOK_SECRET || env.TELEGRAM_WEBHOOK_SECRET || "") as string).trim() || undefined;
       const webhookOk = isWebhookPath && !!webhookSecret && url.searchParams.get("token") === webhookSecret;
       const isResearchCallbackPath = path.startsWith("/api/research/") || path.startsWith("/research/");
+      // These routes authenticate again with resolveTenantAuthContext and enforce
+      // exact tenant ownership before reading or mutating tenant data. They must
+      // reach that guard instead of being rejected by the Founder-only gate.
+      const isTenantScopedRequest =
+        ((method === "GET" || method === "POST") && ["/api/tenants/config", "/tenants/config"].includes(path)) ||
+        (method === "POST" && ["/api/tenants/search", "/tenants/search", "/api/bvelt/bootstrap", "/bvelt/bootstrap", "/api/prospects/outcome", "/prospects/outcome"].includes(path)) ||
+        (method === "GET" && ["/api/tenants/leads.csv", "/tenants/leads.csv", "/api/bvelt/leads", "/bvelt/leads"].includes(path));
+
       if (isResearchCallbackPath) {
         if (!isSidecarCallbackAuthorized(request, env)) {
           return Response.json({ error: "Unauthorized. Missing or invalid callback key." }, { status: 401, headers: corsHeaders });
         }
-      } else if (!authorized && !webhookOk) {
+      } else if (!authorized && !webhookOk && !isTenantScopedRequest) {
         return Response.json({ error: "Unauthorized. Missing or invalid service key." }, { status: 401, headers: corsHeaders });
       }
 
@@ -2372,7 +2420,18 @@ export default {
           hunter_api: { ready: false, key_present: !!env.HUNTER_API_KEY, details: null },
           abstract_api: { ready: false, key_present: !!env.ABSTRACT_API_KEY, details: null },
           trust_stack: { ready: false, url_present: !!env.TRUST_STACK_URL, details: null },
-          cron_trigger: { ready: true, schedule: "0 14 * * *" },
+          bem_ingest: {
+            ready: Boolean(env.BVELT_INGEST_URL && (env.BVELT_INGEST_KEY || env.RADAR_SERVICE_KEY)),
+            url_present: Boolean(env.BVELT_INGEST_URL),
+            credential_present: Boolean(env.BVELT_INGEST_KEY || env.RADAR_SERVICE_KEY)
+          },
+          scrapling: {
+            ready: Boolean(env.GITHUB_ACTIONS_TOKEN && env.RADAR_SIDECAR_CALLBACK_KEY),
+            github_token_present: Boolean(env.GITHUB_ACTIONS_TOKEN),
+            callback_key_present: Boolean(env.RADAR_SIDECAR_CALLBACK_KEY),
+            repository: env.RADAR_RESEARCH_REPOSITORY || "rayleblanc/bvelt-radar"
+          },
+          cron_trigger: { ready: true, schedule: "0 12,17,22 * * *" },
           worker_routes: { ready: true, active_routes: ["/health", "/prospects", "/run", "/decision", "/stats", "/api/events", "/api/tenants/config"] }
         };
 
@@ -2591,11 +2650,13 @@ export default {
           const evidenceType = item.evidence_type || "business_website_profile";
           const contentHash = item.content_hash || "";
           const extractorVersion = item.extractor_version || body.extractor_version || "bvelt-scrapling-1.0.0";
-          const confidence = typeof item.confidence === "number" ? item.confidence : 0.65;
+          const confidence = typeof item.confidence === "number" && Number.isFinite(item.confidence)
+            ? Math.min(1, Math.max(0, item.confidence))
+            : 0.65;
           const observedAt = item.observed_at || now;
           const evidenceData = item.evidence || {};
 
-          if (!prospectId || !sourceUrl || !contentHash) {
+          if (!prospectId || !sourceUrl || !/^[a-f0-9]{64}$/i.test(String(contentHash))) {
             rejectedCount++;
             continue;
           }
@@ -2614,12 +2675,33 @@ export default {
 
           // 2. Verify prospect belongs to the same mode and tenant
           const prospectRow = (await env.RADAR_DB.prepare(`
-            SELECT id, signals_json FROM prospects 
+            SELECT id, signals_json, website FROM prospects
             WHERE id = ? AND mode = ? AND COALESCE(tenant_id, 'founder') = ?
           `).bind(prospectId, mode, tenantId).first()) as any;
 
           if (!prospectRow) {
             console.warn(`[ResearchEvidence] Rejected evidence for prospect ${prospectId}: mode/tenant mismatch in prospects table`);
+            rejectedCount++;
+            continue;
+          }
+
+          // Evidence may only describe the public website attached to this exact
+          // prospect. This prevents cross-domain evidence from being attached to a lead.
+          try {
+            const submittedUrl = new URL(String(sourceUrl));
+            const originalValue = String(prospectRow.website || "").trim();
+            const originalUrl = new URL(/^https?:\/\//i.test(originalValue) ? originalValue : `https://${originalValue}`);
+            const normalizedHost = (host: string) => host.toLowerCase().replace(/^www\./, "");
+            if (
+              !["http:", "https:"].includes(submittedUrl.protocol) ||
+              submittedUrl.username || submittedUrl.password ||
+              !originalUrl.hostname ||
+              normalizedHost(submittedUrl.hostname) !== normalizedHost(originalUrl.hostname)
+            ) {
+              rejectedCount++;
+              continue;
+            }
+          } catch {
             rejectedCount++;
             continue;
           }
@@ -3097,18 +3179,31 @@ export async function maybeDispatchSidecarResearch(
     // 3 & 4. Atomic reservation in D1 before calling GitHub Actions using UNIQUE(run_id, tenant_id)
     const now = new Date().toISOString();
     const existingDispatch = (await env.RADAR_DB.prepare(`
-      SELECT id, status, attempts FROM sidecar_dispatches WHERE run_id = ? AND tenant_id = ?
+      SELECT id, status, attempts, updated_at FROM sidecar_dispatches WHERE run_id = ? AND tenant_id = ?
     `).bind(runId, t).first()) as any;
 
     let dispatchId: string;
     if (existingDispatch) {
-      // If already queued, running, completed, or dispatching, skip (idempotent)
-      if (['queued', 'running', 'completed', 'dispatching'].includes(existingDispatch.status)) {
-        console.log(`[maybeDispatchSidecarResearch] Sidecar research already in status '${existingDispatch.status}' for run ${runId}, tenant ${t}`);
-        return false;
+      // Completed work is immutable. A queued/running dispatch that never calls
+      // back is recoverable after the workflow's 25-minute hard timeout plus grace.
+      if (existingDispatch.status === 'completed') return false;
+      if (['queued', 'running', 'dispatching'].includes(existingDispatch.status)) {
+        const lastUpdate = Date.parse(String(existingDispatch.updated_at || ""));
+        const stale = !Number.isFinite(lastUpdate) || Date.now() - lastUpdate > 40 * 60 * 1000;
+        if (!stale || Number(existingDispatch.attempts || 0) >= 3) {
+          console.log(`[maybeDispatchSidecarResearch] Dispatch remains ${existingDispatch.status}; stale=${stale}, attempts=${existingDispatch.attempts}`);
+          return false;
+        }
+        dispatchId = existingDispatch.id;
+        const reclaimed = await env.RADAR_DB.prepare(`
+          UPDATE sidecar_dispatches
+          SET status = 'dispatching', attempts = attempts + 1, last_error = 'STALE_DISPATCH_RECOVERED', updated_at = ?
+          WHERE id = ? AND status = ? AND updated_at = ?
+        `).bind(now, dispatchId, existingDispatch.status, existingDispatch.updated_at).run();
+        if (!(reclaimed as any)?.meta?.changes) return false;
       }
       // If failed, allow controlled recovery (max 3 attempts)
-      if (existingDispatch.status === 'failed') {
+      else if (existingDispatch.status === 'failed') {
         if (existingDispatch.attempts >= 3) {
           console.warn(`[maybeDispatchSidecarResearch] Max retry attempts reached for run ${runId}, tenant ${t}`);
           return false;
@@ -8519,7 +8614,8 @@ export async function fetchLocalBusinessesWithDiagnostics(
   customOsmTags?: string[],
   mode: 'founder' | 'tenant' = 'founder'
 ): Promise<{ businesses: any[]; diagnostics: DiscoveryDiagnostics }> {
-  const cacheKey = `radar_cache_${city.replace(/[^a-z0-9]/gi, "_")}_${trade}_v3`.toLowerCase();
+  const tagScope = (customOsmTags || []).map(tag => String(tag).trim().toLowerCase()).filter(Boolean).sort().join("_").slice(0, 120);
+  const cacheKey = `radar_cache_${mode}_${city.replace(/[^a-z0-9]/gi, "_")}_${trade}_${tagScope}_v4`.toLowerCase();
   
   if (env.RADAR_DB) {
     try {
@@ -9767,7 +9863,10 @@ export async function pushMarketObservationsToBem(env: Env): Promise<{
   status?: number;
 }> {
   const ingestUrl = env.BVELT_INGEST_URL ? String(env.BVELT_INGEST_URL).trim() : "";
-  const ingestKey = env.BVELT_INGEST_KEY ? String(env.BVELT_INGEST_KEY).trim() : "";
+  // Bvelt's Founder observation receiver authenticates with RADAR_SERVICE_KEY.
+  // Keep the legacy alias for existing deployments, but use the shared service
+  // credential when BVELT_INGEST_KEY has not been provisioned.
+  const ingestKey = String(env.BVELT_INGEST_KEY || env.RADAR_SERVICE_KEY || "").trim();
 
   if (!ingestUrl || !ingestKey) {
     return { skipped: true, reason: "missing_config" };
@@ -9776,14 +9875,29 @@ export async function pushMarketObservationsToBem(env: Env): Promise<{
   const day = new Date().toISOString().split("T")[0];
 
   try {
+    await env.RADAR_DB.prepare(`
+      CREATE TABLE IF NOT EXISTS radar_bem_sync_state (
+        scope TEXT PRIMARY KEY,
+        last_synced_at TEXT NOT NULL,
+        last_synced_id TEXT NOT NULL DEFAULT '',
+        updated_at TEXT NOT NULL
+      )
+    `).run();
+    const syncState = await env.RADAR_DB.prepare(
+      "SELECT last_synced_at, last_synced_id FROM radar_bem_sync_state WHERE scope = 'founder'"
+    ).first() as any;
+    // First activation backfills existing Founder prospects in bounded batches.
+    // Later runs advance a stable (created_at,id) cursor to prevent recounting.
+    const cursorAt = String(syncState?.last_synced_at || "1970-01-01T00:00:00.000Z");
+    const cursorId = String(syncState?.last_synced_id || "");
     const rows = await env.RADAR_DB.prepare(`
       SELECT id, tenant_id, name, city, trade, website, phone, email, score, outcome, status, created_at
       FROM prospects
       WHERE (tenant_id IS NULL OR tenant_id = '' OR tenant_id = 'founder')
-        AND created_at >= datetime('now', '-1 day')
-      ORDER BY created_at DESC
+        AND (datetime(created_at) > datetime(?) OR (datetime(created_at) = datetime(?) AND id > ?))
+      ORDER BY datetime(created_at) ASC, id ASC
       LIMIT 500
-    `).all();
+    `).bind(cursorAt, cursorAt, cursorId).all();
 
     const results = (rows?.results || []) as any[];
 
@@ -9812,10 +9926,14 @@ export async function pushMarketObservationsToBem(env: Env): Promise<{
       };
     });
 
+    if (items.length === 0) {
+      return { ok: true, skipped: true, reason: "no_new_founder_observations", accepted: 0 };
+    }
+
     const payload = {
       source: "bvelt-radar",
       observed_at: new Date().toISOString(),
-      run_id: `daily-${day}`,
+      run_id: `founder-cursor-${founderOnly[founderOnly.length - 1]?.id || "empty"}`,
       items
     };
 
@@ -9838,6 +9956,19 @@ export async function pushMarketObservationsToBem(env: Env): Promise<{
     if (!res.ok) {
       console.warn(`[BEM Ingest] Server returned status ${res.status}`);
       return { ok: false, status: res.status };
+    }
+
+    // Advance the cursor only after Bvelt confirms the batch was accepted.
+    const lastAccepted = founderOnly[founderOnly.length - 1];
+    if (lastAccepted?.created_at && lastAccepted?.id) {
+      await env.RADAR_DB.prepare(`
+        INSERT INTO radar_bem_sync_state (scope, last_synced_at, last_synced_id, updated_at)
+        VALUES ('founder', ?, ?, ?)
+        ON CONFLICT(scope) DO UPDATE SET
+          last_synced_at = excluded.last_synced_at,
+          last_synced_id = excluded.last_synced_id,
+          updated_at = excluded.updated_at
+      `).bind(String(lastAccepted.created_at), String(lastAccepted.id), new Date().toISOString()).run();
     }
 
     // Tarea B — Telegram digest (máx 1 vez al día, Founder observations)

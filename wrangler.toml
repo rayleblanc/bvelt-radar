@@ -6,10 +6,11 @@ compatibility_date = "2024-03-01"
 keep_vars = true
 
 [vars]
+BVELT_INGEST_URL = "https://bvelt.app/api/radar/observations"
 BVELT_TENANT_INGEST_URL = "https://bvelt.app/api/radar/tenant-observations"
 
 [secrets]
-required = ["FOUNDER_SERVICE_KEY"]
+required = ["FOUNDER_SERVICE_KEY", "RADAR_SERVICE_KEY", "BVELT_TENANT_INGEST_KEY", "GITHUB_ACTIONS_TOKEN", "RADAR_SIDECAR_CALLBACK_KEY"]
 
 [build]
 command = "npm run build"
@@ -55,3 +56,5 @@ enabled = true
 # Workers AI: Clef-flash classify + Llama copy fallback (10k Neurons/day free)
 [ai]
 binding = "AI"
+
+[previews]
