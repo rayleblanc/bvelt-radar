@@ -124,6 +124,7 @@ export interface Env {
   RADAR_SERVICE_KEY?: string;
   BVELT_TENANT_INGEST_URL?: string;
   BVELT_TENANT_INGEST_KEY?: string;
+  REPLY_FORWARD_TO?: string; // correo personal al que reenviar las respuestas recibidas (Resend Receiving)
 }
 
 export function getBudgetLimit(unitType: string): number {
@@ -1782,6 +1783,50 @@ export default {
             else if (resendType.includes("bounced") || resendType.includes("bounce")) eventType = "bounced";
             else if (resendType.includes("delivered")) eventType = "delivered";
             else if (resendType.includes("complained") || resendType.includes("spam")) eventType = "negative";
+            else if (resendType.includes("received")) {
+              // Resend inbound (email.received): el webhook trae solo metadatos (data.from = remitente, data.email_id).
+              // El cuerpo se obtiene con GET /emails/{id} (Received emails API).
+              eventType = "replied";
+              const inboundFrom = String(body.data.from || "").trim();
+              if (inboundFrom) email = inboundFrom.toLowerCase();
+              try {
+                const inboundId = String(body.data.email_id || "");
+                const apiKey = String((env as any).RESEND_API_KEY || "").trim();
+                if (inboundId && apiKey) {
+                  const inboundRes = await fetch(`https://api.resend.com/emails/${encodeURIComponent(inboundId)}`, {
+                    headers: { Authorization: `Bearer ${apiKey}` },
+                    signal: AbortSignal.timeout(8000)
+                  });
+                  if (inboundRes.ok) {
+                    const inboundData: any = await inboundRes.json().catch(() => ({}));
+                    content = inboundData?.text || inboundData?.subject || content;
+                    // Opcional: reenviar la respuesta al correo personal del founder (REPLY_FORWARD_TO).
+                    const forwardTo = String((env as any).REPLY_FORWARD_TO || "").trim();
+                    if (forwardTo) {
+                      const fwdHtml = String(inboundData?.html || "");
+                      const fwdText = String(inboundData?.text || "");
+                      const fwdPayload: Record<string, unknown> = {
+                        from: String((env as any).OUTBOUND_EMAIL_FROM || "").trim()
+                          || (Array.isArray(inboundData?.to) && inboundData.to[0]) || "replies@bvelt.app",
+                        to: [forwardTo],
+                        subject: `Fwd: ${String(inboundData?.subject || body.data.subject || "(no subject)")}`
+                      };
+                      if (fwdHtml) fwdPayload.html = fwdHtml;
+                      if (fwdText) fwdPayload.text = fwdText;
+                      if (!fwdHtml && !fwdText) fwdPayload.text = String(inboundData?.subject || "(empty reply)");
+                      await fetch("https://api.resend.com/emails", {
+                        method: "POST",
+                        headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+                        body: JSON.stringify(fwdPayload),
+                        signal: AbortSignal.timeout(8000)
+                      });
+                    }
+                  }
+                }
+              } catch (e: any) {
+                console.warn("[webhook] email.received processing error:", e?.message || e);
+              }
+            }
             else if (resendType.includes("incoming") || resendType.includes("reply") || resendType.includes("replied")) {
               eventType = "replied";
               content = body.data.text || body.data.html || body.data.subject || content;
@@ -1793,7 +1838,7 @@ export default {
               email = email || body.data.to;
             }
 
-            if (resendType.includes("incoming") && body.data.from) {
+            if ((resendType.includes("incoming") || resendType.includes("received")) && body.data.from) {
               const fromStr = String(body.data.from);
               const extractedFrom = fromStr.includes("<") ? fromStr.replace(/.*<([^>]+)>.*/, "$1") : fromStr;
               email = extractedFrom.trim();
