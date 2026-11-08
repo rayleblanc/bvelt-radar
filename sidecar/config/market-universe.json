@@ -1,0 +1,59 @@
+{
+  "version": 1,
+  "purpose": "Market prioritization hints for Radar. This is not an allowlist and must never exclude other countries, languages, cities, or niches.",
+  "market_tiers": {
+    "core_english_commercial": ["US", "CA", "GB", "IE", "AU", "NZ"],
+    "additional_english_commercial": ["ZA", "SG", "IN", "PH", "MY", "NG", "GH", "KE", "JM", "TT", "BB", "BS", "BZ", "MT", "GY"],
+    "global_open": "All other countries remain eligible when selected by a Founder mission, Tenant configuration, discovered demand, or market evidence."
+  },
+  "language_policy": {
+    "default_for_core_english": ["en"],
+    "allow_multiple_languages_per_market": true,
+    "do_not_assume_country_equals_language": true,
+    "tenant_language_configuration_takes_precedence": true
+  },
+  "geography_policy": {
+    "primary_source": "Existing Radar geoData.ts and geoFrontier.ts",
+    "current_dataset_note": "The public geoData.ts describes approximately 7,600 US and Canadian places; it is not global coverage.",
+    "expansion_source": "GeoNames/all-the-cities with attribution, or an equivalent redistributable global gazetteer",
+    "minimum_population_hint": 5000,
+    "fallback": "Geocode configured city + country with a compliant geocoding provider when no local GeoPlace record exists.",
+    "rotation": "Rotate across countries, regions, cities, and population bands; do not hardcode a small permanent list of US metros."
+  },
+  "niche_policy": {
+    "closed_allowlist": false,
+    "unknown_niche_behavior": "Keep the niche eligible. Use tenant ICP keywords, generic business/service discovery, and observed business capabilities rather than rejecting it because it is absent from a map.",
+    "founder_goal": "Find businesses that can benefit from recovering, converting, retaining, or measuring inbound customer opportunities through Bvelt.",
+    "tenant_goal": "Find the Tenant's own potential customers using that Tenant's ICP, services, geography, and language configuration. Never substitute Founder targeting for Tenant targeting."
+  },
+  "bvelt_compatible_segments": [
+    "home_property_construction_and_trades",
+    "cleaning_facility_and_maintenance",
+    "automotive_transport_and_mobility",
+    "healthcare_dental_veterinary_and_wellness",
+    "beauty_fitness_and_personal_services",
+    "legal_financial_insurance_and_professional_services",
+    "real_estate_property_management_and_hospitality",
+    "education_training_and_child_family_services",
+    "restaurants_food_catering_and_events",
+    "retail_local_specialty_and_equipment",
+    "pet_services_and_animal_care",
+    "logistics_storage_and_delivery_services",
+    "industrial_b2b_manufacturing_and_maintenance",
+    "technology_it_and_managed_services",
+    "agriculture_landscape_and_outdoor_services",
+    "recreation_sports_tourism_and_venues",
+    "other_customer_inquiry_or_appointment_driven_businesses"
+  ],
+  "founder_fit_signals": [
+    "inbound_calls_or_messages",
+    "quotes_estimates_or_consultations",
+    "appointments_or_bookings",
+    "repeat_customers_or_reactivation",
+    "reviews_and_reputation_management",
+    "multiple_contact_channels",
+    "multiple_services_or_service_areas",
+    "lead_capture_and_follow_up_workflows"
+  ],
+  "scoring_rule": "Industry is descriptive, not a gate. Score the observed business model and Bvelt-compatible workflow. Missing evidence means unknown, not automatically negative."
+}

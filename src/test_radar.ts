@@ -1,6 +1,6 @@
 declare const process: any;
 
-import { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp } from './worker';
+import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem } from './worker';
 import { DEFAULT_FOUNDER_MISSION, MissionConfig } from './worker';
 import { fetchPermitContractors } from './permitSources';
 
@@ -1222,6 +1222,142 @@ tests.push({
     } finally {
       globalThis.fetch = originalFetch;
     }
+  }
+});
+
+// Test 40: Scrapling Sidecar Research Integration (/api/research/candidates, /api/research/evidence, candidate linking, sidecar dispatch)
+tests.push({
+  name: "Scrapling sidecar research endpoints, candidate linking, and evidence ingestion",
+  run: async () => {
+    const candidatesStore: any[] = [];
+    const evidenceStore: any[] = [];
+    const dispatchesStore: any[] = [];
+    const prospectsStore: any[] = [
+      {
+        id: "p_test_1001",
+        name: "Acme Plumbing",
+        city: "Tampa, FL",
+        trade: "plumbing",
+        website: "https://acmeplumbing.com",
+        signals_json: JSON.stringify({ signals: {} })
+      }
+    ];
+
+    const mockDb: any = {
+      batch: async (statements: any[]) => [],
+      prepare: (sql: string) => {
+        const sqlLower = sql.toLowerCase();
+        return {
+          bind: (...args: any[]) => {
+            return {
+              run: async () => {
+                if (sqlLower.includes("insert or ignore into research_run_candidates")) {
+                  candidatesStore.push({ run_id: args[0], mode: args[1], tenant_id: args[2], prospect_id: args[3], website: args[4] });
+                } else if (sqlLower.includes("insert or replace into source_evidence")) {
+                  evidenceStore.push({ evidence_id: args[0], prospect_id: args[1], run_id: args[2], source_url: args[3], extracted_text: args[4], metadata_json: args[5] });
+                } else if (sqlLower.includes("insert into sidecar_dispatches")) {
+                  dispatchesStore.push({ dispatch_id: args[0], run_id: args[1], mode: args[2], tenant_id: args[3], status: args[4], candidates_count: args[5] });
+                } else if (sqlLower.includes("update prospects set signals_json")) {
+                  const p = prospectsStore.find(x => x.id === args[2]);
+                  if (p) p.signals_json = args[0];
+                } else if (sqlLower.includes("update sidecar_dispatches")) {
+                  const d = dispatchesStore.find(x => x.run_id === args[1]);
+                  if (d) d.status = "completed";
+                }
+                return { success: true };
+              },
+              first: async () => {
+                if (sqlLower.includes("select count(*) as c from queue_jobs")) {
+                  return { c: 0 };
+                } else if (sqlLower.includes("select dispatch_id from sidecar_dispatches")) {
+                  const d = dispatchesStore.find(x => x.run_id === args[0] && x.tenant_id === args[1]);
+                  return d ? { dispatch_id: d.dispatch_id } : null;
+                } else if (sqlLower.includes("select count(*) as cnt from research_run_candidates")) {
+                  return { cnt: candidatesStore.length };
+                } else if (sqlLower.includes("select signals_json from prospects")) {
+                  const p = prospectsStore.find(x => x.id === args[0]);
+                  return p ? { signals_json: p.signals_json } : null;
+                }
+                return null;
+              },
+              all: async () => {
+                if (sqlLower.includes("from research_run_candidates")) {
+                  return {
+                    results: candidatesStore.map(c => {
+                      const p = prospectsStore.find(x => x.id === c.prospect_id);
+                      return {
+                        prospect_id: c.prospect_id,
+                        business_name: p ? p.name : "Acme Plumbing",
+                        city: p ? p.city : "Tampa, FL",
+                        trade: p ? p.trade : "plumbing",
+                        website: c.website || (p ? p.website : "https://acmeplumbing.com")
+                      };
+                    })
+                  };
+                }
+                return { results: [] };
+              }
+            };
+          }
+        };
+      }
+    };
+
+    const mockEnv: any = {
+      RADAR_DB: mockDb,
+      RADAR_SERVICE_KEY: "test_key",
+      RADAR_SIDECAR_CALLBACK_KEY: "sidecar_secret_123",
+      GITHUB_ACTIONS_TOKEN: "gh_test_token",
+      RADAR_RESEARCH_REPOSITORY: "rayleblanc/bvelt-radar"
+    };
+
+    // 1. Link candidate
+    await associateResearchCandidate(mockDb, "run_test_01", "founder", "founder", "p_test_1001", "https://acmeplumbing.com");
+    assert(candidatesStore.length === 1, "Candidate store should have 1 linked item");
+    assert(candidatesStore[0].prospect_id === "p_test_1001", "Prospect ID must match");
+
+    // 2. GET /api/research/candidates
+    const reqCandidates = new Request("https://radar.bvelt.app/api/research/candidates?run_id=run_test_01&mode=founder", {
+      headers: { "x-callback-key": "sidecar_secret_123" }
+    });
+    const resCandidates = await worker.fetch(reqCandidates, mockEnv, {} as any);
+    assert(resCandidates.status === 200, "Candidates endpoint should return status 200");
+    const jsonCandidates = await resCandidates.json() as any;
+    assert(jsonCandidates.candidates_count === 1, "Candidates count should be 1");
+    assert(jsonCandidates.candidates[0].website === "https://acmeplumbing.com", "Candidate website must match");
+
+    // 3. POST /api/research/evidence
+    const reqEvidence = new Request("https://radar.bvelt.app/api/research/evidence", {
+      method: "POST",
+      headers: {
+        "x-callback-key": "sidecar_secret_123",
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        items: [
+          {
+            prospect_id: "p_test_1001",
+            run_id: "run_test_01",
+            source_url: "https://acmeplumbing.com/about",
+            extracted_text: "Established 2012. 24/7 emergency plumbing service in Tampa Bay.",
+            metadata: { tech_stack: ["WordPress", "W3 Total Cache"], emergency_mentioned: true }
+          }
+        ]
+      })
+    });
+
+    const resEvidence = await worker.fetch(reqEvidence, mockEnv, {} as any);
+    assert(resEvidence.status === 200, "Evidence endpoint should return status 200");
+    const jsonEvidence = await resEvidence.json() as any;
+    assert(jsonEvidence.processed === 1, "Should have processed 1 evidence item");
+    assert(evidenceStore.length === 1, "Evidence store should have 1 stored item");
+
+    // 4. Check updated signals_json in prospect
+    const updatedProspect = prospectsStore.find(x => x.id === "p_test_1001");
+    assert(updatedProspect !== undefined, "Prospect must exist");
+    const parsedSignals = JSON.parse(updatedProspect.signals_json);
+    assert(parsedSignals.scrapling !== undefined, "signals.scrapling object must be set");
+    assert(parsedSignals.scrapling.source_url === "https://acmeplumbing.com/about", "Source URL must match");
   }
 });
 

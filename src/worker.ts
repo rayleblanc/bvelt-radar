@@ -16,6 +16,7 @@ import { dispatchEmail, normalizeOutreachBody, BVELT_SITE, EmailDispatchResult }
 import { auditDomainSecurityAndMx, auditWebsitePerformance, auditCityWeatherEmergency } from './openAudits';
 import { pickTargets, findPlace, findNearestPlace, formatPlaceLabel, markSearched, placeKey, radiusKm, haversineKm } from './geoFrontier';
 import { sanitizeEmail, sanitizeProspectEmail, isOffIcpName, hasMxRecords } from './emailSanitizer';
+import { dispatchScraplingResearch } from './research/githubActions';
 
 // Global type declarations for Cloudflare Worker compilation
 declare global {
@@ -116,6 +117,10 @@ export interface Env {
   AI?: { run(model: string, input: any): Promise<any> };
   BVELT_INGEST_URL?: string;
   BVELT_INGEST_KEY?: string;
+  GITHUB_ACTIONS_TOKEN?: string;
+  RADAR_RESEARCH_REPOSITORY?: string;
+  RADAR_SIDECAR_CALLBACK_KEY?: string;
+  RADAR_SERVICE_KEY?: string;
 }
 
 export function getBudgetLimit(unitType: string): number {
@@ -893,7 +898,7 @@ export default {
         if (method === "GET" || method === "POST") {
           const mode = url.searchParams.get("mode") || "founder";
           const tenantId = url.searchParams.get("tenant_id") || null;
-          const force = mode === "tenant" || url.searchParams.get("force") === "true";
+          const force = url.searchParams.get("force") !== "false";
           
           const overrides = {
             cities: url.searchParams.get("cities") || url.searchParams.get("geographies") || null,
@@ -934,8 +939,10 @@ export default {
       const isWebhookPath = method === "POST" && ["/api/events", "/events", "/api/reply", "/webhook/events", "/webhook/resend", "/webhook/brevo"].includes(path);
       const webhookSecret = (((env as any).WEBHOOK_SECRET || env.TELEGRAM_WEBHOOK_SECRET || "") as string).trim() || undefined;
       const webhookOk = isWebhookPath && !!webhookSecret && url.searchParams.get("token") === webhookSecret;
+      const isResearchCallbackPath = path.startsWith("/api/research/") || path.startsWith("/research/");
+      const callbackOk = isResearchCallbackPath && isCallbackAuthorized(request, env);
 
-      if (!authorized && !webhookOk) {
+      if (!authorized && !webhookOk && !callbackOk) {
         return Response.json({ error: "Unauthorized. Missing or invalid service key." }, { status: 401, headers: corsHeaders });
       }
 
@@ -2242,6 +2249,169 @@ export default {
         }, { headers: corsHeaders });
       }
 
+      // 19. Scrapling Sidecar Research Endpoints (/api/research/candidates, /api/research/evidence)
+      if ((path === "/api/research/candidates" || path === "/research/candidates") && method === "GET") {
+        if (!isCallbackAuthorized(request, env)) {
+          return Response.json({ error: "Unauthorized. Missing or invalid callback key." }, { status: 401, headers: corsHeaders });
+        }
+
+        await ensureResearchSchema(env.RADAR_DB);
+
+        const runId = url.searchParams.get("run_id");
+        const mode = url.searchParams.get("mode") || "founder";
+        const tenantId = url.searchParams.get("tenant_id") || (mode === "tenant" ? "" : "founder");
+
+        if (!runId) {
+          return Response.json({ error: "Missing required query parameter: run_id" }, { status: 400, headers: corsHeaders });
+        }
+
+        const query = `
+          SELECT 
+            c.prospect_id,
+            p.name AS business_name,
+            p.city,
+            p.trade,
+            COALESCE(c.website, p.website) AS website
+          FROM research_run_candidates c
+          JOIN prospects p ON c.prospect_id = p.id
+          WHERE c.run_id = ?
+            AND (c.tenant_id = ? OR (? = 'founder' AND c.mode = 'founder'))
+            AND COALESCE(c.website, p.website) IS NOT NULL
+            AND COALESCE(c.website, p.website) != ''
+          LIMIT 50
+        `;
+
+        const results = (await env.RADAR_DB.prepare(query)
+          .bind(runId, tenantId, tenantId)
+          .all()) as any;
+
+        const candidates = ((results && results.results) || []).map((row: any) => ({
+          prospect_id: row.prospect_id,
+          business_name: row.business_name || "Unknown Business",
+          city: row.city || "",
+          trade: row.trade || "",
+          website: row.website
+        }));
+
+        return Response.json({
+          run_id: runId,
+          mode,
+          tenant_id: tenantId,
+          candidates_count: candidates.length,
+          candidates
+        }, { headers: corsHeaders });
+      }
+
+      if ((path === "/api/research/evidence" || path === "/research/evidence") && method === "POST") {
+        if (!isCallbackAuthorized(request, env)) {
+          return Response.json({ error: "Unauthorized. Missing or invalid callback key." }, { status: 401, headers: corsHeaders });
+        }
+
+        await ensureResearchSchema(env.RADAR_DB);
+
+        let body: any;
+        try {
+          const rawText = await request.text();
+          if (rawText.length > 1024 * 1024) {
+            return Response.json({ error: "Payload too large. Exceeds 1 MB limit." }, { status: 413, headers: corsHeaders });
+          }
+          body = JSON.parse(rawText);
+        } catch (e) {
+          return Response.json({ error: "Invalid JSON payload." }, { status: 400, headers: corsHeaders });
+        }
+
+        const items: any[] = Array.isArray(body) ? body : (body.items || body.evidence || []);
+
+        if (!Array.isArray(items) || items.length === 0) {
+          return Response.json({ error: "No evidence items provided." }, { status: 400, headers: corsHeaders });
+        }
+
+        if (items.length > 100) {
+          return Response.json({ error: "Batch size exceeds maximum limit of 100 items." }, { status: 400, headers: corsHeaders });
+        }
+
+        let insertedCount = 0;
+        const processedRuns = new Set<string>();
+
+        for (const item of items) {
+          const prospectId = item.prospect_id || item.prospectId;
+          const runId = item.run_id || item.runId || null;
+          const sourceUrl = item.source_url || item.sourceUrl || item.url || "";
+          const extractedText = item.extracted_text || item.extractedText || item.summary || "";
+          const metadata = item.metadata || item.evidence || item.scrapling || {};
+
+          if (!prospectId || !sourceUrl) {
+            continue;
+          }
+
+          const evidenceId = item.evidence_id || item.evidenceId || `ev_${crypto.randomUUID().replace(/-/g, "").substring(0, 16)}`;
+          const metadataJson = typeof metadata === "string" ? metadata : JSON.stringify(metadata);
+
+          try {
+            await env.RADAR_DB.prepare(`
+              INSERT OR REPLACE INTO source_evidence (evidence_id, prospect_id, run_id, source_url, extracted_text, metadata_json, created_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?)
+            `).bind(
+              evidenceId,
+              prospectId,
+              runId,
+              sourceUrl,
+              extractedText,
+              metadataJson,
+              new Date().toISOString()
+            ).run();
+
+            const prospectRow = (await env.RADAR_DB.prepare(`
+              SELECT signals_json FROM prospects WHERE id = ?
+            `).bind(prospectId).first()) as any;
+
+            if (prospectRow) {
+              let signalsObj: any = {};
+              try {
+                signalsObj = JSON.parse(prospectRow.signals_json || "{}");
+              } catch (e) {
+                signalsObj = {};
+              }
+
+              if (!signalsObj.signals) signalsObj.signals = {};
+              signalsObj.scrapling = {
+                ...(signalsObj.scrapling || {}),
+                evidence_id: evidenceId,
+                source_url: sourceUrl,
+                extracted_summary: extractedText.substring(0, 500),
+                metadata: typeof metadata === "object" ? metadata : {},
+                received_at: new Date().toISOString()
+              };
+
+              await env.RADAR_DB.prepare(`
+                UPDATE prospects SET signals_json = ?, updated_at = ? WHERE id = ?
+              `).bind(JSON.stringify(signalsObj), new Date().toISOString(), prospectId).run();
+            }
+
+            insertedCount++;
+            if (runId) processedRuns.add(runId);
+          } catch (err) {
+            console.error(`[ResearchEvidence] Error saving evidence for prospect ${prospectId}:`, err);
+          }
+        }
+
+        for (const rId of processedRuns) {
+          try {
+            await env.RADAR_DB.prepare(`
+              UPDATE sidecar_dispatches 
+              SET status = 'completed', updated_at = ? 
+              WHERE run_id = ?
+            `).bind(new Date().toISOString(), rId).run();
+          } catch (e) {}
+        }
+
+        return Response.json({
+          status: "ok",
+          processed: insertedCount,
+          total_received: items.length
+        }, { headers: corsHeaders });
+      }
+
       return Response.json({ error: "Not Found" }, { status: 404, headers: corsHeaders });
 
     } catch (error: any) {
@@ -2502,6 +2672,164 @@ export default {
   }
 };
 
+let researchSchemaEnsured = false;
+
+export async function ensureResearchSchema(db: D1Database): Promise<void> {
+  if (researchSchemaEnsured || !db) return;
+  try {
+    await db.batch([
+      db.prepare(`
+        CREATE TABLE IF NOT EXISTS research_run_candidates (
+          run_id TEXT NOT NULL,
+          mode TEXT NOT NULL DEFAULT 'founder',
+          tenant_id TEXT NOT NULL DEFAULT 'founder',
+          prospect_id TEXT NOT NULL,
+          website TEXT,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY (run_id, prospect_id)
+        );
+      `),
+      db.prepare(`
+        CREATE TABLE IF NOT EXISTS sidecar_dispatches (
+          dispatch_id TEXT PRIMARY KEY,
+          run_id TEXT NOT NULL,
+          mode TEXT NOT NULL DEFAULT 'founder',
+          tenant_id TEXT NOT NULL DEFAULT 'founder',
+          status TEXT NOT NULL DEFAULT 'dispatched',
+          candidates_count INTEGER NOT NULL DEFAULT 0,
+          dispatched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(run_id, tenant_id)
+        );
+      `),
+      db.prepare(`
+        CREATE TABLE IF NOT EXISTS source_evidence (
+          evidence_id TEXT PRIMARY KEY,
+          prospect_id TEXT NOT NULL,
+          run_id TEXT,
+          source_url TEXT NOT NULL,
+          extracted_text TEXT,
+          metadata_json TEXT,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+      `),
+      db.prepare(`
+        CREATE INDEX IF NOT EXISTS idx_research_candidates_run_tenant 
+        ON research_run_candidates(run_id, tenant_id);
+      `),
+      db.prepare(`
+        CREATE INDEX IF NOT EXISTS idx_source_evidence_prospect 
+        ON source_evidence(prospect_id);
+      `)
+    ]);
+    researchSchemaEnsured = true;
+  } catch (err) {
+    console.warn("[ResearchSchema] Schema initialization warning:", err);
+  }
+}
+
+export async function associateResearchCandidate(
+  db: D1Database,
+  runId: string,
+  mode: string,
+  tenantId: string | null,
+  prospectId: string,
+  website?: string | null
+): Promise<void> {
+  if (!runId || !prospectId || !db) return;
+  await ensureResearchSchema(db);
+  const m = mode || 'founder';
+  const t = tenantId || (m === 'founder' ? 'founder' : 'default');
+  try {
+    await db.prepare(`
+      INSERT OR IGNORE INTO research_run_candidates (run_id, mode, tenant_id, prospect_id, website)
+      VALUES (?, ?, ?, ?, ?)
+    `).bind(runId, m, t, prospectId, website || null).run();
+  } catch (err) {
+    console.warn(`[associateResearchCandidate] Error linking prospect ${prospectId} to run ${runId}:`, err);
+  }
+}
+
+export async function maybeDispatchSidecarResearch(
+  env: Env,
+  runId: string,
+  mode: string,
+  tenantId: string | null
+): Promise<boolean> {
+  if (!runId || !env.RADAR_DB) return false;
+  await ensureResearchSchema(env.RADAR_DB);
+  const m = mode || 'founder';
+  const t = tenantId || (m === 'founder' ? 'founder' : 'default');
+
+  try {
+    const pendingRes = (await env.RADAR_DB.prepare(`
+      SELECT COUNT(*) as c FROM queue_jobs 
+      WHERE run_id = ? AND job_type = 'discovery' AND status IN ('pending', 'processing')
+    `).bind(runId).first()) as any;
+
+    if (pendingRes && pendingRes.c > 0) {
+      console.log(`[maybeDispatchSidecarResearch] Discovery jobs still running for run ${runId} (count=${pendingRes.c})`);
+      return false;
+    }
+
+    const existingDispatch = (await env.RADAR_DB.prepare(`
+      SELECT dispatch_id FROM sidecar_dispatches WHERE run_id = ? AND tenant_id = ?
+    `).bind(runId, t).first()) as any;
+
+    if (existingDispatch) {
+      console.log(`[maybeDispatchSidecarResearch] Sidecar research already dispatched for run ${runId}, tenant ${t}`);
+      return false;
+    }
+
+    const candidatesRes = (await env.RADAR_DB.prepare(`
+      SELECT COUNT(*) as cnt FROM research_run_candidates 
+      WHERE run_id = ? AND tenant_id = ? AND website IS NOT NULL AND website != ''
+    `).bind(runId, t).first()) as any;
+
+    const candidateCount = candidatesRes?.cnt || 0;
+    if (candidateCount === 0) {
+      console.log(`[maybeDispatchSidecarResearch] No website candidates found for run ${runId}, tenant ${t}`);
+      return false;
+    }
+
+    const dispatchResult = await dispatchScraplingResearch(env, {
+      run_id: runId,
+      mode: m === 'tenant' ? 'tenant' : 'founder',
+      tenant_id: t
+    });
+
+    if (dispatchResult.queued) {
+      const dispatchId = `dispatch_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+      await env.RADAR_DB.prepare(`
+        INSERT INTO sidecar_dispatches (dispatch_id, run_id, mode, tenant_id, status, candidates_count)
+        VALUES (?, ?, ?, ?, 'dispatched', ?)
+      `).bind(dispatchId, runId, m, t, candidateCount).run();
+      console.log(`[maybeDispatchSidecarResearch] Successfully dispatched Scrapling research for run ${runId} (${candidateCount} candidates)`);
+      return true;
+    } else {
+      console.warn(`[maybeDispatchSidecarResearch] Dispatch skipped or failed: ${dispatchResult.reason}`);
+      return false;
+    }
+  } catch (err) {
+    console.error(`[maybeDispatchSidecarResearch] Error in dispatch check for run ${runId}:`, err);
+    return false;
+  }
+}
+
+function isCallbackAuthorized(request: Request, env: Env): boolean {
+  const authHeader = request.headers.get("authorization");
+  const callbackKeyHeader = request.headers.get("x-callback-key");
+  const expectedKey = env.RADAR_SIDECAR_CALLBACK_KEY;
+
+  if (expectedKey) {
+    if (callbackKeyHeader && callbackKeyHeader === expectedKey) return true;
+    if (authHeader && authHeader === `Bearer ${expectedKey}`) return true;
+  }
+
+  const serviceKey = env.RADAR_SERVICE_KEY || "bvelt-service-key-default-2026";
+  return isAuthorized(request, env, serviceKey);
+}
+
 /**
  * Enhanced Health Check with usage metrics & Cloudflare Queues observability
  */
@@ -2655,6 +2983,23 @@ async function handleHealth(env: Env, headers: Record<string, string>, tenantId:
   const circuitBreakerActive = cb ? cb.status === 'open' : false;
   const circuitBreakerReason = cb ? cb.reason : null;
 
+  let sidecarDiagnostics = {
+    ready: true,
+    dispatches_count: 0,
+    evidence_count: 0,
+    latest_dispatch_status: null as string | null
+  };
+
+  try {
+    await ensureResearchSchema(db);
+    const dispRow = await db.prepare("SELECT COUNT(*) as c FROM sidecar_dispatches").first() as any;
+    if (dispRow) sidecarDiagnostics.dispatches_count = dispRow.c || 0;
+    const latestDisp = await db.prepare("SELECT status FROM sidecar_dispatches ORDER BY dispatched_at DESC LIMIT 1").first() as any;
+    if (latestDisp) sidecarDiagnostics.latest_dispatch_status = latestDisp.status;
+    const evRow = await db.prepare("SELECT COUNT(*) as c FROM source_evidence").first() as any;
+    if (evRow) sidecarDiagnostics.evidence_count = evRow.c || 0;
+  } catch (e) {}
+
   return Response.json({
     status: globalPause ? "paused" : circuitBreakerActive ? "paused" : failedJobs > 0 && pendingJobs === 0 ? "degraded" : "healthy",
     global_pause: globalPause,
@@ -2679,6 +3024,7 @@ async function handleHealth(env: Env, headers: Record<string, string>, tenantId:
     hunter_remaining_estimate: hunterRemaining,
     last_run: lastRunDate,
     last_run_diagnostics: lastDiagnostics,
+    sidecar: sidecarDiagnostics,
     diagnostics: lastDiagnostics || {
       bizdata_status: "ready",
       overpass_status: "ready",
@@ -3447,9 +3793,15 @@ export async function processQueueJob(job: RadarJobMessage, env: Env): Promise<v
         console.warn(`[Queue Router] Unknown job type: ${job.type}`);
     }
     await recordQueueJobStatus(env.RADAR_DB, job.job_id, job.run_id, job.type, 'completed');
+    if (job.type === 'discovery') {
+      await maybeDispatchSidecarResearch(env, job.run_id, job.mode || 'founder', job.tenant_id || (job.mode === 'tenant' ? job.tenant_id : 'founder'));
+    }
   } catch (err: any) {
     console.error(`[Queue Router Error] Job [${job.type} / ${job.job_id}] failed:`, err);
     await recordQueueJobStatus(env.RADAR_DB, job.job_id, job.run_id, job.type, 'failed', err.message || String(err));
+    if (job.type === 'discovery') {
+      await maybeDispatchSidecarResearch(env, job.run_id, job.mode || 'founder', job.tenant_id || (job.mode === 'tenant' ? job.tenant_id : 'founder'));
+    }
     throw err;
   }
 }
@@ -4462,6 +4814,7 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
     const overlap = await findExistingProspectOverlap(env.RADAR_DB, candidate.email, candidate.website, candidate.phone, candidate.name, candidate.city, job.tenant_id || "founder");
     if (overlap) {
       const p = overlap.overlap;
+      await associateResearchCandidate(env.RADAR_DB, job.run_id, job.mode, job.tenant_id, p.id, p.website || candidate.website || null);
       const status = (p.status || '').toLowerCase();
       const outcome = (p.outcome || '').toLowerCase();
 
@@ -4596,6 +4949,8 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
       signalArea,
       postalCode
     ).run();
+
+    await associateResearchCandidate(env.RADAR_DB, job.run_id, job.mode, job.tenant_id, prospectId, candidate.website || null);
 
     if (candidate.seed_id) {
       try {

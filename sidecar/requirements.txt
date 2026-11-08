@@ -1,0 +1,3 @@
+# Scrapling's fetcher extra supplies HTTP fetchers and browser integrations.
+# Keep below the next major version; lock an exact tested version after CI passes.
+scrapling[fetchers]>=0.4.12,<0.5

@@ -1,0 +1,68 @@
+name: Radar Scrapling Research
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Existing Radar run ID
+        required: true
+        type: string
+      mode:
+        description: founder or tenant
+        required: true
+        type: choice
+        options:
+          - founder
+          - tenant
+      tenant_id:
+        description: founder or the exact Tenant ID
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: radar-research-${{ inputs.run_id }}-${{ inputs.tenant_id }}
+  cancel-in-progress: false
+
+jobs:
+  research:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout Radar
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: sidecar/requirements.txt
+
+      - name: Cache Scrapling browser binaries
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/ms-playwright
+            ~/.cache/patchright
+          key: scrapling-browser-${{ runner.os }}-py312-v1
+
+      - name: Install Scrapling and dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r sidecar/requirements.txt
+          scrapling install
+
+      - name: Run research and return evidence to Radar
+        env:
+          RADAR_WORKER_URL: ${{ secrets.RADAR_WORKER_URL }}
+          RADAR_SIDECAR_CALLBACK_KEY: ${{ secrets.RADAR_SIDECAR_CALLBACK_KEY }}
+          RADAR_RUN_ID: ${{ inputs.run_id }}
+          RADAR_MODE: ${{ inputs.mode }}
+          RADAR_TENANT_ID: ${{ inputs.tenant_id }}
+          SIDECAR_ENABLE_BROWSER: "1"
+        run: python -m sidecar.runner
