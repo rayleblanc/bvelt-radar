@@ -9,7 +9,7 @@ keep_vars = true
 BVELT_TENANT_INGEST_URL = "https://bvelt.app/api/radar/tenant-observations"
 
 [secrets]
-required = ["FOUNDER_SERVICE_KEY", "RADAR_SERVICE_KEY", "BVELT_TENANT_INGEST_KEY"]
+required = ["FOUNDER_SERVICE_KEY"]
 
 [build]
 command = "npm run build"
