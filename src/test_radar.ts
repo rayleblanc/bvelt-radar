@@ -1269,7 +1269,7 @@ tests.push({
         const tenantRes = await sendTenantObservationsToBvelt(tenantEnv, "t_tenant123");
         assert(tenantRes.ok === true, "Tenant observation push must succeed");
         assert(tenantRes.sent_count === 1, "Should send 1 tenant prospect");
-        assert(tenantPostCalled === true, "Fetch must be invoked for tenant push");
+        assert(Boolean(tenantPostCalled), "Fetch must be invoked for tenant push");
         assert(tenantHeaderTenantId === "t_tenant123", "X-Bvelt-Tenant-Id header must match tenant ID");
         assert(tenantPostBody.tenant_id === "t_tenant123", "Payload tenant_id must be t_tenant123");
         assert(tenantPostBody.items[0].name === "Lone Star Plumbing", "Item should be Lone Star Plumbing");
