@@ -9872,8 +9872,6 @@ export async function pushMarketObservationsToBem(env: Env): Promise<{
     return { skipped: true, reason: "missing_config" };
   }
 
-  const day = new Date().toISOString().split("T")[0];
-
   try {
     await env.RADAR_DB.prepare(`
       CREATE TABLE IF NOT EXISTS radar_bem_sync_state (
@@ -9933,7 +9931,7 @@ export async function pushMarketObservationsToBem(env: Env): Promise<{
     const payload = {
       source: "bvelt-radar",
       observed_at: new Date().toISOString(),
-      run_id: `founder-cursor-${day}-${founderOnly[founderOnly.length - 1]?.id || "empty"}`,
+      run_id: `founder-cursor-${founderOnly[founderOnly.length - 1]?.id || "empty"}`,
       items
     };
 
