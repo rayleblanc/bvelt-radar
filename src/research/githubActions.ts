@@ -55,6 +55,7 @@ export async function dispatchScraplingResearch(
         Authorization: `Bearer ${token}`,
         "X-GitHub-Api-Version": "2022-11-28",
         "Content-Type": "application/json",
+        "User-Agent": "BveltRadarResearch/1.0 (+https://bvelt.app)",
       },
       body: JSON.stringify({
         ref: "main",
