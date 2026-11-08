@@ -9872,6 +9872,8 @@ export async function pushMarketObservationsToBem(env: Env): Promise<{
     return { skipped: true, reason: "missing_config" };
   }
 
+  const day = new Date().toISOString().split("T")[0];
+
   try {
     await env.RADAR_DB.prepare(`
       CREATE TABLE IF NOT EXISTS radar_bem_sync_state (
