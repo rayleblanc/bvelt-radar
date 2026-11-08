@@ -121,6 +121,8 @@ export interface Env {
   RADAR_RESEARCH_REPOSITORY?: string;
   RADAR_SIDECAR_CALLBACK_KEY?: string;
   RADAR_SERVICE_KEY?: string;
+  BVELT_TENANT_INGEST_URL?: string;
+  BVELT_TENANT_INGEST_KEY?: string;
 }
 
 export function getBudgetLimit(unitType: string): number {
@@ -1944,7 +1946,12 @@ export default {
             languages: config.languages_json ? JSON.parse(config.languages_json).join(";") : null,
             min_score: null
           }, true);
-          return Response.json({ success: true, status: "started", tenant_id: tenantId, run_id: runResult.run_id, trigger }, { headers: corsHeaders });
+          const syncResult = await sendTenantObservationsToBvelt(env, tenantId, { limit: 100 }).catch(() => ({
+            skipped: true,
+            reason: "tenant_ingest_sync_failed",
+            tenant_id: tenantId
+          }));
+          return Response.json({ success: true, status: "started", tenant_id: tenantId, run_id: runResult.run_id, trigger, sync: syncResult }, { headers: corsHeaders });
         } catch (error: any) {
           await env.RADAR_DB.prepare("DELETE FROM tenant_refresh_log WHERE tenant_id = ? AND last_at = ?").bind(tenantId, now).run();
           return Response.json({ error: error?.message || "tenant_search_failed" }, { status: 500, headers: corsHeaders });
@@ -2089,6 +2096,10 @@ export default {
         } catch (e) {
           console.warn("[Outcome] Failed to update prospects outcome (missing migration?):", e);
         }
+
+        await sendTenantObservationsToBvelt(env, tenant_id, {
+          prospectIds: [String(prospect_id)]
+        }).catch((error) => console.warn("[Tenant Bvelt Sync] Outcome sync failed:", error));
 
         if ((outcome === "replied" || outcome === "won") && prospect.city && prospect.trade) {
           try {
@@ -6031,6 +6042,9 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
 
   if (isTenant) {
     await env.RADAR_DB.prepare("UPDATE prospects SET status = 'qualified' WHERE id = ?").bind(prospect_id).run();
+    await sendTenantObservationsToBvelt(env, String(job.tenant_id || ""), {
+      prospectIds: [String(prospect_id)]
+    }).catch((error) => console.warn("[Tenant Bvelt Sync] Qualified prospect sync failed:", error));
     return;
   }
 
@@ -9797,7 +9811,7 @@ export async function pushMarketObservationsToBem(env: Env): Promise<{
 export async function sendTenantObservationsToBvelt(
   env: Env,
   tenantId: string,
-  options?: { limit?: number; since?: string }
+  options?: { limit?: number; since?: string; prospectIds?: string[] }
 ): Promise<{
   ok?: boolean;
   skipped?: boolean;
@@ -9805,7 +9819,7 @@ export async function sendTenantObservationsToBvelt(
   sent_count?: number;
   tenant_id: string;
 }> {
-  if (!tenantId || tenantId === "founder") {
+  if (!tenantId || !tenantId.startsWith("bvelt_")) {
     return { skipped: true, reason: "tenant_id_required", tenant_id: tenantId };
   }
   const ingestUrl = (env as any).BVELT_TENANT_INGEST_URL;
@@ -9813,17 +9827,24 @@ export async function sendTenantObservationsToBvelt(
   if (!ingestUrl || !ingestKey) {
     return { skipped: true, reason: "missing_dedicated_tenant_ingest_config", tenant_id: tenantId };
   }
-  const limit = options?.limit || 100;
+  const limit = Math.min(500, Math.max(1, options?.limit || 100));
   const sinceClause = options?.since ? "AND created_at >= ?" : "";
+  const prospectIds = Array.isArray(options?.prospectIds)
+    ? options!.prospectIds!.map(id => String(id).trim()).filter(Boolean).slice(0, 100)
+    : [];
+  const idsClause = prospectIds.length ? `AND id IN (${prospectIds.map(() => "?").join(",")})` : "";
   const params: any[] = [tenantId];
   if (options?.since) params.push(options.since);
+  params.push(...prospectIds);
   params.push(limit);
 
   const rows = await env.RADAR_DB.prepare(`
     SELECT id, tenant_id, name, city, trade, website, phone, email, score, status, tenant_outcome, bvelt_angle, created_at
     FROM prospects
     WHERE tenant_id = ?
+      AND mode = 'tenant'
       ${sinceClause}
+      ${idsClause}
     ORDER BY created_at DESC
     LIMIT ?
   `).bind(...params).all();
