@@ -28,6 +28,19 @@ class URLPolicyTests(unittest.TestCase):
         mock_dns.return_value = [(None, None, None, None, ("10.0.0.4", 443))]
         self.assertFalse(is_public_http_url("https://example.com/"))
 
+    @patch("sidecar.radar_sidecar.url_policy.socket.getaddrinfo")
+    def test_rejects_mixed_public_and_private_dns_answers(self, mock_dns):
+        mock_dns.return_value = [
+            (None, None, None, None, ("93.184.216.34", 443)),
+            (None, None, None, None, ("10.0.0.4", 443)),
+        ]
+        self.assertFalse(is_public_http_url("https://example.com/"))
+
+    @patch("sidecar.radar_sidecar.url_policy.socket.getaddrinfo")
+    def test_allows_relative_redirect_to_same_public_host(self, mock_dns):
+        mock_dns.return_value = [(None, None, None, None, ("93.184.216.34", 443))]
+        self.assertTrue(is_safe_redirect_target("https://example.com/start", "/contact"))
+
     def test_rejects_redirect_to_private_address(self):
         base_url = "https://example.com/start"
         self.assertFalse(is_safe_redirect_target(base_url, "http://127.0.0.1:8080/admin"))
