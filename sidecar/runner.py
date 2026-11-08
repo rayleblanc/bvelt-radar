@@ -68,31 +68,53 @@ def main() -> int:
         raise RuntimeError("Radar candidates response has an invalid records field")
 
     print(f"Research run={run_id} mode={mode} tenant={tenant_id} candidates={len(candidates)}")
-    evidence = scrape_candidates(candidates) if candidates else []
-    if not candidates:
-        print("No eligible website candidates; closing research run with zero evidence.")
-    elif not evidence:
-        print("No evidence extracted from eligible public business websites.")
+    try:
+        evidence = scrape_candidates(candidates) if candidates else []
+        if not candidates:
+            print("No eligible website candidates; closing research run with zero evidence.")
+        elif not evidence:
+            print("No evidence extracted from eligible public business websites.")
 
-    # Always callback, including an empty result, so Radar can mark the dispatch
-    # completed rather than leaving it permanently in queued/running state.
-    callback_url = f"{worker_url}/api/research/evidence"
-    result = _api_request(
-        callback_url,
-        callback_key,
-        method="POST",
-        payload={
+        callback_payload = {
             "run_id": run_id,
             "mode": mode,
             "tenant_id": tenant_id,
             "extractor_version": "bvelt-scrapling-1.0.0",
             "run_status": "completed",
+            "status": "completed",
             "candidates_received": len(candidates),
             "records": evidence,
-        },
-    )
-    print(json.dumps({"callback": "accepted", "result": result}, ensure_ascii=False))
-    return 0
+        }
+    except Exception as exc:
+        print(f"Research runner encountered fatal error during extraction: {exc}", file=sys.stderr)
+        callback_payload = {
+            "run_id": run_id,
+            "mode": mode,
+            "tenant_id": tenant_id,
+            "extractor_version": "bvelt-scrapling-1.0.0",
+            "run_status": "failed",
+            "status": "failed",
+            "error": str(exc),
+            "candidates_received": len(candidates),
+            "records": [],
+        }
+
+    # Always callback, including an empty or failed result, so Radar can update the dispatch
+    # rather than leaving it permanently in queued/running state.
+    callback_url = f"{worker_url}/api/research/evidence"
+    try:
+        result = _api_request(
+            callback_url,
+            callback_key,
+            method="POST",
+            payload=callback_payload,
+        )
+        print(json.dumps({"callback": "accepted", "result": result}, ensure_ascii=False))
+    except Exception as cb_exc:
+        print(f"Failed to post evidence callback: {cb_exc}", file=sys.stderr)
+        return 1
+
+    return 0 if callback_payload.get("status") != "failed" else 1
 
 
 if __name__ == "__main__":

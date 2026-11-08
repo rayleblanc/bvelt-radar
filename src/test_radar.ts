@@ -1200,25 +1200,82 @@ tests.push({
 
       const pushRes = await pushMarketObservationsToBem(configuredEnv);
       assert(pushRes.ok === true, "Push should succeed with HTTP 200");
-      assert(pushRes.accepted === 2, "Should report 2 accepted items");
+      assert(pushRes.accepted === 1, "Should report 1 accepted item (Founder only, Tenant strictly blocked from BEM)");
       assert(tracker.postCalled === true, "POST fetch must have been called");
       assert(authHeader === "Bearer test_ingest_key_123", "Authorization header must be Bearer key");
       assert(postBody.source === "bvelt-radar", "Payload source must be bvelt-radar");
-      assert(postBody.items.length === 2, "Payload must include 2 items");
+      assert(postBody.items.length === 1, "Payload must include ONLY 1 founder item");
 
       const item1 = postBody.items[0];
       assert(item1.mode === "founder", "Item 1 mode should be founder");
+      assert(item1.tenant_id === "founder", "Item 1 tenant_id should be founder");
       assert(item1.has_website === true, "Item 1 has_website should be true");
       assert(item1.has_phone === true, "Item 1 has_phone should be true");
       assert(item1.has_email === true, "Item 1 has_email should be true");
       assert(item1.score === 82, "Item 1 score should be 82");
 
-      const item2 = postBody.items[1];
-      assert(item2.mode === "tenant", "Item 2 mode should be tenant");
-      assert(item2.tenant_id === "t_tenant123", "Item 2 tenant_id should match");
-      assert(item2.has_website === false, "Item 2 without website should have has_website false");
-      assert(item2.has_email === false, "Item 2 without email should have has_email false");
-      assert(item2.score === 65, "Item 2 score should be 65");
+      // Verify no tenant records leaked into BEM
+      const leakedTenant = postBody.items.find((it: any) => it.tenant_id !== "founder" || it.mode !== "founder");
+      assert(!leakedTenant, "Zero tenant records should enter global BEM");
+
+      // 3. Test dedicated Tenant sender (sendTenantObservationsToBvelt)
+      const { sendTenantObservationsToBvelt } = await import('./worker');
+      let tenantPostCalled = false;
+      let tenantPostBody: any = null;
+      let tenantHeaderTenantId: string = "";
+
+      const originalFetch2 = globalThis.fetch;
+      globalThis.fetch = (async (url: any, init?: any) => {
+        if (String(url).includes("bvelt.app/api/radar/observations")) {
+          tenantPostCalled = true;
+          tenantHeaderTenantId = init?.headers?.["X-Bvelt-Tenant-Id"] || "";
+          tenantPostBody = JSON.parse(init?.body || "{}");
+          return new Response(JSON.stringify({ ok: true, accepted: 1 }), { status: 200 });
+        }
+        return originalFetch2(url, init);
+      }) as any;
+
+      try {
+        const tenantEnv: any = {
+          BVELT_INGEST_URL: "https://bvelt.app/api/radar/observations",
+          BVELT_INGEST_KEY: "test_tenant_key_456",
+          RADAR_DB: {
+            prepare: (sql: string) => ({
+              bind: (...args: any[]) => ({
+                all: async () => ({
+                  results: [
+                    {
+                      id: "p_tenant_1",
+                      tenant_id: "t_tenant123",
+                      name: "Lone Star Plumbing",
+                      city: "Dallas, TX",
+                      trade: "plumbing",
+                      website: "https://lonestarplumb.com",
+                      phone: "+12145550200",
+                      email: "info@lonestar.com",
+                      score: 77,
+                      status: "qualified",
+                      tenant_outcome: null,
+                      bvelt_angle: "property_management",
+                      created_at: new Date().toISOString()
+                    }
+                  ]
+                })
+              })
+            })
+          }
+        };
+
+        const tenantRes = await sendTenantObservationsToBvelt(tenantEnv, "t_tenant123");
+        assert(tenantRes.ok === true, "Tenant observation push must succeed");
+        assert(tenantRes.sent_count === 1, "Should send 1 tenant prospect");
+        assert(tenantPostCalled === true, "Fetch must be invoked for tenant push");
+        assert(tenantHeaderTenantId === "t_tenant123", "X-Bvelt-Tenant-Id header must match tenant ID");
+        assert(tenantPostBody.tenant_id === "t_tenant123", "Payload tenant_id must be t_tenant123");
+        assert(tenantPostBody.items[0].name === "Lone Star Plumbing", "Item should be Lone Star Plumbing");
+      } finally {
+        globalThis.fetch = originalFetch2;
+      }
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -1659,6 +1716,381 @@ tests.push({
     } finally {
       globalThis.fetch = originalFetch;
     }
+  }
+});
+
+// Test 41: Security and Tenant Isolation Hard Gates
+tests.push({
+  name: "Security and Tenant Isolation: unauthenticated requests rejected 401, cross-tenant access blocked 403",
+  run: async () => {
+    const { resolveTenantAuthContext } = await import('./worker');
+    const mockDb: any = {
+      prepare: (sql: string) => ({
+        bind: (...args: any[]) => ({
+          first: async () => {
+            if (sql.includes("FROM prospects WHERE id = ?")) {
+              return { id: "p_target_01", tenant_id: "tenant_alpha" };
+            }
+            if (sql.includes("FROM tenant_config WHERE tenant_id = ?")) {
+              return { tenant_id: args[0], tenant_name: "Test Tenant" };
+            }
+            return null;
+          },
+          all: async () => ({ results: [] }),
+          run: async () => ({ success: true })
+        })
+      })
+    };
+
+    const mockEnv: any = {
+      RADAR_DB: mockDb,
+      FOUNDER_SERVICE_KEY: "secret_founder_svc_key",
+      RADAR_SERVICE_KEY: "secret_radar_svc_key"
+    };
+
+    // 1. Unauthenticated GET /api/tenants/config -> 401
+    const unauthGetReq = new Request("https://radar.bvelt.app/api/tenants/config", { method: "GET" });
+    const resUnauthGet = await worker.fetch(unauthGetReq, mockEnv, {} as any);
+    assert(resUnauthGet.status === 401, "Unauthenticated GET /api/tenants/config must return 401");
+
+    // 2. Unauthenticated POST /api/tenants/config -> 401
+    const unauthPostReq = new Request("https://radar.bvelt.app/api/tenants/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tenant_id: "tenant_beta" })
+    });
+    const resUnauthPost = await worker.fetch(unauthPostReq, mockEnv, {} as any);
+    assert(resUnauthPost.status === 401, "Unauthenticated POST /api/tenants/config must return 401");
+
+    // 3. Unauthenticated POST /api/prospects/outcome -> 401
+    const unauthOutcomeReq = new Request("https://radar.bvelt.app/api/prospects/outcome", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prospect_id: "p_target_01", tenant_id: "tenant_alpha", outcome: "won" })
+    });
+    const resUnauthOutcome = await worker.fetch(unauthOutcomeReq, mockEnv, {} as any);
+    assert(resUnauthOutcome.status === 401, "Unauthenticated POST /api/prospects/outcome must return 401");
+
+    // 4. Cross-tenant access denied: caller scoped to tenant_beta attempting to access tenant_alpha -> 403
+    const crossTenantGetReq = new Request("https://radar.bvelt.app/api/tenants/config?tenant_id=tenant_alpha", {
+      method: "GET",
+      headers: {
+        "Cookie": "bvelt_tenant_id=tenant_beta"
+      }
+    });
+    const resCrossGet = await worker.fetch(crossTenantGetReq, mockEnv, {} as any);
+    assert(resCrossGet.status === 401 || resCrossGet.status === 403, "Cross-tenant GET config must be blocked (401 or 403)");
+
+    // 5. Authorized service access to tenant config -> 200
+    const svcGetReq = new Request("https://radar.bvelt.app/api/tenants/config?tenant_id=tenant_alpha", {
+      method: "GET",
+      headers: { "Authorization": "Bearer secret_founder_svc_key" }
+    });
+    const resSvcGet = await worker.fetch(svcGetReq, mockEnv, {} as any);
+    assert(resSvcGet.status === 200, "Service key must be allowed to read tenant config");
+    const tenantData = await resSvcGet.json() as any;
+    assert(tenantData.tenant_id === "tenant_alpha", "Must return correct tenant data");
+
+    // 6. Cross-tenant outcome submission denied: prospect belongs to tenant_alpha but body says tenant_gamma -> 403
+    const crossOutcomeReq = new Request("https://radar.bvelt.app/api/prospects/outcome", {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer secret_founder_svc_key",
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ prospect_id: "p_target_01", tenant_id: "tenant_gamma", outcome: "won" })
+    });
+    const resCrossOutcome = await worker.fetch(crossOutcomeReq, mockEnv, {} as any);
+    assert(resCrossOutcome.status === 403, "Outcome submission with mismatched prospect tenant must return 403");
+
+    // 7. Unauthenticated CSV export -> 401
+    const unauthCsvReq = new Request("https://radar.bvelt.app/api/tenants/leads.csv?tenant_id=tenant_alpha", { method: "GET" });
+    const resUnauthCsv = await worker.fetch(unauthCsvReq, mockEnv, {} as any);
+    assert(resUnauthCsv.status === 401, "Unauthenticated CSV export must return 401");
+  }
+});
+
+// Test 42: Tenant Auto-Prospecting & Bootstrap (No HVAC defaults, requires real data)
+tests.push({
+  name: "Tenant Auto-Prospecting & Bootstrap: rejects missing trade/city without defaulting to HVAC",
+  run: async () => {
+    const { bootstrapBveltTenant } = await import('./worker');
+    const mockEnv: any = {
+      RADAR_DB: {
+        prepare: () => ({
+          bind: () => ({
+            run: async () => ({ success: true }),
+            first: async () => null,
+            all: async () => ({ results: [] })
+          })
+        })
+      }
+    };
+
+    // 1. Missing trade: MUST NOT default to "hvac"
+    const missingTradeRes = await bootstrapBveltTenant(mockEnv, {
+      tenant_id: "client_no_trade",
+      city: "Austin, TX"
+      // no trade, niche, or industry
+    });
+    assert(missingTradeRes.success === false, "Bootstrap must fail when trade is missing");
+    assert(missingTradeRes.status === "pending_configuration", "Status must be pending_configuration");
+    assert(missingTradeRes.missing_fields?.includes("trade") === true, "Must flag missing 'trade'");
+    assert(missingTradeRes.message.includes("trade_required"), "Message must explain trade is required");
+
+    // 2. Missing city: MUST NOT default to Tampa or any arbitrary city
+    const missingCityRes = await bootstrapBveltTenant(mockEnv, {
+      tenant_id: "client_no_city",
+      trade: "plumbing"
+      // no city or coordinates
+    });
+    assert(missingCityRes.success === false, "Bootstrap must fail when city is missing");
+    assert(missingCityRes.status === "pending_configuration", "Status must be pending_configuration");
+    assert(missingCityRes.missing_fields?.includes("city") === true, "Must flag missing 'city'");
+
+    // 3. Valid trade and city: sets up configuration and activates
+    const mockCtx = { waitUntil: (_p: any) => {} } as any;
+    const validRes = await bootstrapBveltTenant(mockEnv, {
+      tenant_id: "client_plumbing_pro",
+      tenant_name: "Pro Drain Care",
+      trade: "plumbing",
+      city: "Dallas, TX",
+      skip_fast_discovery: true
+    }, mockCtx);
+    assert(validRes.success === true, "Valid bootstrap must succeed");
+    assert(validRes.status === "active", "Status must be active");
+    assert(validRes.city === "Dallas, TX", "City must match resolved city");
+    assert(validRes.niches.length > 0, "Niches must be populated from trade map");
+    assert(validRes.niches.includes("property management"), "Plumbing must target property management buyers");
+  }
+});
+
+// Test 43: Eliminate False Commercial Inferences in buildAttackKit
+tests.push({
+  name: "Eliminate False Inferences in buildAttackKit: phone/website alone never triggers missed_calls",
+  run: async () => {
+    const { buildAttackKit } = await import('./worker');
+
+    // 1. Candidate with phone, website, and email, but NO friction signals -> DO NOT CONTACT
+    const bareProspect = {
+      id: "p_bare_01",
+      name: "Dallas Elite Plumbing",
+      city: "Dallas, TX",
+      trade: "plumbing",
+      phone: "+12145551234",
+      website: "https://dallaseliteplumbing.com",
+      email: "service@dallaseliteplumbing.com",
+      signals_json: JSON.stringify({
+        booking: true,
+        contact_form: true
+      })
+    };
+    const bareKit = buildAttackKit(bareProspect);
+    assert(bareKit.angle === "no_evidence", "Bare phone/form must not invent missed_calls; angle should be no_evidence");
+    assert(bareKit.sms === "", "No SMS should be generated without verified friction");
+    assert(bareKit.next_action.includes("DO_NOT_CONTACT"), "Next action must be DO_NOT_CONTACT");
+
+    // 2. Candidate with VERIFIED missed call friction -> missed_calls angle
+    const verifiedMissedCallProspect = {
+      id: "p_missed_02",
+      name: "Apex Air HVAC",
+      city: "Houston, TX",
+      trade: "hvac",
+      phone: "+17135559876",
+      signals_json: JSON.stringify({
+        after_hours_voicemail: true,
+        missed_call_evidence: true
+      })
+    };
+    const missedKit = buildAttackKit(verifiedMissedCallProspect);
+    assert(missedKit.angle === "missed_calls", "Verified friction must select missed_calls angle");
+    assert(missedKit.sms.length > 0, "SMS must be generated for verified angle");
+    assert(missedKit.sms.includes("Rainer"), "Must sign as Rainer");
+    assert(missedKit.sms.includes("https://bvelt.app/"), "Must include mandatory CTA link https://bvelt.app/");
+
+    // 3. Candidate with verified quote request friction -> stale_quotes angle
+    const verifiedQuoteProspect = {
+      id: "p_quote_03",
+      name: "Lonestar Roofers",
+      city: "San Antonio, TX",
+      trade: "roofing",
+      signals_json: JSON.stringify({
+        quote_request: true,
+        stale_estimates: true
+      })
+    };
+    const quoteKit = buildAttackKit(verifiedQuoteProspect);
+    assert(quoteKit.angle === "stale_quotes", "Verified quote friction must select stale_quotes angle");
+
+    // 4. Candidate with phone-only / no SMS capability -> no_sms angle
+    const verifiedNoSmsProspect = {
+      id: "p_nosms_04",
+      name: "Austin Clean Team",
+      city: "Austin, TX",
+      trade: "cleaning",
+      signals_json: JSON.stringify({
+        phone_only: true,
+        no_sms: true
+      })
+    };
+    const noSmsKit = buildAttackKit(verifiedNoSmsProspect);
+    assert(noSmsKit.angle === "no_sms", "Verified no_sms signal must select no_sms angle");
+
+    // 5. Off-ICP prospect (e.g. Barbershop) -> hard gate disqualified
+    const offIcpProspect = {
+      id: "p_barber_05",
+      name: "Gentlemen's Barber & Shave Parlor",
+      city: "Austin, TX",
+      trade: "lawn_care", // Mismatched label
+      signals_json: JSON.stringify({ missed_call_evidence: true })
+    };
+    const barberKit = buildAttackKit(offIcpProspect);
+    assert(barberKit.angle === "disqualified_off_icp", "Barbershop must be disqualified as off-ICP");
+    assert(barberKit.sms === "", "Disqualified prospect must get zero SMS");
+  }
+});
+
+// Test 44: Sidecar Runner & Evidence Callback Robustness (failure handling, empty completed & idempotent sync)
+tests.push({
+  name: "Sidecar & Evidence Callback: runner failure recording, empty records completed, and canonical signals dual-sync",
+  run: async () => {
+    const dispatchesStore: any[] = [];
+    const evidenceStore: any[] = [];
+    const prospectsStore: any[] = [
+      {
+        id: "p_sync_01",
+        mode: "founder",
+        tenant_id: "founder",
+        signals_json: JSON.stringify({ existing_fact: true })
+      }
+    ];
+
+    const mockDb: any = {
+      prepare: (sql: string) => ({
+        bind: (...args: any[]) => ({
+          first: async () => {
+            if (sql.includes("FROM research_run_candidates")) {
+              return { 1: 1 };
+            }
+            if (sql.includes("FROM prospects")) {
+              return prospectsStore.find(p => p.id === args[0]) || null;
+            }
+            if (sql.includes("FROM source_evidence WHERE prospect_id = ?")) {
+              return evidenceStore.find(e => e.prospect_id === args[0] && e.content_hash === args[3]) || null;
+            }
+            return null;
+          },
+          all: async () => ({ results: [] }),
+          run: async () => {
+            if (sql.includes("INSERT INTO source_evidence")) {
+              evidenceStore.push({ id: args[0], run_id: args[1], prospect_id: args[4], content_hash: args[9] });
+            }
+            if (sql.includes("UPDATE sidecar_dispatches")) {
+              let disp = dispatchesStore.find(d => d.run_id === args[3] || d.id === args[2] || d.run_id === args[2]);
+              if (!disp) {
+                disp = { run_id: args[args.length - 2] || "run_test", status: "pending" };
+                dispatchesStore.push(disp);
+              }
+              if (sql.includes("status = 'failed'")) {
+                disp.status = "failed";
+                disp.last_error = args[0];
+              } else if (sql.includes("status = 'completed'")) {
+                disp.status = "completed";
+              }
+            }
+            if (sql.includes("UPDATE prospects SET signals_json = ?")) {
+              const p = prospectsStore.find(item => item.id === args[2]);
+              if (p) p.signals_json = args[0];
+            }
+            return { success: true };
+          }
+        })
+      })
+    };
+
+    const mockEnv: any = {
+      RADAR_DB: mockDb,
+      RADAR_SIDECAR_CALLBACK_KEY: "cb_key_robustness_test"
+    };
+
+    // 1. Runner failure callback notification
+    const failReq = new Request("https://radar.bvelt.app/api/research/evidence", {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer cb_key_robustness_test",
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        run_id: "run_fail_notify",
+        mode: "founder",
+        tenant_id: "founder",
+        status: "failed",
+        error: "Fatal network error: Chromium sandboxing failed",
+        records: []
+      })
+    });
+    const failRes = await worker.fetch(failReq, mockEnv, {} as any);
+    assert(failRes.status === 200, "Runner failure notification must return 200");
+    const failJson = await failRes.json() as any;
+    assert(failJson.status === "recorded_failure", "Must report recorded_failure");
+
+    // 2. Empty results callback (records: [])
+    const emptyReq = new Request("https://radar.bvelt.app/api/research/evidence", {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer cb_key_robustness_test",
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        run_id: "run_empty_notify",
+        mode: "founder",
+        tenant_id: "founder",
+        status: "completed",
+        records: []
+      })
+    });
+    const emptyRes = await worker.fetch(emptyReq, mockEnv, {} as any);
+    assert(emptyRes.status === 200, "Empty records callback must return 200");
+    const emptyJson = await emptyRes.json() as any;
+    assert(emptyJson.outcome === "empty_completed", "Empty callback must report outcome empty_completed");
+
+    // 3. Evidence insertion and dual-sync into signals_json
+    const evidenceReq = new Request("https://radar.bvelt.app/api/research/evidence", {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer cb_key_robustness_test",
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        run_id: "run_sync_01",
+        mode: "founder",
+        tenant_id: "founder",
+        records: [
+          {
+            prospect_id: "p_sync_01",
+            source_id: "scrapling_test",
+            source_url: "https://testbusiness.com",
+            evidence_type: "business_profile",
+            content_hash: "hash_sync_123",
+            evidence: {
+              page_title: "Test Business Homepage",
+              public_business_phones: ["+15551234567"]
+            }
+          }
+        ]
+      })
+    });
+    const evidenceRes = await worker.fetch(evidenceReq, mockEnv, {} as any);
+    assert(evidenceRes.status === 200, "Evidence callback must return 200");
+    const evidenceJson = await evidenceRes.json() as any;
+    assert(evidenceJson.inserted === 1, "Must insert 1 evidence");
+
+    // Check prospectsStore updated signals_json has both canonical formats
+    const updatedProspect = prospectsStore.find(p => p.id === "p_sync_01");
+    const parsedSignals = JSON.parse(updatedProspect.signals_json);
+    assert(parsedSignals.scrapling !== undefined, "Canonical scrapling property must exist");
+    assert(parsedSignals.signals?.scrapling !== undefined, "Canonical signals.scrapling property must exist");
+    assert(parsedSignals.scrapling.facts.page_title === "Test Business Homepage", "Facts must include extracted page_title");
   }
 });
 

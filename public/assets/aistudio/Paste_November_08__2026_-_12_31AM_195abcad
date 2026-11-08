@@ -1,0 +1,865 @@
+BVELT RADAR — REPARACIÓN INTEGRAL, SEGURIDAD, AISLAMIENTO TENANT Y ESTABILIZACIÓN
+
+Actúa como arquitecto principal de software, ingeniero senior de Cloudflare Workers, D1, Queues, TypeScript, Python y sistemas de prospección automatizada.
+
+Tu tarea es trabajar DIRECTAMENTE sobre el proyecto Bvelt Radar existente, inspeccionar su implementación real y corregir los problemas identificados, manteniendo intactas las funcionalidades que ya funcionan.
+
+NO quiero otra auditoría que termine en recomendaciones. Quiero que inspecciones, modifiques los archivos necesarios, ejecutes las pruebas disponibles y dejes el proyecto corregido.
+
+El objetivo es mejorar la seguridad, fiabilidad, calidad de prospección, aislamiento de datos y arquitectura de integración, sin introducir regresiones ni reconstruir innecesariamente el sistema.
+
+---
+
+1. REGLAS INNEGOCIABLES
+
+Antes de realizar cualquier modificación:
+
+1. Inspecciona la estructura real del proyecto y sus archivos actuales.
+2. Comprueba las implementaciones existentes, no te bases exclusivamente en este documento.
+3. Identifica las funciones, rutas, tablas, contratos y dependencias involucradas.
+4. Comprueba quién consume cada dato y qué efectos secundarios tiene cada modificación.
+5. Conserva las funcionalidades existentes que no necesiten reparación.
+6. Realiza cambios pequeños, coherentes y compatibles con la arquitectura actual.
+7. No sustituyas implementaciones funcionales por versiones simplificadas.
+8. No elimines funcionalidades simplemente porque no entiendas su propósito.
+9. No inventes endpoints, campos, tablas, credenciales ni contratos externos.
+10. Si una dependencia o contrato no puede verificarse, identifica la limitación y no simules que funciona.
+
+PROHIBIDO:
+
+- Reescribir completamente "src/worker.ts".
+- Hacer refactorizaciones generales sin necesidad demostrable.
+- Eliminar o debilitar autenticación existente.
+- Mezclar datos Founder y Tenant.
+- Enviar datos Tenant al BEM global.
+- Introducir ciudades, países o industrias predeterminadas arbitrariamente.
+- Inventar señales comerciales o atribuir hechos que no estén respaldados por evidencias.
+- Modificar la cascada Gemini/Groq, nombres de modelos, prioridades o lógica de selección de modelos.
+- Cambiar modelos de IA o proveedores por iniciativa propia.
+- Introducir servicios de pago, APIs que requieran tarjeta o dependencias comerciales nuevas.
+- Modificar el repositorio de Bvelt. En esta tarea solo se trabaja en Bvelt Radar.
+- Aplicar migraciones a una base D1 remota.
+- Desplegar el Worker.
+- Enviar mensajes reales a prospectos.
+- Ejecutar campañas de outreach.
+- Modificar secretos, tokens o credenciales.
+
+No realices push a "main".
+
+Si necesitas modificar migraciones, crea únicamente migraciones nuevas y compatibles. No edites ni reescribas migraciones históricas.
+
+---
+
+2. ARQUITECTURA Y FUNCIONALIDADES QUE DEBEN CONSERVARSE
+
+Bvelt Radar es un motor independiente de prospección conectado conceptualmente con Bvelt.
+
+Tiene dos modos completamente diferentes:
+
+FOUNDER MODE
+
+Su finalidad es encontrar empresas que puedan convertirse en clientes de Bvelt.
+
+- Identifica empresas potencialmente interesadas en Bvelt.
+- Recopila información comercial y evidencias públicas.
+- Evalúa oportunidades.
+- Gestiona prospectos, estados, cooldowns y supresión.
+- Permite preparar y gestionar outreach con las protecciones existentes.
+- Puede transmitir observaciones comerciales al BEM global de Bvelt, siguiendo el contrato real que corresponda.
+
+Founder no debe utilizar configuraciones, datos ni prospectos pertenecientes a clientes Tenant.
+
+TENANT MODE
+
+Su finalidad es conseguir clientes potenciales para cada negocio que utiliza Bvelt.
+
+Tenant no es un buscador manual para el propietario. Es un servicio automático de prospección asociado a cada negocio.
+
+El sistema debe poder operar continuamente para los distintos negocios registrados, respetando sus configuraciones, aislamiento, límites y presupuesto.
+
+Conserva e integra correctamente los sistemas existentes:
+
+- Cloudflare Worker.
+- D1.
+- Cloudflare Queues.
+- Cron.
+- Telegram.
+- Sidecar Python.
+- Scrapling.
+- GitHub Actions para investigación, cuando corresponda.
+- Trust-Stack y sus controles existentes.
+- Cooldowns y suppression.
+- Budget Governor.
+- Hunter y demás proveedores opcionales existentes.
+- Sistema de investigación y evidencia.
+- Sistema de outreach.
+- API y contratos actuales.
+
+No elimines componentes por considerarlos innecesarios sin demostrarlo.
+
+El Cron de Cloudflare debe continuar siendo el reloj maestro de las tareas programadas. Evita introducir relojes paralelos o ejecuciones periódicas incompatibles.
+
+---
+
+3. REPARACIÓN CRÍTICA: AUTENTICACIÓN DE TENANT
+
+Inspecciona y repara prioritariamente:
+
+- "GET /api/tenants/config"
+- "POST /api/tenants/config"
+- Sus posibles alias.
+- Cualquier otra ruta que permita consultar, modificar o ejecutar operaciones sobre tenants.
+
+Se ha identificado que las rutas GET y POST de configuración Tenant parecen carecer de una comprobación de autorización equivalente a las rutas protegidas del sistema.
+
+El problema potencial es grave:
+
+- Consultar configuraciones de otros tenants.
+- Enumerar todos los tenants.
+- Modificar configuraciones ajenas.
+- Iniciar ejecuciones de prospección sin autorización.
+- Consumir recursos del sistema mediante peticiones no autorizadas.
+
+Requisitos:
+
+1. Ninguna operación privada Tenant puede ejecutarse sin autenticación válida.
+2. Un usuario autenticado solo puede acceder a los datos del tenant que le corresponde.
+3. Un usuario no puede elegir arbitrariamente un "tenant_id" y obtener acceso a ese tenant.
+4. El servidor debe verificar la relación entre identidad autenticada y tenant.
+5. No confíes en "tenant_id" enviado desde el navegador como prueba de propiedad.
+6. Las operaciones de servicio a servicio deben utilizar autenticación específica, separada de la autenticación de usuarios.
+7. Conserva el mecanismo "isAuthorized" y los controles de sesión existentes.
+8. No introduzcas accesos públicos para facilitar la integración.
+9. Devuelve códigos HTTP apropiados para solicitudes no autenticadas y accesos prohibidos.
+
+Inspecciona también:
+
+- "/api/bvelt/bootstrap"
+- "/api/bvelt/leads"
+- "/api/prospects/outcome"
+- Exportación CSV.
+- Todas las rutas que lean o modifiquen información Tenant.
+- Funciones auxiliares que puedan saltarse la autorización de las rutas.
+
+Comprueba que no exista acceso cruzado entre tenants mediante identificadores manipulados, parámetros, consultas SQL o funciones internas.
+
+Añade pruebas para:
+
+- Usuario no autenticado.
+- Usuario autenticado sin relación con el tenant.
+- Usuario autorizado para su propio tenant.
+- Intento de acceder a otro tenant.
+- Intento de modificar otro tenant.
+- Intento de provocar una ejecución de prospección sin autorización.
+
+---
+
+4. TENANT: CONVERTIRLO EN PROSPECCIÓN AUTOMÁTICA REAL
+
+Este es uno de los objetivos centrales de la reparación.
+
+4.1 Fuente de configuración
+
+Cuando un negocio se registra en Bvelt, ya dispone de información sobre su actividad.
+
+Tenant debe recibir esa información desde el perfil del negocio y utilizarla para configurar automáticamente su prospección.
+
+La información relevante puede incluir:
+
+- Identidad del negocio.
+- Nombre.
+- Industria.
+- Nicho o especialidad.
+- Servicios ofrecidos.
+- Ciudad.
+- Región.
+- Áreas de servicio.
+- País.
+- Idioma.
+- Tipo de cliente que busca.
+- Características del cliente ideal.
+
+No obligues al propietario a introducir nuevamente información que Bvelt ya conoce.
+
+El dashboard puede permitir corregir o completar ciudad y nicho, pero no debe convertirse en el mecanismo obligatorio para iniciar la prospección.
+
+4.2 No inventar configuraciones
+
+Inspecciona "bootstrapBveltTenant()" y las funciones relacionadas.
+
+Existe un posible problema: el sistema puede asignar "hvac" como valor predeterminado cuando no encuentra una industria o especialidad.
+
+Esto no es aceptable.
+
+Si no existen datos suficientes:
+
+- No inventes una actividad comercial.
+- No crees un perfil con un nicho arbitrario.
+- No inicies una búsqueda incorrecta.
+- Registra qué información falta.
+- Mantén el tenant en un estado pendiente de configuración suficiente.
+
+La configuración debe derivarse de información real.
+
+4.3 Activación automática
+
+Cuando un negocio tenga información suficiente:
+
+1. Se crea o actualiza su configuración Tenant.
+2. Se verifica que su identidad y propiedad sean válidas.
+3. Se determina su nicho y mercado objetivo.
+4. Se activa su ciclo de prospección.
+5. El Cron administra las siguientes ejecuciones.
+6. Se descubren nuevos prospectos de forma continua.
+7. Se evitan duplicados.
+8. Se respetan los límites y cooldowns.
+9. Se entregan los resultados a Bvelt mediante una integración segura.
+
+El propietario no debe tener que pulsar un botón de búsqueda cada vez.
+
+El sistema debe distinguir claramente entre:
+
+- Tenant sin configuración suficiente.
+- Tenant configurado.
+- Tenant activo.
+- Tenant temporalmente pausado.
+- Tenant con errores de integración.
+- Tenant sin presupuesto disponible.
+- Tenant que ha alcanzado límites de ejecución.
+
+No conviertas un error temporal en una desactivación permanente.
+
+4.4 Selección de prospectos
+
+Inspecciona:
+
+- "getPriorityTargets()"
+- "TENANT_TARGET_MAP"
+- "expandTenantIcp()"
+- "startProspectingRun()"
+- "bootstrapBveltTenant()"
+- Lógica de "trades_json", "subniches_json", "cities_json" y demás campos.
+
+Comprueba que los campos utilizados para configurar un tenant sean coherentes entre sí.
+
+No permitas que una función lea "trades_json" mientras otra utiliza "subniches_json" como si ambos fueran necesariamente equivalentes.
+
+Establece una representación canónica y compatible con los datos existentes.
+
+Diferencia correctamente:
+
+- El negocio que utiliza Bvelt.
+- Los servicios que ofrece ese negocio.
+- Los tipos de clientes que desea captar.
+- Los prospectos que Tenant debe encontrar.
+
+No busques empresas del mismo nicho por defecto si el objetivo comercial del negocio es encontrar compradores de sus servicios.
+
+Ejemplo: un contratista de HVAC puede necesitar encontrar administradores de propiedades, propietarios de edificios o empresas que necesiten mantenimiento. El objetivo debe derivarse del perfil y del ICP, no de una asociación arbitraria.
+
+4.5 Actualización continua
+
+Revisa el Cron y el mecanismo de actualización Tenant.
+
+Se ha observado un posible problema con la selección basada en "updated_at": si la configuración no se actualiza durante las ejecuciones, un tenant puede dejar de entrar en el ciclo automático después de cierto tiempo.
+
+Diseña el mecanismo correcto utilizando el registro de última ejecución y la antigüedad de la configuración de manera coherente.
+
+No alteres artificialmente "updated_at" para ocultar errores de selección.
+
+La programación debe:
+
+- Distribuir las ejecuciones.
+- Respetar límites por tenant.
+- Evitar ejecuciones concurrentes innecesarias.
+- Recuperarse de errores transitorios.
+- No repetir continuamente las mismas búsquedas.
+- Evitar que un tenant monopolice el presupuesto.
+- Permitir que nuevos tenants entren correctamente al ciclo.
+
+---
+
+5. AISLAMIENTO TOTAL ENTRE FOUNDER Y TENANT
+
+Este punto es crítico.
+
+Inspecciona todas las consultas, funciones, tablas y procesos que trabajen con:
+
+- "prospects"
+- "tenant_config"
+- "tenant_refresh_log"
+- "source_evidence"
+- "research_evidence"
+- Observaciones de mercado.
+- Ejecuciones de prospección.
+- Resultados de investigación.
+- Outreach.
+- Historial y estados de prospectos.
+
+Comprueba que todas las operaciones Tenant incluyan el ámbito correcto.
+
+No basta con filtrar por "tenant_id" en la interfaz. El aislamiento debe aplicarse en el backend y en las consultas SQL.
+
+Un tenant nunca debe:
+
+- Consultar prospectos de otro tenant.
+- Modificar prospectos ajenos.
+- Recibir evidencias de otro negocio.
+- Heredar la configuración de otro cliente.
+- Recibir observaciones Founder.
+- Enviar sus prospectos al BEM global de Founder.
+- Consumir el presupuesto reservado a otro tenant.
+
+Founder y Tenant pueden compartir infraestructura y componentes técnicos, pero no deben compartir datos privados ni contexto comercial de manera accidental.
+
+Crea pruebas que demuestren el aislamiento.
+
+---
+
+6. REPARACIÓN DE LA INTEGRACIÓN CON BEM
+
+Inspecciona "pushMarketObservationsToBem()" y todos sus consumidores.
+
+Se ha identificado un problema arquitectónico: la implementación parece seleccionar prospectos Founder y Tenant y enviarlos juntos a un único endpoint BEM.
+
+Esto debe corregirse.
+
+Founder
+
+Founder puede enviar observaciones comerciales al BEM global de Bvelt, utilizando el contrato real de integración.
+
+Tenant
+
+Tenant NO debe enviar prospectos, evidencias ni información privada al BEM global.
+
+Tenant debe entregar sus resultados directamente a Bvelt, asociados exclusivamente al negocio propietario.
+
+La integración Tenant debe contemplar:
+
+- Identidad del tenant.
+- Identidad del negocio propietario.
+- Prospectos.
+- Datos de contacto.
+- Web.
+- Evidencias.
+- Fecha de descubrimiento.
+- Fuente.
+- Estado.
+- Confianza de los datos.
+- Identificador único e idempotencia.
+
+La integración debe ser autenticada y segura.
+
+IMPORTANTE: el repositorio de Bvelt es independiente y no forma parte de esta tarea.
+
+No inventes que existe un endpoint de Bvelt que no hayas comprobado.
+
+Si el endpoint receptor todavía no existe o el contrato no está disponible:
+
+1. Separa desde ahora los dos flujos.
+2. Implementa el sender Tenant mediante una interfaz clara y aislada.
+3. Define el contrato de datos de manera explícita.
+4. Añade pruebas del payload y del aislamiento.
+5. Gestiona los estados de entrega y reintento.
+6. No envíes datos Tenant al BEM global como alternativa.
+7. No marques una integración como exitosa cuando no ha sido confirmada por el receptor.
+
+La operación end-to-end de Tenant solo puede declararse completa cuando el receptor real exista y haya sido probado.
+
+No modifiques el repositorio de Bvelt.
+
+---
+
+7. ELIMINAR INFERENCIAS COMERCIALES FALSAS
+
+Inspecciona "buildAttackKit()" y las funciones relacionadas con la selección de ángulos comerciales.
+
+Se ha identificado una inferencia incorrecta relacionada con "missed_calls".
+
+La lógica parece utilizar señales como:
+
+- Teléfono disponible.
+- Email disponible.
+- Sitio web.
+- Formulario de contacto.
+- Botón de llamada.
+- Booking.
+- Servicios de emergencia.
+
+Estas señales no demuestran que el negocio pierda llamadas.
+
+Tener un teléfono no es evidencia de llamadas perdidas.
+
+Tener un formulario tampoco demuestra que existan clientes sin atender.
+
+Por tanto:
+
+1. No atribuyas llamadas perdidas sin evidencias verificables.
+2. No presentes hipótesis como hechos.
+3. No inventes problemas comerciales para mejorar un mensaje.
+4. No generes argumentos que puedan engañar al prospecto.
+5. No selecciones automáticamente el ángulo "missed_calls" si no existe una señal fiable.
+
+Diferencia internamente:
+
+- "observed_facts": hechos observados.
+- "capabilities": capacidades o funcionalidades detectadas.
+- "verified_friction": problemas realmente verificados.
+- "hypotheses": hipótesis comerciales.
+- "unknown": información desconocida.
+
+Solo los hechos respaldados por evidencia pueden presentarse como hechos.
+
+Si no existe evidencia suficiente para justificar un contacto comercial:
+
+- No inventes un argumento.
+- Utiliza el estado conservador apropiado.
+- Aplica "DO_NOT_CONTACT" cuando la lógica actual de seguridad lo requiera.
+- Permite que el sistema continúe investigando sin generar afirmaciones falsas.
+
+Añade pruebas específicas para impedir regresiones.
+
+---
+
+8. REPARACIÓN DEL SIDE CAR Y DEL SISTEMA DE INVESTIGACIÓN
+
+Inspecciona conjuntamente:
+
+- "sidecar/radar_sidecar/scraper.py"
+- "sidecar/runner.py"
+- "sidecar/radar_sidecar/url_policy.py"
+- "sidecar/tests/test_url_policy.py"
+- "src/research/githubActions.ts"
+- "src/worker.ts"
+- "src/test_radar.ts"
+- ".github/workflows/radar-research.yml"
+- "migrations/0028_research_evidence.sql"
+
+No cambies la versión principal de Scrapling sin comprobar la compatibilidad de las APIs utilizadas.
+
+La dependencia actual utiliza:
+
+"scrapling[fetchers]>=0.4.12,<0.5"
+
+Existe una razón de compatibilidad relacionada con "DynamicFetcher". No actualices a Scrapling 0.5 sin adaptar y probar previamente las APIs afectadas.
+
+8.1 Seguridad de URLs y redirecciones
+
+Comprueba:
+
+- Validación de URLs públicas.
+- Bloqueo de localhost.
+- Bloqueo de IP privadas.
+- Bloqueo de direcciones link-local.
+- Bloqueo de direcciones reservadas.
+- Redirecciones HTTP.
+- Redirecciones del navegador.
+- Resolución DNS.
+- Posibles cambios de DNS entre validación y conexión.
+- Protección contra SSRF.
+
+No declares que existe una vulnerabilidad sin demostrarla.
+
+El fetch HTTP ya utiliza "follow_redirects="safe"" en la implementación revisada anteriormente. Comprueba que siga funcionando y que esté cubierto por pruebas reales.
+
+El helper "is_safe_redirect_target" no demuestra por sí solo que el fetcher esté protegido: prueba el flujo real de ejecución.
+
+No implementes bypass de CAPTCHA, autenticación, paywalls ni restricciones de acceso.
+
+8.2 Extracción de información
+
+Mejora el scraper cuando sea compatible con la arquitectura actual.
+
+Prioriza extracción determinista antes de invocar IA.
+
+Considera incorporar:
+
+- JSON-LD.
+- Schema.org.
+- LocalBusiness.
+- ProfessionalService.
+- Organization.
+- Información de contacto.
+- Servicios.
+- Horarios.
+- Dirección.
+- Teléfono.
+- Páginas de contacto.
+- Páginas de servicios.
+- Páginas About.
+- Páginas de presupuesto.
+- Booking.
+- Sitemap.
+- Descubrimiento de páginas internas del mismo dominio.
+
+HTTP Fetcher debe ser la primera opción cuando sea suficiente.
+
+DynamicFetcher debe utilizarse como alternativa cuando el contenido JavaScript lo justifique.
+
+Respeta robots.txt y evita rastreos agresivos.
+
+No hagas que el scraper consuma recursos innecesarios por cada prospecto.
+
+8.3 Evidencias verificables
+
+Cada evidencia debe conservar, cuando sea posible:
+
+- "source_url"
+- Fragmento o contenido relevante.
+- Selector o ubicación de extracción.
+- "observed_at"
+- "extractor_version"
+- Hash del contenido.
+- Método de extracción.
+- Nivel de confianza.
+- Estado de verificación.
+
+No confundas ausencia de información con información negativa.
+
+Si no se encontró un dato, utiliza un estado equivalente a no observado o desconocido.
+
+---
+
+9. REPARAR EL CICLO DE INVESTIGACIÓN Y CALLBACKS
+
+Revisa la comunicación Worker → GitHub Actions → Sidecar → Worker.
+
+Comprueba los siguientes escenarios:
+
+9.1 Respuestas vacías
+
+Un callback que contenga:
+
+"records: []"
+
+puede representar una investigación terminada correctamente sin resultados.
+
+Distingue entre:
+
+- "records" presente como array vacío.
+- "records" presente con elementos.
+- Propiedad "records" ausente.
+- "records" con un tipo incorrecto.
+- Investigación fallida.
+- Investigación parcial.
+
+No confundas éxito vacío con callback inválido.
+
+9.2 Estados de ejecución
+
+Se ha identificado un posible problema:
+
+Después de que GitHub Actions acepte una ejecución, una función posterior puede sobrescribir un estado "completed" con "queued".
+
+Revisa "maybeDispatchSidecarResearch()" y las actualizaciones de estado.
+
+Las transiciones deben ser condicionales y no sobrescribir estados terminales incorrectamente.
+
+Por ejemplo, una actualización que solo corresponda a "dispatching" no debe modificar un registro que ya está "completed".
+
+9.3 Timeouts
+
+Si la petición a GitHub termina en timeout, no necesariamente significa que GitHub no haya recibido el trabajo.
+
+Distingue:
+
+- Rechazo explícito.
+- Error HTTP confirmado.
+- Timeout.
+- Resultado desconocido.
+- Ejecución aceptada.
+
+No reintentes automáticamente una operación ambigua sin comprobar primero su estado.
+
+Evita duplicar trabajos.
+
+9.4 Callback y tenant
+
+El callback debe:
+
+- Validar autenticación mediante "RADAR_SIDECAR_CALLBACK_KEY".
+- Exigir el ámbito correcto.
+- No aceptar un tenant arbitrario sin validación.
+- Usar "founder" explícitamente para Founder cuando corresponda.
+- Validar el formato de las evidencias.
+- Evitar escrituras cruzadas.
+- Mantener idempotencia.
+
+9.5 Persistencia de evidencias
+
+Existe un posible problema de idempotencia:
+
+Si una evidencia se inserta correctamente pero falla la actualización de señales del prospecto, un reintento puede detectar el duplicado y saltarse la actualización de señales.
+
+Eso puede dejar información incompleta permanentemente.
+
+Corrige el proceso para que la persistencia de evidencias y la actualización de señales sean coherentes e idempotentes.
+
+No uses simplemente un "continue" ante duplicados si todavía hay trabajo de sincronización pendiente.
+
+9.6 Estructura canónica de señales
+
+Se detectó una discrepancia potencial entre:
+
+"signals.scrapling.facts"
+
+y:
+
+"scrapling.facts"
+
+Comprueba cómo se almacenan actualmente las señales y qué funciones las consumen.
+
+Define una estructura canónica compatible con los datos existentes.
+
+No cambies solamente la escritura: actualiza también los consumidores que necesiten leer la estructura.
+
+No pierdas evidencias históricas.
+
+9.7 Fallos de GitHub Actions
+
+Comprueba si un workflow puede terminar antes del callback por:
+
+- Instalación de dependencias.
+- Errores de ejecución.
+- Errores de scraping.
+- Fallos de red.
+- Errores de serialización.
+
+Implementa notificación de fallo al Worker cuando sea posible y seguro.
+
+No marques una investigación como completada si realmente terminó parcialmente o falló.
+
+Distingue claramente:
+
+- Completada con resultados.
+- Completada sin resultados.
+- Parcial.
+- Fallida.
+
+---
+
+10. BASE DE DATOS Y MIGRACIONES
+
+Inspecciona:
+
+- Migraciones existentes.
+- Esquema real esperado por el Worker.
+- Consultas D1.
+- Índices.
+- Restricciones únicas.
+- Claves de aislamiento.
+- Relaciones entre prospectos, tenants y evidencias.
+
+Hay migraciones históricas duplicadas, incluyendo archivos con prefijos "0019_*" y "0020_*".
+
+No las reescribas.
+
+La migración "0028_research_evidence.sql" debe revisarse frente al código que la utiliza.
+
+No supongas que está aplicada en la base remota.
+
+Si necesitas cambios de esquema:
+
+1. Crea una migración nueva.
+2. Utiliza operaciones compatibles con SQLite/D1.
+3. Evita destruir datos.
+4. Incluye índices necesarios.
+5. Comprueba compatibilidad con las tablas existentes.
+6. Incluye una explicación de la migración.
+7. No la ejecutes remotamente.
+
+Ten especial cuidado con "CREATE TABLE IF NOT EXISTS": no garantiza que una tabla preexistente tenga las columnas esperadas.
+
+---
+
+11. CRON, QUEUES, PRESUPUESTO Y ESTABILIDAD
+
+Inspecciona la coordinación entre:
+
+- Cron.
+- Queue.
+- Worker.
+- Sidecar.
+- GitHub Actions.
+- Tenant refresh.
+- Founder prospecting.
+- Investigación.
+- Outreach.
+
+Asegúrate de que:
+
+- No se creen ejecuciones duplicadas.
+- Los trabajos tengan estados consistentes.
+- Los fallos puedan recuperarse.
+- Los tenants no monopolizan recursos.
+- Los límites se respetan.
+- Los reintentos sean idempotentes.
+- Las ejecuciones no queden indefinidamente en estados intermedios.
+- No se envíe outreach por error como consecuencia de una investigación.
+- El presupuesto se contabilice correctamente.
+
+Mantén el Budget Governor y las restricciones actuales.
+
+No aumentes los límites por iniciativa propia.
+
+No conviertas una ejecución de investigación en una ejecución de contacto comercial.
+
+---
+
+12. PRUEBAS Y VALIDACIÓN OBLIGATORIAS
+
+No basta con que TypeScript compile.
+
+Antes de terminar:
+
+1. Ejecuta las pruebas TypeScript existentes.
+2. Ejecuta las pruebas Python existentes.
+3. Ejecuta las pruebas de URL policy.
+4. Añade pruebas para los problemas corregidos.
+5. Ejecuta comprobaciones de tipos.
+6. Ejecuta build si el proyecto dispone de él.
+7. Comprueba los contratos de las rutas.
+8. Comprueba las consultas SQL afectadas.
+9. Comprueba el aislamiento Founder/Tenant.
+10. Comprueba que no se ha modificado la cascada Gemini/Groq.
+
+Crea pruebas específicas para:
+
+- Acceso no autorizado a configuración Tenant.
+- Acceso cruzado entre tenants.
+- Configuración Tenant sin nicho.
+- Configuración Tenant sin ciudad.
+- Activación automática con datos suficientes.
+- Tenant sin datos suficientes.
+- Actualización automática después de varias ejecuciones.
+- Duplicados.
+- Cooldown.
+- Presupuesto.
+- Founder → BEM.
+- Tenant → Bvelt.
+- Bloqueo de Tenant → BEM global.
+- Falsas inferencias de llamadas perdidas.
+- Callback vacío válido.
+- Callback inválido.
+- Callback parcial.
+- Timeout de GitHub.
+- Estado "completed" que no debe ser sobrescrito.
+- Reintento idempotente de evidencias.
+- SSRF y redirecciones.
+
+No inventes resultados de pruebas.
+
+Si una prueba no puede ejecutarse por limitaciones del entorno, indícalo claramente.
+
+---
+
+13. CRITERIOS DE ACEPTACIÓN
+
+El trabajo no se considera terminado hasta cumplir estos criterios:
+
+SEGURIDAD
+
+- Las rutas Tenant están protegidas.
+- No existe acceso cruzado entre tenants.
+- La autenticación de servicio está correctamente separada de la autenticación de usuario.
+
+TENANT
+
+- Su configuración procede del perfil real del negocio.
+- No se inventan nichos ni ciudades.
+- La prospección se activa automáticamente cuando existen datos suficientes.
+- El Cron mantiene la actualización continua.
+- Los prospectos pertenecen exclusivamente a su tenant.
+- Los resultados pueden entregarse a Bvelt mediante un contrato seguro.
+
+FOUNDER
+
+- Sigue funcionando independientemente.
+- Sus prospectos pueden enviarse al BEM global.
+- No recibe datos privados Tenant.
+
+INTEGRACIÓN
+
+- Tenant nunca se envía al BEM global.
+- No se declara funcional un endpoint externo no verificado.
+- Los errores y reintentos se gestionan correctamente.
+
+INVESTIGACIÓN
+
+- No se generan evidencias falsas.
+- Las evidencias son trazables.
+- Los callbacks son idempotentes.
+- Los estados no se contradicen.
+- Los errores parciales se reconocen.
+
+ESTABILIDAD
+
+- No se rompen funcionalidades existentes.
+- No se modifica la cascada de modelos.
+- No se reescriben migraciones históricas.
+- Las pruebas disponibles se ejecutan y se documentan.
+
+---
+
+14. FORMA DE TRABAJO
+
+Trabaja en este orden:
+
+FASE A — Inspección del código real y dependencias.
+
+FASE B — Seguridad y aislamiento Tenant.
+
+FASE C — Configuración y prospección automática Tenant.
+
+FASE D — Separación Founder/BEM y Tenant/Bvelt.
+
+FASE E — Reparación de inferencias comerciales.
+
+FASE F — Sidecar, scraping, evidencias y callbacks.
+
+FASE G — Cron, Queue, idempotencia y presupuesto.
+
+FASE H — Pruebas de regresión, build y validación final.
+
+Puedes realizar las fases consecutivamente sin esperar mi aprobación entre ellas, siempre que respetes las reglas y no ejecutes operaciones externas prohibidas.
+
+No te detengas después de generar un informe.
+
+No me entregues únicamente sugerencias, pseudocódigo o fragmentos.
+
+MODIFICA LOS ARCHIVOS REALES DEL PROYECTO.
+
+---
+
+15. ENTREGA FINAL OBLIGATORIA
+
+Al finalizar:
+
+1. Conserva el proyecto completo en su estructura original.
+2. Prepara un ZIP que contenga ÚNICAMENTE los archivos modificados o nuevos.
+3. Mantén las rutas originales dentro del ZIP.
+4. No incluyas el proyecto entero.
+5. No incluyas dependencias descargadas ni carpetas generadas innecesarias.
+6. Incluye archivos completos, listos para reemplazar o añadir.
+7. Incluye las migraciones nuevas que sean necesarias, pero no modifiques las históricas.
+8. No incluyas archivos que no hayan cambiado.
+
+Acompaña el ZIP con un informe breve que indique:
+
+- Archivos modificados.
+- Archivos nuevos.
+- Problemas reparados.
+- Pruebas ejecutadas y resultados reales.
+- Pruebas que no pudieron ejecutarse.
+- Limitaciones externas pendientes.
+- Integraciones que requieren cambios posteriores en el repositorio Bvelt.
+- Confirmación de que no se hizo push a "main".
+- Confirmación de que no se desplegó el Worker.
+- Confirmación de que no se aplicaron migraciones remotas.
+- Confirmación de que no se ejecutó outreach real.
+
+Si una parte no se pudo completar, no la presentes como completada.
+
+PRIORIDAD ABSOLUTA: preservar lo que ya funciona, corregir los fallos reales, garantizar el aislamiento y conseguir que Tenant sea un sistema automático de prospección fiable para los negocios de Bvelt.
+
+No sacrifiques la estabilidad del proyecto por intentar completar más tareas de las que puedas validar.

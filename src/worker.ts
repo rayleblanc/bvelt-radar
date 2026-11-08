@@ -477,7 +477,15 @@ const OVERPASS_TRADE_TAGS: Record<string, string[]> = {
   "golf course": ['leisure="golf_course"', 'name~"golf"'],
 };
 
-function isAuthorized(request: Request, env: Env, serviceKey?: string, validSessionHash?: string): boolean {
+export interface TenantAuthContext {
+  authorized: boolean;
+  isService: boolean;
+  isFounderSession: boolean;
+  tenantId: string | null;
+  canAccessTenant: (targetTenantId: string | null | undefined) => boolean;
+}
+
+export function isAuthorized(request: Request, env: Env, serviceKey?: string, validSessionHash?: string): boolean {
   const cookieHeader = request.headers.get("Cookie") || "";
   const parsedCookies: Record<string, string> = {};
   cookieHeader.split(";").forEach(c => {
@@ -491,10 +499,72 @@ function isAuthorized(request: Request, env: Env, serviceKey?: string, validSess
   if (validSessionHash && sessionCookie === validSessionHash) {
     return true;
   }
-  if (serviceKey && authHeader && authHeader.startsWith("Bearer ") && authHeader.split(" ")[1] === serviceKey) {
-    return true;
+  const bearerToken = authHeader && authHeader.startsWith("Bearer ") ? authHeader.split(" ")[1] : null;
+  if (bearerToken) {
+    if (serviceKey && bearerToken === serviceKey) return true;
+    if (env.FOUNDER_SERVICE_KEY && bearerToken === env.FOUNDER_SERVICE_KEY) return true;
+    if (env.RADAR_SERVICE_KEY && bearerToken === env.RADAR_SERVICE_KEY) return true;
+    if (env.BVELT_INGEST_KEY && bearerToken === env.BVELT_INGEST_KEY) return true;
   }
   return false;
+}
+
+export function resolveTenantAuthContext(
+  request: Request,
+  env: Env,
+  serviceKey?: string,
+  validSessionHash?: string
+): TenantAuthContext {
+  const cookieHeader = request.headers.get("Cookie") || "";
+  const parsedCookies: Record<string, string> = {};
+  cookieHeader.split(";").forEach(c => {
+    const [k, ...v] = c.trim().split("=");
+    if (k) parsedCookies[k.trim()] = decodeURIComponent(v.join("=").trim());
+  });
+
+  const authHeader = request.headers.get("Authorization") || "";
+  const bearerToken = authHeader.startsWith("Bearer ") ? authHeader.split(" ")[1] : null;
+  const sessionCookie = parsedCookies["bvelt_session"];
+  const tenantCookie = parsedCookies["bvelt_tenant_id"];
+
+  // 1. Service-to-service key (RADAR_SERVICE_KEY, FOUNDER_SERVICE_KEY, BVELT_INGEST_KEY)
+  const isService = Boolean(
+    bearerToken && (
+      (serviceKey && bearerToken === serviceKey) ||
+      (env.FOUNDER_SERVICE_KEY && bearerToken === env.FOUNDER_SERVICE_KEY) ||
+      (env.RADAR_SERVICE_KEY && bearerToken === env.RADAR_SERVICE_KEY) ||
+      (env.BVELT_INGEST_KEY && bearerToken === env.BVELT_INGEST_KEY)
+    )
+  );
+
+  // 2. Founder session (verified session cookie)
+  const isFounderSession = Boolean(validSessionHash && sessionCookie === validSessionHash);
+
+  // 3. Tenant scoping
+  const headerTenantId = request.headers.get("X-Tenant-Id") || request.headers.get("x-tenant-id");
+  let callerTenantId: string | null = null;
+  if (isFounderSession) {
+    callerTenantId = "founder";
+  } else if (tenantCookie) {
+    callerTenantId = tenantCookie;
+  } else if (headerTenantId) {
+    callerTenantId = headerTenantId;
+  }
+
+  const authorized = isService || isFounderSession;
+
+  return {
+    authorized,
+    isService,
+    isFounderSession,
+    tenantId: callerTenantId,
+    canAccessTenant: (targetTenant: string | null | undefined): boolean => {
+      if (!authorized) return false;
+      if (isService || isFounderSession) return true;
+      if (!targetTenant) return false;
+      return callerTenantId === targetTenant;
+    }
+  };
 }
 
 export default {
@@ -1758,18 +1828,38 @@ export default {
 
       // 16. Tenant Configuration CRUD Endpoints (/api/tenants/config)
       if ((path === "/api/tenants/config" || path === "/tenants/config") && method === "GET") {
+        const auth = resolveTenantAuthContext(request, env, serviceKey, validSessionHash);
+        if (!auth.authorized) {
+          return Response.json({ error: "Unauthorized" }, { status: 401, headers: corsHeaders });
+        }
         const tenantId = url.searchParams.get("tenant_id");
         if (tenantId) {
+          if (!auth.canAccessTenant(tenantId)) {
+            return Response.json({ error: "Forbidden: cross-tenant access denied" }, { status: 403, headers: corsHeaders });
+          }
           const tenant = await env.RADAR_DB.prepare("SELECT * FROM tenant_config WHERE tenant_id = ?").bind(tenantId).first();
           return Response.json(tenant || { error: "Tenant config not found" }, { headers: corsHeaders });
+        }
+        if (!auth.isService && !auth.isFounderSession) {
+          return Response.json({ error: "Forbidden: tenant listing requires administrative privileges" }, { status: 403, headers: corsHeaders });
         }
         const tenants = await env.RADAR_DB.prepare("SELECT * FROM tenant_config ORDER BY tenant_id ASC").all();
         return Response.json(tenants.results || [], { headers: corsHeaders });
       }
 
       if ((path === "/api/tenants/config" || path === "/tenants/config") && method === "POST") {
-        const body: any = await request.json();
-        const tenantId = body.tenant_id || `tenant_${Date.now()}`;
+        const auth = resolveTenantAuthContext(request, env, serviceKey, validSessionHash);
+        if (!auth.authorized) {
+          return Response.json({ error: "Unauthorized" }, { status: 401, headers: corsHeaders });
+        }
+        const body: any = await request.json().catch(() => ({}));
+        const tenantId = body.tenant_id;
+        if (!tenantId) {
+          return Response.json({ error: "tenant_id required" }, { status: 400, headers: corsHeaders });
+        }
+        if (!auth.canAccessTenant(tenantId)) {
+          return Response.json({ error: "Forbidden: cannot modify configuration for another tenant" }, { status: 403, headers: corsHeaders });
+        }
         const timestamp = new Date().toISOString();
 
         await env.RADAR_DB.prepare(`
@@ -1837,12 +1927,16 @@ export default {
 
       // 16a2. Tenant leads CSV export
       if ((path === "/api/tenants/leads.csv" || path === "/tenants/leads.csv") && method === "GET") {
-        if (!isAuthorized(request, env, serviceKey, validSessionHash)) {
+        const auth = resolveTenantAuthContext(request, env, serviceKey, validSessionHash);
+        if (!auth.authorized) {
           return Response.json({ error: "Unauthorized" }, { status: 401, headers: corsHeaders });
         }
         const tenantId = url.searchParams.get("tenant_id");
         if (!tenantId) {
           return Response.json({ error: "tenant_id required" }, { status: 400, headers: corsHeaders });
+        }
+        if (!auth.canAccessTenant(tenantId)) {
+          return Response.json({ error: "Forbidden: cross-tenant access denied" }, { status: 403, headers: corsHeaders });
         }
         try {
           const rows = await env.RADAR_DB.prepare(`
@@ -1879,11 +1973,16 @@ export default {
       // Body: { user_id?, tenant_id?, trade|niche, city?, lat?, lon?, tenant_name?, source? }
       // Returns up to 2 leads fast + starts full background run.
       if ((path === "/api/bvelt/bootstrap" || path === "/bvelt/bootstrap") && method === "POST") {
-        if (!isAuthorized(request, env, serviceKey, validSessionHash)) {
+        const auth = resolveTenantAuthContext(request, env, serviceKey, validSessionHash);
+        if (!auth.authorized) {
           return Response.json({ error: "Unauthorized" }, { status: 401, headers: corsHeaders });
         }
         try {
           const body: any = await request.json().catch(() => ({}));
+          const targetTenantId = body.tenant_id || body.user_id;
+          if (targetTenantId && !auth.canAccessTenant(targetTenantId)) {
+            return Response.json({ error: "Forbidden: cross-tenant bootstrap denied" }, { status: 403, headers: corsHeaders });
+          }
           const result = await bootstrapBveltTenant(env, body, ctx);
           return Response.json(result, { headers: corsHeaders });
         } catch (e: any) {
@@ -1893,14 +1992,17 @@ export default {
 
       // 16c. Poll first leads after bootstrap
       if ((path === "/api/bvelt/leads" || path === "/bvelt/leads") && method === "GET") {
-        // Antes era público: cualquiera con un tenant_id leía leads, emails y teléfonos.
-        if (!isAuthorized(request, env, serviceKey, validSessionHash)) {
+        const auth = resolveTenantAuthContext(request, env, serviceKey, validSessionHash);
+        if (!auth.authorized) {
           return Response.json({ error: "Unauthorized" }, { status: 401, headers: corsHeaders });
         }
         const tenantId = url.searchParams.get("tenant_id");
         const limit = Math.min(20, Math.max(1, parseInt(url.searchParams.get("limit") || "10", 10) || 10));
         if (!tenantId) {
           return Response.json({ error: "tenant_id required" }, { status: 400, headers: corsHeaders });
+        }
+        if (!auth.canAccessTenant(tenantId)) {
+          return Response.json({ error: "Forbidden: cross-tenant access denied" }, { status: 403, headers: corsHeaders });
         }
         try {
           const rows = await env.RADAR_DB.prepare(`
@@ -1923,11 +2025,19 @@ export default {
 
       // (a) POST /api/prospects/outcome
       if ((path === "/api/prospects/outcome" || path === "/prospects/outcome") && method === "POST") {
+        const auth = resolveTenantAuthContext(request, env, serviceKey, validSessionHash);
+        if (!auth.authorized) {
+          return Response.json({ error: "Unauthorized" }, { status: 401, headers: corsHeaders });
+        }
         const body: any = await request.json().catch(() => ({}));
         const { prospect_id, tenant_id, outcome, value_usd } = body;
 
         if (!prospect_id || !tenant_id || !outcome) {
           return Response.json({ error: "Missing required fields: prospect_id, tenant_id, outcome" }, { status: 400, headers: corsHeaders });
+        }
+
+        if (!auth.canAccessTenant(tenant_id)) {
+          return Response.json({ error: "Forbidden: cross-tenant outcome submission denied" }, { status: 403, headers: corsHeaders });
         }
 
         const validOutcomes = ["contacted", "replied", "won", "lost"];
@@ -1942,7 +2052,7 @@ export default {
 
         const prospectTenant = prospect.tenant_id || "founder";
         if (prospectTenant !== tenant_id) {
-          return Response.json({ error: "Prospect does not belong to tenant" }, { status: 404, headers: corsHeaders });
+          return Response.json({ error: "Prospect does not belong to tenant" }, { status: 403, headers: corsHeaders });
         }
 
         const timestamp = new Date().toISOString();
@@ -2370,6 +2480,23 @@ export default {
 
         const now = new Date().toISOString();
 
+        // Check if runner reported failure
+        if (body.status === "failed" || body.run_status === "failed") {
+          const failReason = body.error || body.last_error || "Research sidecar execution failed";
+          try {
+            await env.RADAR_DB.prepare(`
+              UPDATE sidecar_dispatches 
+              SET status = 'failed', last_error = ?, updated_at = ? 
+              WHERE run_id = ? AND tenant_id = ?
+            `).bind(failReason, now, runId, tenantId).run();
+          } catch (e) {}
+          return Response.json({
+            status: "recorded_failure",
+            run_id: runId,
+            error: failReason
+          }, { headers: corsHeaders });
+        }
+
         for (const item of records) {
           const prospectId = item.prospect_id;
           const sourceId = item.source_id || "scrapling_business_website";
@@ -2416,50 +2543,61 @@ export default {
             WHERE prospect_id = ? AND source_id = ? AND evidence_type = ? AND content_hash = ?
           `).bind(prospectId, sourceId, evidenceType, contentHash).first()) as any;
 
-          if (existingEvidence) {
-            duplicatedCount++;
-            continue;
-          }
-
-          // 4. Insert into source_evidence
-          const evidenceId = item.id || `ev_${crypto.randomUUID().replace(/-/g, '').substring(0, 16)}`;
+          const evidenceId = existingEvidence ? existingEvidence.id : (item.id || `ev_${crypto.randomUUID().replace(/-/g, '').substring(0, 16)}`);
           const evidenceJson = typeof evidenceData === "string" ? evidenceData : JSON.stringify(evidenceData);
 
-          try {
-            await env.RADAR_DB.prepare(`
-              INSERT INTO source_evidence (
-                id, run_id, mode, tenant_id, prospect_id, source_id, source_url,
-                evidence_type, evidence_json, content_hash, extractor_version,
-                confidence, observed_at, created_at
-              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            `).bind(
-              evidenceId,
-              runId,
-              mode,
-              tenantId,
-              prospectId,
-              sourceId,
-              sourceUrl,
-              evidenceType,
-              evidenceJson,
-              contentHash,
-              extractorVersion,
-              confidence,
-              observedAt,
-              now
-            ).run();
+          if (existingEvidence) {
+            duplicatedCount++;
+          } else {
+            // 4. Insert into source_evidence
+            try {
+              await env.RADAR_DB.prepare(`
+                INSERT INTO source_evidence (
+                  id, run_id, mode, tenant_id, prospect_id, source_id, source_url,
+                  evidence_type, evidence_json, content_hash, extractor_version,
+                  confidence, observed_at, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              `).bind(
+                evidenceId,
+                runId,
+                mode,
+                tenantId,
+                prospectId,
+                sourceId,
+                sourceUrl,
+                evidenceType,
+                evidenceJson,
+                contentHash,
+                extractorVersion,
+                confidence,
+                observedAt,
+                now
+              ).run();
+              insertedCount++;
+            } catch (insertErr: any) {
+              if (insertErr.message && insertErr.message.toLowerCase().includes("unique")) {
+                duplicatedCount++;
+              } else {
+                console.error(`[ResearchEvidence] Error saving evidence:`, insertErr);
+                rejectedCount++;
+                continue;
+              }
+            }
+          }
 
-            // Safe merge into prospects.signals_json
+          // 5. Idempotent synchronization of prospects.signals_json
+          // Canonical dual-write to both signalsObj.scrapling and signalsObj.signals.scrapling
+          try {
             let signalsObj: any = {};
             try {
               signalsObj = JSON.parse(prospectRow.signals_json || "{}");
-            } catch (e) {
+            } catch {
               signalsObj = {};
             }
 
-            if (!signalsObj.signals) signalsObj.signals = {};
-            const prevScrapling = signalsObj.scrapling || {};
-            signalsObj.scrapling = {
+            const prevScrapling = signalsObj.scrapling || signalsObj.signals?.scrapling || {};
+            const incomingFacts = typeof evidenceData === "object" && evidenceData !== null ? evidenceData : {};
+            const mergedScrapling = {
               ...prevScrapling,
               evidence_id: evidenceId,
               source_url: sourceUrl,
@@ -2469,23 +2607,20 @@ export default {
               observed_at: observedAt,
               facts: {
                 ...(prevScrapling.facts || {}),
-                ...(typeof evidenceData === "object" && evidenceData !== null ? evidenceData : {})
+                ...incomingFacts
               },
               updated_at: now
             };
 
+            signalsObj.scrapling = mergedScrapling;
+            if (!signalsObj.signals) signalsObj.signals = {};
+            signalsObj.signals.scrapling = mergedScrapling;
+
             await env.RADAR_DB.prepare(`
               UPDATE prospects SET signals_json = ?, updated_at = ? WHERE id = ?
             `).bind(JSON.stringify(signalsObj), now, prospectId).run();
-
-            insertedCount++;
-          } catch (insertErr: any) {
-            console.error(`[ResearchEvidence] Error saving evidence:`, insertErr);
-            if (insertErr.message && insertErr.message.toLowerCase().includes("unique")) {
-              duplicatedCount++;
-            } else {
-              rejectedCount++;
-            }
+          } catch (syncErr) {
+            console.warn(`[ResearchEvidence] signals_json sync warning for prospect ${prospectId}:`, syncErr);
           }
         }
 
@@ -2503,7 +2638,8 @@ export default {
           inserted: insertedCount,
           duplicated: duplicatedCount,
           rejected: rejectedCount,
-          total_received: records.length
+          total_received: records.length,
+          outcome: records.length === 0 ? "empty_completed" : "completed"
         }, { headers: corsHeaders });
       }
 
@@ -2574,15 +2710,14 @@ export default {
         const maxTenants = Math.max(0, Math.min(10, parseInt((env as any).TENANT_REFRESH_PER_CRON || "2", 10) || 2));
         if (maxTenants === 0) return;
         await env.RADAR_DB.prepare(`CREATE TABLE IF NOT EXISTS tenant_refresh_log (tenant_id TEXT PRIMARY KEY, last_at TEXT NOT NULL)`).run();
-        const since = new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString();
         const rows = await env.RADAR_DB.prepare(`
           SELECT c.tenant_id, c.niche, c.subniches_json, c.cities_json
           FROM tenant_config c
           LEFT JOIN tenant_refresh_log l ON l.tenant_id = c.tenant_id
-          WHERE c.tenant_id LIKE 'bvelt_%' AND c.updated_at >= ?
-          ORDER BY COALESCE(l.last_at, '') ASC, c.updated_at DESC
+          WHERE c.tenant_id IS NOT NULL AND c.tenant_id != '' AND c.tenant_id != 'founder'
+          ORDER BY COALESCE(l.last_at, '') ASC, c.updated_at ASC
           LIMIT ?
-        `).bind(since, maxTenants).all();
+        `).bind(maxTenants).all();
         const dayOfYear = Math.floor((Date.now() - Date.UTC(new Date().getUTCFullYear(), 0, 0)) / 86400000);
         for (const t of (rows.results || []) as any[]) {
           let city = "";
@@ -2972,7 +3107,7 @@ export async function maybeDispatchSidecarResearch(
       await env.RADAR_DB.prepare(`
         UPDATE sidecar_dispatches 
         SET status = 'queued', updated_at = ? 
-        WHERE id = ?
+        WHERE id = ? AND status NOT IN ('completed', 'running')
       `).bind(updateTime, dispatchId).run();
       console.log(`[maybeDispatchSidecarResearch] Successfully dispatched Scrapling research for run ${runId} (${candidateCount} candidates)`);
       return true;
@@ -3990,29 +4125,46 @@ export async function processQueueJob(job: RadarJobMessage, env: Env): Promise<v
  * upserts tenant_config, runs a FAST sync discovery for up to 2 leads,
  * and enqueues a full tenant run in the background.
  */
-async function bootstrapBveltTenant(
+export async function bootstrapBveltTenant(
   env: Env,
   body: any,
   ctx?: ExecutionContext
 ): Promise<{
   success: boolean;
+  status?: string;
   tenant_id: string;
   city: string;
   niches: string[];
   run_id: string | null;
   leads: any[];
   message: string;
+  missing_fields?: string[];
   source: string;
 }> {
   const source = String(body.source || "free_analysis");
-  const userTrade = String(body.trade || body.niche || body.industry || "hvac")
-    .toLowerCase()
-    .trim()
-    .replace(/\s+/g, "_");
+  const rawTrade = String(body.trade || body.niche || body.industry || "").trim();
   const tenantId =
     String(body.tenant_id || body.user_id || `bvelt_${Date.now()}`).replace(/[^a-zA-Z0-9_-]/g, "_") ||
     `bvelt_${Date.now()}`;
   const tenantName = String(body.tenant_name || body.business_name || "Bvelt Client");
+
+  // Missing trade check - DO NOT DEFAULT TO HVAC
+  if (!rawTrade) {
+    return {
+      success: false,
+      status: "pending_configuration",
+      tenant_id: tenantId,
+      city: "",
+      niches: [],
+      run_id: null,
+      leads: [],
+      message: "trade_required: falta oficio, nicho o industria del cliente; Radar no inventa oficios.",
+      missing_fields: ["trade"],
+      source
+    };
+  }
+
+  const userTrade = rawTrade.toLowerCase().replace(/\s+/g, "_");
 
   // Resolve location: explicit city > lat/lon > fallback
   let cityLabel = "";
@@ -4024,16 +4176,16 @@ async function bootstrapBveltTenant(
     if (nearest) cityLabel = formatPlaceLabel(nearest);
   }
   if (!cityLabel) {
-    // Antes caía en "Tampa, FL" y un cliente de Naples/Austin recibía leads de la ciudad equivocada.
-    // Mejor decir la verdad: sin ciudad no hay búsqueda, y Bvelt usa sus fuentes propias.
     return {
       success: false,
+      status: "pending_configuration",
       tenant_id: tenantId,
       city: "",
       niches: [],
       run_id: null,
       leads: [],
       message: "city_required: falta ciudad o coordenadas del cliente; Radar no inventa ubicación.",
+      missing_fields: ["city"],
       source
     };
   }
@@ -4041,6 +4193,8 @@ async function bootstrapBveltTenant(
   // Contractor trade → who they sell TO (buyer ICP)
   const tradeKey = userTrade.replace(/-/g, "_");
   const niches =
+    (Array.isArray(body.subniches) && body.subniches.length > 0 ? body.subniches : null) ||
+    (Array.isArray(body.target_niches) && body.target_niches.length > 0 ? body.target_niches : null) ||
     TENANT_TARGET_MAP[tradeKey] ||
     TENANT_TARGET_MAP[tradeKey.replace(/_/g, " ")] ||
     ["property management", "real estate", "hoa"];
@@ -4051,7 +4205,7 @@ async function bootstrapBveltTenant(
       ? "hotel"
       : primaryNiche.toLowerCase().includes("hoa")
         ? "property management"
-        : "property management";
+        : primaryNiche;
 
   const timestamp = new Date().toISOString();
   await env.RADAR_DB.prepare(`
@@ -4095,7 +4249,7 @@ async function bootstrapBveltTenant(
   // --- FAST PATH: one Overpass/BizData pull, top 2 leads now ---
   const leads: any[] = [];
   try {
-    const { businesses } = await fetchLocalBusinessesWithDiagnostics(cityLabel, searchTrade, env, undefined, 'tenant');
+    const businesses = body.skip_fast_discovery ? [] : (await fetchLocalBusinessesWithDiagnostics(cityLabel, searchTrade, env, undefined, 'tenant')).businesses;
     const ranked = (businesses || [])
       .filter((b: any) => b && b.name && tenantBuyerNameFits(b.name, searchTrade))
       .map((b: any) => {
@@ -4203,6 +4357,7 @@ async function bootstrapBveltTenant(
 
   return {
     success: true,
+    status: "active",
     tenant_id: tenantId,
     city: cityLabel,
     niches,
@@ -9098,11 +9253,18 @@ export function buildAttackKit(p: any): {
 
   const angleHint = String(p.bvelt_angle || p.angle || "").toLowerCase();
 
-  // Evidence check for angle selection (never invent)
-  const hasWeatherSignal = Boolean(p.signal_event || signals.weather_alert || signals.emergency_weather);
-  const hasQuoteSignal = Boolean(signals.quote_request || signals.estimate_language || angleHint.includes("quote"));
-  const hasSmsGapSignal = Boolean(signals.sms_gap || signals.no_own_website || angleHint.includes("sms") || angleHint.includes("contact_gap"));
-  const hasMissedCallsSignal = Boolean(signals.emergency || signals.contact_form || signals.booking || signals.call_cta || p.phone || p.email || p.website || angleHint.includes("missed"));
+  // Evidence check for angle selection (never invent facts; phone alone != missed calls)
+  const hasWeatherSignal = Boolean(p.signal_event || signals.weather_alert || signals.emergency_weather || signals.storm_surge);
+  const hasQuoteSignal = Boolean(signals.quote_request || signals.estimate_form || signals.stale_estimates || signals.quote_followup_gap);
+  const hasSmsGapSignal = Boolean(signals.phone_only || signals.no_sms || signals.sms_gap || signals.landline_only || signals.no_texting);
+  const hasMissedCallsSignal = Boolean(
+    signals.missed_call_evidence ||
+    signals.after_hours_voicemail ||
+    signals.call_answering_friction ||
+    signals.unanswered_call ||
+    signals.voicemail_only ||
+    (angleHint === "missed_calls" && (signals.missed_call_verified || signals.unanswered_call))
+  );
 
   let selectedAngle: 'weather_surge' | 'stale_quotes' | 'no_sms' | 'missed_calls' | null = null;
   if (hasWeatherSignal) {
@@ -9119,10 +9281,10 @@ export function buildAttackKit(p: any): {
     return {
       prospect_id: String(p.id || ""),
       name,
-      why_this_lead: `DO NOT CONTACT: no observable evidence for outreach angle`,
+      why_this_lead: `DO NOT CONTACT: no verified friction or observable evidence for outreach angle`,
       email: { subject: "", body: "" },
       sms: "",
-      call_script: "- DO NOT CONTACT: No observable evidence for outreach angle.",
+      call_script: "- DO NOT CONTACT: No verified friction or observable evidence for outreach angle.",
       next_action: "DO_NOT_CONTACT — no evidence for angle",
       angle: "no_evidence"
     };
@@ -9557,24 +9719,26 @@ export async function pushMarketObservationsToBem(env: Env): Promise<{
     const rows = await env.RADAR_DB.prepare(`
       SELECT id, tenant_id, name, city, trade, website, phone, email, score, outcome, status, created_at
       FROM prospects
-      WHERE created_at >= datetime('now', '-1 day')
+      WHERE (tenant_id IS NULL OR tenant_id = '' OR tenant_id = 'founder')
+        AND created_at >= datetime('now', '-1 day')
       ORDER BY created_at DESC
       LIMIT 500
     `).all();
 
     const results = (rows?.results || []) as any[];
 
-    const items = results.map(row => {
-      const tid = row.tenant_id;
-      const isFounder = !tid || tid === "" || tid === "founder";
+    // Strict guarantee: zero Tenant records can ever be included in the BEM payload
+    const founderOnly = results.filter(row => !row.tenant_id || row.tenant_id === "" || row.tenant_id === "founder");
+
+    const items = founderOnly.map(row => {
       const websiteStr = row.website ? String(row.website).trim() : "";
       const phoneStr = row.phone ? String(row.phone).trim() : "";
       const emailStr = row.email ? String(row.email).trim() : "";
       const parsedScore = Number(row.score);
 
       return {
-        mode: isFounder ? "founder" : "tenant",
-        tenant_id: tid || "founder",
+        mode: "founder",
+        tenant_id: "founder",
         city: row.city || "",
         trade: row.trade || "",
         business_name: row.name || "",
@@ -9616,23 +9780,18 @@ export async function pushMarketObservationsToBem(env: Env): Promise<{
       return { ok: false, status: res.status };
     }
 
-    // Tarea B — Telegram digest (máx 1 vez al día)
-    let founderCount = 0;
-    let tenantCount = 0;
+    // Tarea B — Telegram digest (máx 1 vez al día, Founder observations)
     let withoutWebCount = 0;
     let withPhoneCount = 0;
 
     for (const item of items) {
-      if (item.mode === "founder") founderCount++;
-      else tenantCount++;
       if (!item.has_website) withoutWebCount++;
       if (item.has_phone) withPhoneCount++;
     }
 
     const digestText = [
-      "BEM feed diario",
+      "BEM feed diario (Founder)",
       `Prospectos enviados: ${items.length}`,
-      `Founder: ${founderCount} | Tenant: ${tenantCount}`,
       `Sin web: ${withoutWebCount} | Con teléfono: ${withPhoneCount}`,
       `OK ingest`
     ].join("\n");
@@ -9643,6 +9802,93 @@ export async function pushMarketObservationsToBem(env: Env): Promise<{
   } catch (err: any) {
     console.warn("[BEM Ingest] Failed to process market observations:", err);
     return { ok: false, reason: err?.message || String(err) };
+  }
+}
+
+/**
+ * Dedicated isolated sender for Tenant observations to Bvelt.
+ * Guarantees Tenant observations are kept strictly separate from global Founder BEM.
+ */
+export async function sendTenantObservationsToBvelt(
+  env: Env,
+  tenantId: string,
+  options?: { limit?: number; since?: string }
+): Promise<{
+  ok?: boolean;
+  skipped?: boolean;
+  reason?: string;
+  sent_count?: number;
+  tenant_id: string;
+}> {
+  if (!tenantId || tenantId === "founder") {
+    return { skipped: true, reason: "tenant_id_required", tenant_id: tenantId };
+  }
+  const ingestUrl = (env as any).BVELT_TENANT_INGEST_URL || env.BVELT_INGEST_URL;
+  const ingestKey = (env as any).BVELT_TENANT_INGEST_KEY || env.BVELT_INGEST_KEY || env.RADAR_SERVICE_KEY;
+  if (!ingestUrl || !ingestKey) {
+    return { skipped: true, reason: "missing_tenant_ingest_config", tenant_id: tenantId };
+  }
+  const limit = options?.limit || 100;
+  const sinceClause = options?.since ? "AND created_at >= ?" : "";
+  const params: any[] = [tenantId];
+  if (options?.since) params.push(options.since);
+  params.push(limit);
+
+  const rows = await env.RADAR_DB.prepare(`
+    SELECT id, tenant_id, name, city, trade, website, phone, email, score, status, tenant_outcome, bvelt_angle, created_at
+    FROM prospects
+    WHERE tenant_id = ?
+      ${sinceClause}
+    ORDER BY created_at DESC
+    LIMIT ?
+  `).bind(...params).all();
+
+  const results = (rows?.results || []) as any[];
+  if (results.length === 0) {
+    return { ok: true, sent_count: 0, tenant_id: tenantId };
+  }
+
+  const items = results.map(r => ({
+    prospect_id: String(r.id),
+    tenant_id: tenantId,
+    name: r.name,
+    city: r.city,
+    trade: r.trade,
+    website: r.website,
+    phone: r.phone,
+    email: r.email,
+    score: r.score,
+    status: r.status,
+    outcome: r.tenant_outcome,
+    angle: r.bvelt_angle,
+    created_at: r.created_at
+  }));
+
+  const payload = {
+    source: "bvelt-radar",
+    tenant_id: tenantId,
+    timestamp: new Date().toISOString(),
+    count: items.length,
+    items
+  };
+
+  try {
+    const res = await fetch(ingestUrl, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${ingestKey}`,
+        "Content-Type": "application/json",
+        "X-Bvelt-Tenant-Id": tenantId
+      },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(12000)
+    });
+    if (!res.ok) {
+      return { ok: false, reason: `http_${res.status}`, tenant_id: tenantId };
+    }
+    return { ok: true, sent_count: items.length, tenant_id: tenantId };
+  } catch (err: any) {
+    return { ok: false, reason: err?.message || String(err), tenant_id: tenantId };
   }
 }
 
