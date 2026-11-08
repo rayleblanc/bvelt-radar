@@ -1,6 +1,6 @@
 declare const process: any;
 
-import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem } from './worker';
+import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized } from './worker';
 import { DEFAULT_FOUNDER_MISSION, MissionConfig } from './worker';
 import { fetchPermitContractors } from './permitSources';
 
@@ -2091,6 +2091,39 @@ tests.push({
     assert(parsedSignals.scrapling !== undefined, "Canonical scrapling property must exist");
     assert(parsedSignals.signals?.scrapling !== undefined, "Canonical signals.scrapling property must exist");
     assert(parsedSignals.scrapling.facts.page_title === "Test Business Homepage", "Facts must include extracted page_title");
+  }
+});
+
+// Test 45: Tenant auth is scoped; ingestion credentials cannot access admin routes.
+tests.push({
+  name: "Tenant auth: Radar service is tenant-scoped and ingest key is not an admin credential",
+  run: async () => {
+    const env: any = {
+      FOUNDER_SERVICE_KEY: "founder-secret",
+      RADAR_SERVICE_KEY: "radar-service-secret",
+      BVELT_INGEST_KEY: "ingest-only-secret"
+    };
+    const tenantRequest = new Request("https://radar.test/api/tenants/config", {
+      headers: { "Authorization": "Bearer radar-service-secret", "X-Tenant-Id": "tenant_alpha" }
+    });
+    const tenantAuth = resolveTenantAuthContext(tenantRequest, env, "founder-secret", "");
+    assert(tenantAuth.authorized, "Radar service with explicit tenant scope must authenticate");
+    assert(tenantAuth.canAccessTenant("tenant_alpha"), "Radar service must access its declared tenant");
+    assert(!tenantAuth.canAccessTenant("tenant_beta"), "Radar service must not cross tenant boundaries");
+    assert(!tenantAuth.canAccessTenant("founder"), "Radar service must not access Founder scope");
+
+    const ingestRequest = new Request("https://radar.test/api/tenants/config", {
+      headers: { "Authorization": "Bearer ingest-only-secret", "X-Tenant-Id": "tenant_alpha" }
+    });
+    const ingestAuth = resolveTenantAuthContext(ingestRequest, env, "founder-secret", "");
+    assert(!ingestAuth.authorized, "BEM ingestion key must not authenticate tenant/admin APIs");
+    assert(!isAuthorized(ingestRequest, env, "founder-secret", ""), "BEM ingestion key must not authorize /run or admin routes");
+
+    const founderRequest = new Request("https://radar.test/api/tenants/config", {
+      headers: { "Authorization": "Bearer founder-secret" }
+    });
+    const founderAuth = resolveTenantAuthContext(founderRequest, env, "founder-secret", "");
+    assert(founderAuth.authorized && founderAuth.canAccessTenant("tenant_beta"), "Founder credential retains administrative access");
   }
 });
 
