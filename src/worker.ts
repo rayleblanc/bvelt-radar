@@ -570,7 +570,7 @@ export default {
     const corsHeaders: Record<string, string> = {
       "Access-Control-Allow-Origin": allowOriginHeader,
       "Access-Control-Allow-Methods": "GET, POST, OPTIONS, DELETE",
-      "Access-Control-Allow-Headers": "Content-Type, Authorization",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Tenant-Id",
       "Access-Control-Allow-Credentials": "true"
     };
 
@@ -1827,7 +1827,7 @@ export default {
           const tenant = await env.RADAR_DB.prepare("SELECT * FROM tenant_config WHERE tenant_id = ?").bind(tenantId).first();
           return Response.json(tenant || { error: "Tenant config not found" }, { headers: corsHeaders });
         }
-        if (!auth.isService && !auth.isFounderSession) {
+        if (!auth.isFounderSession) {
           return Response.json({ error: "Forbidden: tenant listing requires administrative privileges" }, { status: 403, headers: corsHeaders });
         }
         const tenants = await env.RADAR_DB.prepare("SELECT * FROM tenant_config ORDER BY tenant_id ASC").all();
