@@ -104,38 +104,60 @@ def _wait_domain(url: str) -> None:
 
 def _fetch(url: str):
     from scrapling.fetchers import Fetcher
-    if not is_public_http_url(url) or not _robots_allowed(url):
-        return None
+
+    current_url = url
+    allowed_redirects = {301, 302, 303, 307, 308}
+    headers = {"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.5"}
     try:
-        _wait_domain(url)
-        response = Fetcher.get(
-            url,
-            timeout=12,
-            retries=1,
-            retry_delay=1,
-            follow_redirects="safe",
-            stealthy_headers=False,
-            headers={"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.5"},
-        )
-        if response.status in {429, 503}:
-            retry_after = (response.headers or {}).get("retry-after") or (response.headers or {}).get("Retry-After")
-            try:
-                delay = min(10.0, max(1.0, float(retry_after)))
-            except (TypeError, ValueError):
-                delay = 2.0
-            time.sleep(delay)
-            _wait_domain(url)
+        for redirect_count in range(6):
+            # Validate every hop before making a request. Never delegate redirect
+            # traversal to the HTTP client, where a public URL could redirect to
+            # localhost, a private subnet, or cloud metadata.
+            if not is_public_http_url(current_url) or not _robots_allowed(current_url):
+                return None
+            _wait_domain(current_url)
             response = Fetcher.get(
-                url, timeout=12, retries=0, follow_redirects="safe", stealthy_headers=False,
-                headers={"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.5"},
+                current_url,
+                timeout=12,
+                retries=1,
+                retry_delay=1,
+                follow_redirects=False,
+                stealthy_headers=False,
+                headers=headers,
             )
-        if response.status < 200 or response.status >= 300:
-            return None
-        content_type = str((response.headers or {}).get("content-type", "")).lower()
-        if content_type and not any(kind in content_type for kind in ("text/html", "application/xhtml+xml", "text/plain")):
-            return None
-        body = response.body[:MAX_HTML_BYTES]
-        return body.decode(response.encoding or "utf-8", errors="replace"), response.status
+            if response.status in allowed_redirects:
+                location = (response.headers or {}).get("location") or (response.headers or {}).get("Location")
+                if not location or redirect_count >= 5:
+                    return None
+                target = urljoin(current_url, str(location).strip())
+                if not is_public_http_url(target):
+                    return None
+                old_host = _host(current_url).removeprefix("www.")
+                new_host = _host(target).removeprefix("www.")
+                if old_host != new_host:
+                    return None
+                current_url = target
+                continue
+            if response.status in {429, 503}:
+                retry_after = (response.headers or {}).get("retry-after") or (response.headers or {}).get("Retry-After")
+                try:
+                    delay = min(10.0, max(1.0, float(retry_after)))
+                except (TypeError, ValueError):
+                    delay = 2.0
+                time.sleep(delay)
+                _wait_domain(current_url)
+                response = Fetcher.get(
+                    current_url, timeout=12, retries=0, follow_redirects=False, stealthy_headers=False,
+                    headers=headers,
+                )
+            if response.status < 200 or response.status >= 300:
+                return None
+            content_type = str((response.headers or {}).get("content-type", "")).lower()
+            if content_type and not any(kind in content_type for kind in ("text/html", "application/xhtml+xml", "text/plain")):
+                return None
+            body = response.body[:MAX_HTML_BYTES]
+            return body.decode(response.encoding or "utf-8", errors="replace"), response.status
+        return None
     except Exception:
         return None
 
