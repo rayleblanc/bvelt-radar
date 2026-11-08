@@ -1225,20 +1225,54 @@ tests.push({
   }
 });
 
-// Test 40: Scrapling Sidecar Research Integration (/api/research/candidates, /api/research/evidence, candidate linking, sidecar dispatch)
+// Tests 40-52: Comprehensive Scrapling Sidecar Research Suite
 tests.push({
-  name: "Scrapling sidecar research endpoints, candidate linking, and evidence ingestion",
+  name: "Scrapling Research Suite: contracts, isolation, concurrency, security & callbacks",
   run: async () => {
+    // Shared mock stores
     const candidatesStore: any[] = [];
     const evidenceStore: any[] = [];
     const dispatchesStore: any[] = [];
+    const queueJobsStore: any[] = [];
     const prospectsStore: any[] = [
       {
-        id: "p_test_1001",
+        id: "p_founder_01",
+        mode: "founder",
+        tenant_id: "founder",
         name: "Acme Plumbing",
         city: "Tampa, FL",
         trade: "plumbing",
         website: "https://acmeplumbing.com",
+        signals_json: JSON.stringify({ signals: {} })
+      },
+      {
+        id: "p_tenantA_01",
+        mode: "tenant",
+        tenant_id: "tenant_A",
+        name: "Sunbelt HOA Services",
+        city: "Orlando, FL",
+        trade: "hoa",
+        website: "https://sunbelthoa.com",
+        signals_json: JSON.stringify({ signals: {} })
+      },
+      {
+        id: "p_tenantB_01",
+        mode: "tenant",
+        tenant_id: "tenant_B",
+        name: "Metro Property Mgmt",
+        city: "Austin, TX",
+        trade: "property management",
+        website: "https://metropm.com",
+        signals_json: JSON.stringify({ signals: {} })
+      },
+      {
+        id: "p_no_website",
+        mode: "founder",
+        tenant_id: "founder",
+        name: "No Site Contractor",
+        city: "Dallas, TX",
+        trade: "roofing",
+        website: null,
         signals_json: JSON.stringify({ signals: {} })
       }
     ];
@@ -1246,54 +1280,107 @@ tests.push({
     const mockDb: any = {
       batch: async (statements: any[]) => [],
       prepare: (sql: string) => {
-        const sqlLower = sql.toLowerCase();
+        const sqlLower = sql.toLowerCase().replace(/\s+/g, " ");
         return {
           bind: (...args: any[]) => {
             return {
               run: async () => {
                 if (sqlLower.includes("insert or ignore into research_run_candidates")) {
-                  candidatesStore.push({ run_id: args[0], mode: args[1], tenant_id: args[2], prospect_id: args[3], website: args[4] });
-                } else if (sqlLower.includes("insert or replace into source_evidence")) {
-                  evidenceStore.push({ evidence_id: args[0], prospect_id: args[1], run_id: args[2], source_url: args[3], extracted_text: args[4], metadata_json: args[5] });
+                  const existing = candidatesStore.find(c => c.run_id === args[0] && c.tenant_id === args[2] && c.prospect_id === args[3]);
+                  if (!existing) {
+                    candidatesStore.push({ run_id: args[0], mode: args[1], tenant_id: args[2], prospect_id: args[3], created_at: args[4] });
+                  }
                 } else if (sqlLower.includes("insert into sidecar_dispatches")) {
-                  dispatchesStore.push({ dispatch_id: args[0], run_id: args[1], mode: args[2], tenant_id: args[3], status: args[4], candidates_count: args[5] });
+                  // Check UNIQUE(run_id, tenant_id)
+                  const existing = dispatchesStore.find(d => d.run_id === args[1] && d.tenant_id === args[3]);
+                  if (existing) {
+                    throw new Error("SQLITE_CONSTRAINT: UNIQUE constraint failed: sidecar_dispatches.run_id, sidecar_dispatches.tenant_id");
+                  }
+                  dispatchesStore.push({
+                    id: args[0],
+                    run_id: args[1],
+                    mode: args[2],
+                    tenant_id: args[3],
+                    status: args[4],
+                    attempts: args[5],
+                    workflow_file: args[6],
+                    created_at: args[7],
+                    updated_at: args[8],
+                    completed_at: null
+                  });
+                } else if (sqlLower.includes("update sidecar_dispatches set status = 'queued'")) {
+                  const d = dispatchesStore.find(x => x.id === args[1]);
+                  if (d) { d.status = "queued"; d.updated_at = args[0]; }
+                } else if (sqlLower.includes("update sidecar_dispatches set status = 'failed'")) {
+                  const d = dispatchesStore.find(x => x.id === args[2]);
+                  if (d) { d.status = "failed"; d.last_error = args[0]; d.updated_at = args[1]; }
+                } else if (sqlLower.includes("update sidecar_dispatches set status = 'completed'")) {
+                  const d = dispatchesStore.find(x => x.run_id === args[2] && x.tenant_id === args[3]);
+                  if (d) { d.status = "completed"; d.completed_at = args[0]; d.updated_at = args[1]; }
+                } else if (sqlLower.includes("insert into source_evidence")) {
+                  evidenceStore.push({
+                    id: args[0],
+                    run_id: args[1],
+                    mode: args[2],
+                    tenant_id: args[3],
+                    prospect_id: args[4],
+                    source_id: args[5],
+                    source_url: args[6],
+                    evidence_type: args[7],
+                    evidence_json: args[8],
+                    content_hash: args[9],
+                    extractor_version: args[10],
+                    confidence: args[11],
+                    observed_at: args[12],
+                    created_at: args[13]
+                  });
                 } else if (sqlLower.includes("update prospects set signals_json")) {
                   const p = prospectsStore.find(x => x.id === args[2]);
-                  if (p) p.signals_json = args[0];
-                } else if (sqlLower.includes("update sidecar_dispatches")) {
-                  const d = dispatchesStore.find(x => x.run_id === args[1]);
-                  if (d) d.status = "completed";
+                  if (p) { p.signals_json = args[0]; }
                 }
-                return { success: true };
+                return { success: true, meta: { changes: 1 } };
               },
               first: async () => {
                 if (sqlLower.includes("select count(*) as c from queue_jobs")) {
-                  return { c: 0 };
-                } else if (sqlLower.includes("select dispatch_id from sidecar_dispatches")) {
+                  const pending = queueJobsStore.filter(j => j.run_id === args[0] && j.status !== "completed");
+                  return { c: pending.length };
+                } else if (sqlLower.includes("select count(*) as cnt from research_run_candidates c join prospects p")) {
+                  const matched = candidatesStore.filter(c => {
+                    const p = prospectsStore.find(pr => pr.id === c.prospect_id);
+                    return c.run_id === args[0] && c.mode === args[1] && c.tenant_id === args[2] && p && p.website;
+                  });
+                  return { cnt: matched.length };
+                } else if (sqlLower.includes("select id, status, attempts from sidecar_dispatches")) {
                   const d = dispatchesStore.find(x => x.run_id === args[0] && x.tenant_id === args[1]);
-                  return d ? { dispatch_id: d.dispatch_id } : null;
-                } else if (sqlLower.includes("select count(*) as cnt from research_run_candidates")) {
-                  return { cnt: candidatesStore.length };
-                } else if (sqlLower.includes("select signals_json from prospects")) {
-                  const p = prospectsStore.find(x => x.id === args[0]);
-                  return p ? { signals_json: p.signals_json } : null;
+                  return d ? { id: d.id, status: d.status, attempts: d.attempts } : null;
+                } else if (sqlLower.includes("select 1 from research_run_candidates")) {
+                  const c = candidatesStore.find(x => x.run_id === args[0] && x.mode === args[1] && x.tenant_id === args[2] && x.prospect_id === args[3]);
+                  return c ? { 1: 1 } : null;
+                } else if (sqlLower.includes("select id, signals_json from prospects")) {
+                  const p = prospectsStore.find(x => x.id === args[0] && x.mode === args[1] && (x.tenant_id || "founder") === args[2]);
+                  return p ? { id: p.id, signals_json: p.signals_json } : null;
+                } else if (sqlLower.includes("select id from source_evidence")) {
+                  const ev = evidenceStore.find(x => x.prospect_id === args[0] && x.source_id === args[1] && x.evidence_type === args[2] && x.content_hash === args[3]);
+                  return ev ? { id: ev.id } : null;
                 }
                 return null;
               },
               all: async () => {
-                if (sqlLower.includes("from research_run_candidates")) {
-                  return {
-                    results: candidatesStore.map(c => {
-                      const p = prospectsStore.find(x => x.id === c.prospect_id);
+                if (sqlLower.includes("from research_run_candidates c join prospects p")) {
+                  const matched = candidatesStore
+                    .filter(c => c.run_id === args[0] && c.mode === args[1] && c.tenant_id === args[2])
+                    .map(c => {
+                      const p = prospectsStore.find(pr => pr.id === c.prospect_id);
                       return {
                         prospect_id: c.prospect_id,
-                        business_name: p ? p.name : "Acme Plumbing",
-                        city: p ? p.city : "Tampa, FL",
-                        trade: p ? p.trade : "plumbing",
-                        website: c.website || (p ? p.website : "https://acmeplumbing.com")
+                        business_name: p ? p.name : "",
+                        city: p ? p.city : "",
+                        trade: p ? p.trade : "",
+                        website: p ? p.website : null
                       };
                     })
-                  };
+                    .filter(c => c.website !== null && c.website !== "");
+                  return { results: matched.slice(0, 50) };
                 }
                 return { results: [] };
               }
@@ -1305,59 +1392,273 @@ tests.push({
 
     const mockEnv: any = {
       RADAR_DB: mockDb,
-      RADAR_SERVICE_KEY: "test_key",
-      RADAR_SIDECAR_CALLBACK_KEY: "sidecar_secret_123",
-      GITHUB_ACTIONS_TOKEN: "gh_test_token",
+      RADAR_SERVICE_KEY: "admin_service_key_999",
+      RADAR_SIDECAR_CALLBACK_KEY: "valid_sidecar_key_123",
+      GITHUB_ACTIONS_TOKEN: "mock_gh_token",
       RADAR_RESEARCH_REPOSITORY: "rayleblanc/bvelt-radar"
     };
 
-    // 1. Link candidate
-    await associateResearchCandidate(mockDb, "run_test_01", "founder", "founder", "p_test_1001", "https://acmeplumbing.com");
-    assert(candidatesStore.length === 1, "Candidate store should have 1 linked item");
-    assert(candidatesStore[0].prospect_id === "p_test_1001", "Prospect ID must match");
-
-    // 2. GET /api/research/candidates
-    const reqCandidates = new Request("https://radar.bvelt.app/api/research/candidates?run_id=run_test_01&mode=founder", {
-      headers: { "x-callback-key": "sidecar_secret_123" }
+    // 1. Contrato Worker -> runner (GET /api/research/candidates)
+    await associateResearchCandidate(mockDb, "run_001", "founder", "founder", "p_founder_01");
+    const req1 = new Request("https://radar.bvelt.app/api/research/candidates?run_id=run_001&mode=founder&tenant_id=founder", {
+      headers: { "Authorization": "Bearer valid_sidecar_key_123" }
     });
-    const resCandidates = await worker.fetch(reqCandidates, mockEnv, {} as any);
-    assert(resCandidates.status === 200, "Candidates endpoint should return status 200");
-    const jsonCandidates = await resCandidates.json() as any;
-    assert(jsonCandidates.candidates_count === 1, "Candidates count should be 1");
-    assert(jsonCandidates.candidates[0].website === "https://acmeplumbing.com", "Candidate website must match");
+    const res1 = await worker.fetch(req1, mockEnv, {} as any);
+    assert(res1.status === 200, "1. Candidates endpoint should return 200");
+    const json1 = await res1.json() as any;
+    assert(Array.isArray(json1.records), "1. Response must contain 'records' array for runner.py");
+    assert(json1.run_id === "run_001", "1. Response run_id must match");
+    assert(json1.records.length === 1, "1. Must return 1 candidate");
+    const cand1 = json1.records[0];
+    assert(cand1.prospect_id === "p_founder_01", "1. prospect_id must match");
+    assert(cand1.business_name === "Acme Plumbing", "1. business_name must match");
+    assert(cand1.city === "Tampa, FL", "1. city must match");
+    assert(cand1.trade === "plumbing", "1. trade must match");
+    assert(cand1.website === "https://acmeplumbing.com", "1. website must match");
+    assert(cand1.email === undefined, "1. email MUST NOT be exposed");
+    assert(cand1.phone === undefined, "1. phone MUST NOT be exposed");
+    assert(cand1.demo_token === undefined, "1. demo_token MUST NOT be exposed");
 
-    // 3. POST /api/research/evidence
-    const reqEvidence = new Request("https://radar.bvelt.app/api/research/evidence", {
+    // 2. Contrato runner -> callback (POST /api/research/evidence)
+    const req2 = new Request("https://radar.bvelt.app/api/research/evidence", {
       method: "POST",
       headers: {
-        "x-callback-key": "sidecar_secret_123",
+        "Authorization": "Bearer valid_sidecar_key_123",
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
-        items: [
+        run_id: "run_001",
+        mode: "founder",
+        tenant_id: "founder",
+        extractor_version: "bvelt-scrapling-1.0.0",
+        run_status: "completed",
+        candidates_received: 1,
+        records: [
           {
-            prospect_id: "p_test_1001",
-            run_id: "run_test_01",
-            source_url: "https://acmeplumbing.com/about",
-            extracted_text: "Established 2012. 24/7 emergency plumbing service in Tampa Bay.",
-            metadata: { tech_stack: ["WordPress", "W3 Total Cache"], emergency_mentioned: true }
+            prospect_id: "p_founder_01",
+            source_id: "scrapling_business_website",
+            source_url: "https://acmeplumbing.com",
+            evidence_type: "business_website_profile",
+            evidence: { contact_form_observed: true, page_title: "Acme Plumbing Services" },
+            content_hash: "hash_001",
+            extractor_version: "bvelt-scrapling-1.0.0",
+            confidence: 0.78,
+            observed_at: new Date().toISOString()
           }
         ]
       })
     });
+    const res2 = await worker.fetch(req2, mockEnv, {} as any);
+    assert(res2.status === 200, "2. Evidence endpoint should return 200");
+    const json2 = await res2.json() as any;
+    assert(json2.status === "ok", "2. Status must be ok");
+    assert(json2.inserted === 1, "2. Inserted count must be 1");
+    assert(json2.duplicated === 0, "2. Duplicated count must be 0");
+    assert(json2.rejected === 0, "2. Rejected count must be 0");
 
-    const resEvidence = await worker.fetch(reqEvidence, mockEnv, {} as any);
-    assert(resEvidence.status === 200, "Evidence endpoint should return status 200");
-    const jsonEvidence = await resEvidence.json() as any;
-    assert(jsonEvidence.processed === 1, "Should have processed 1 evidence item");
-    assert(evidenceStore.length === 1, "Evidence store should have 1 stored item");
+    // 3. Respuesta vacía de candidatos (run with no website)
+    await associateResearchCandidate(mockDb, "run_empty", "founder", "founder", "p_no_website");
+    const req3 = new Request("https://radar.bvelt.app/api/research/candidates?run_id=run_empty&mode=founder&tenant_id=founder", {
+      headers: { "Authorization": "Bearer valid_sidecar_key_123" }
+    });
+    const res3 = await worker.fetch(req3, mockEnv, {} as any);
+    assert(res3.status === 200, "3. Candidates endpoint with no sites should return 200");
+    const json3 = await res3.json() as any;
+    assert(Array.isArray(json3.records) && json3.records.length === 0, "3. records array must be empty");
 
-    // 4. Check updated signals_json in prospect
-    const updatedProspect = prospectsStore.find(x => x.id === "p_test_1001");
-    assert(updatedProspect !== undefined, "Prospect must exist");
-    const parsedSignals = JSON.parse(updatedProspect.signals_json);
-    assert(parsedSignals.scrapling !== undefined, "signals.scrapling object must be set");
-    assert(parsedSignals.scrapling.source_url === "https://acmeplumbing.com/about", "Source URL must match");
+    // 4. Callback vacío (records: [])
+    const req4 = new Request("https://radar.bvelt.app/api/research/evidence", {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer valid_sidecar_key_123",
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        run_id: "run_empty",
+        mode: "founder",
+        tenant_id: "founder",
+        extractor_version: "bvelt-scrapling-1.0.0",
+        run_status: "completed",
+        candidates_received: 0,
+        records: []
+      })
+    });
+    const res4 = await worker.fetch(req4, mockEnv, {} as any);
+    assert(res4.status === 200, "4. Empty callback must return 200");
+    const json4 = await res4.json() as any;
+    assert(json4.status === "ok", "4. Status must be ok for empty callback");
+    assert(json4.inserted === 0 && json4.total_received === 0, "4. Inserted and total must be 0");
+
+    // 5. Duplicación de evidencias
+    const req5 = new Request("https://radar.bvelt.app/api/research/evidence", {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer valid_sidecar_key_123",
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        run_id: "run_001",
+        mode: "founder",
+        tenant_id: "founder",
+        records: [
+          {
+            prospect_id: "p_founder_01",
+            source_id: "scrapling_business_website",
+            source_url: "https://acmeplumbing.com",
+            evidence_type: "business_website_profile",
+            evidence: { contact_form_observed: true },
+            content_hash: "hash_001",
+            extractor_version: "bvelt-scrapling-1.0.0"
+          }
+        ]
+      })
+    });
+    const res5 = await worker.fetch(req5, mockEnv, {} as any);
+    const json5 = await res5.json() as any;
+    assert(json5.duplicated === 1, "5. Re-sending identical content_hash must report duplicated=1");
+    assert(json5.inserted === 0, "5. Duplicated evidence must not be re-inserted");
+
+    // 6. Founder frente a Tenant
+    const req6FounderMismatch = new Request("https://radar.bvelt.app/api/research/candidates?run_id=run_001&mode=founder&tenant_id=tenant_A", {
+      headers: { "Authorization": "Bearer valid_sidecar_key_123" }
+    });
+    const res6 = await worker.fetch(req6FounderMismatch, mockEnv, {} as any);
+    assert(res6.status === 400, "6. Founder request with tenant_id != 'founder' must return 400");
+
+    const req6TenantMismatch = new Request("https://radar.bvelt.app/api/research/candidates?run_id=run_001&mode=tenant&tenant_id=founder", {
+      headers: { "Authorization": "Bearer valid_sidecar_key_123" }
+    });
+    const res6b = await worker.fetch(req6TenantMismatch, mockEnv, {} as any);
+    assert(res6b.status === 400, "6. Tenant request with tenant_id='founder' must return 400");
+
+    // 7. Tenant A frente a Tenant B
+    await associateResearchCandidate(mockDb, "run_tenantA", "tenant", "tenant_A", "p_tenantA_01");
+    await associateResearchCandidate(mockDb, "run_tenantB", "tenant", "tenant_B", "p_tenantB_01");
+
+    const req7TenantA = new Request("https://radar.bvelt.app/api/research/candidates?run_id=run_tenantA&mode=tenant&tenant_id=tenant_A", {
+      headers: { "Authorization": "Bearer valid_sidecar_key_123" }
+    });
+    const res7A = await worker.fetch(req7TenantA, mockEnv, {} as any);
+    const json7A = await res7A.json() as any;
+    assert(json7A.records.length === 1 && json7A.records[0].prospect_id === "p_tenantA_01", "7. Tenant A only receives Tenant A candidates");
+
+    // Attempting to submit Tenant B's prospect under Tenant A's run
+    const req7CrossSubmit = new Request("https://radar.bvelt.app/api/research/evidence", {
+      method: "POST",
+      headers: { "Authorization": "Bearer valid_sidecar_key_123", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        run_id: "run_tenantA",
+        mode: "tenant",
+        tenant_id: "tenant_A",
+        records: [
+          {
+            prospect_id: "p_tenantB_01",
+            source_id: "scrapling",
+            source_url: "https://metropm.com",
+            evidence_type: "profile",
+            content_hash: "hash_tenantB_cross"
+          }
+        ]
+      })
+    });
+    const res7Cross = await worker.fetch(req7CrossSubmit, mockEnv, {} as any);
+    const json7Cross = await res7Cross.json() as any;
+    assert(json7Cross.rejected === 1, "7. Cross-tenant prospect evidence submission must be rejected");
+
+    // 8. Callback sin secreto
+    const req8 = new Request("https://radar.bvelt.app/api/research/candidates?run_id=run_001&mode=founder&tenant_id=founder");
+    const res8 = await worker.fetch(req8, mockEnv, {} as any);
+    assert(res8.status === 401, "8. Request without callback secret must return 401");
+
+    // 9. Callback con secreto incorrecto (or admin key fallback attempt)
+    const req9Wrong = new Request("https://radar.bvelt.app/api/research/candidates?run_id=run_001&mode=founder&tenant_id=founder", {
+      headers: { "Authorization": "Bearer wrong_secret_key" }
+    });
+    const res9Wrong = await worker.fetch(req9Wrong, mockEnv, {} as any);
+    assert(res9Wrong.status === 401, "9. Request with incorrect secret must return 401");
+
+    const req9AdminFallback = new Request("https://radar.bvelt.app/api/research/candidates?run_id=run_001&mode=founder&tenant_id=founder", {
+      headers: { "Authorization": "Bearer admin_service_key_999" }
+    });
+    const res9Admin = await worker.fetch(req9AdminFallback, mockEnv, {} as any);
+    assert(res9Admin.status === 401, "9. Request with admin key fallback must return 401");
+
+    // 10. Callback con prospect_id ajeno a la corrida
+    const req10 = new Request("https://radar.bvelt.app/api/research/evidence", {
+      method: "POST",
+      headers: { "Authorization": "Bearer valid_sidecar_key_123", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        run_id: "run_001",
+        mode: "founder",
+        tenant_id: "founder",
+        records: [
+          {
+            prospect_id: "p_unknown_9999",
+            source_id: "scrapling",
+            source_url: "https://unknown.com",
+            evidence_type: "profile",
+            content_hash: "hash_unknown"
+          }
+        ]
+      })
+    });
+    const res10 = await worker.fetch(req10, mockEnv, {} as any);
+    const json10 = await res10.json() as any;
+    assert(json10.rejected === 1, "10. Evidence with alien prospect_id must be rejected");
+
+    // 11. Dos despachos concurrentes para el mismo run
+    let fetchCallCount = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: any, init?: any) => {
+      if (String(url).includes("api.github.com")) {
+        fetchCallCount++;
+        return new Response(null, { status: 204 });
+      }
+      return originalFetch(url, init);
+    }) as any;
+
+    try {
+      const [dispatch1, dispatch2] = await Promise.all([
+        maybeDispatchSidecarResearch(mockEnv, "run_tenantA", "tenant", "tenant_A"),
+        maybeDispatchSidecarResearch(mockEnv, "run_tenantA", "tenant", "tenant_A")
+      ]);
+      assert(dispatch1 !== dispatch2, "11. Only one concurrent dispatch should succeed");
+      assert(fetchCallCount === 1, "11. GitHub Actions workflow should only be dispatched once");
+
+      // 12. Fallo de GitHub Actions
+      await associateResearchCandidate(mockDb, "run_fail_test", "founder", "founder", "p_founder_01");
+      globalThis.fetch = (async (url: any, init?: any) => {
+        if (String(url).includes("api.github.com")) {
+          return new Response("Workflow dispatch failed: rate limit exceeded", { status: 403 });
+        }
+        return originalFetch(url, init);
+      }) as any;
+
+      const failDispatchResult = await maybeDispatchSidecarResearch(mockEnv, "run_fail_test", "founder", "founder");
+      assert(failDispatchResult === false, "12. Dispatch with failing GitHub response must return false");
+      const failedRecord = dispatchesStore.find(d => d.run_id === "run_fail_test");
+      assert(failedRecord !== undefined, "12. Dispatch record must exist in D1");
+      assert(failedRecord.status === "failed", "12. Dispatch record status must be set to 'failed'");
+      assert(failedRecord.last_error.includes("403"), "12. Error message must record status 403");
+
+      // 14. Finalización sin evidencias (records: [])
+      const req14 = new Request("https://radar.bvelt.app/api/research/evidence", {
+        method: "POST",
+        headers: { "Authorization": "Bearer valid_sidecar_key_123", "Content-Type": "application/json" },
+        body: JSON.stringify({
+          run_id: "run_tenantA",
+          mode: "tenant",
+          tenant_id: "tenant_A",
+          records: []
+        })
+      });
+      const res14 = await worker.fetch(req14, mockEnv, {} as any);
+      assert(res14.status === 200, "14. Finalization without evidence must return 200");
+      const completedDispatch = dispatchesStore.find(d => d.run_id === "run_tenantA");
+      assert(completedDispatch && completedDispatch.status === "completed", "14. Dispatch status must transition to 'completed'");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   }
 });
 

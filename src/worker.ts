@@ -940,9 +940,11 @@ export default {
       const webhookSecret = (((env as any).WEBHOOK_SECRET || env.TELEGRAM_WEBHOOK_SECRET || "") as string).trim() || undefined;
       const webhookOk = isWebhookPath && !!webhookSecret && url.searchParams.get("token") === webhookSecret;
       const isResearchCallbackPath = path.startsWith("/api/research/") || path.startsWith("/research/");
-      const callbackOk = isResearchCallbackPath && isCallbackAuthorized(request, env);
-
-      if (!authorized && !webhookOk && !callbackOk) {
+      if (isResearchCallbackPath) {
+        if (!isSidecarCallbackAuthorized(request, env)) {
+          return Response.json({ error: "Unauthorized. Missing or invalid callback key." }, { status: 401, headers: corsHeaders });
+        }
+      } else if (!authorized && !webhookOk) {
         return Response.json({ error: "Unauthorized. Missing or invalid service key." }, { status: 401, headers: corsHeaders });
       }
 
@@ -2251,19 +2253,32 @@ export default {
 
       // 19. Scrapling Sidecar Research Endpoints (/api/research/candidates, /api/research/evidence)
       if ((path === "/api/research/candidates" || path === "/research/candidates") && method === "GET") {
-        if (!isCallbackAuthorized(request, env)) {
+        if (!isSidecarCallbackAuthorized(request, env)) {
           return Response.json({ error: "Unauthorized. Missing or invalid callback key." }, { status: 401, headers: corsHeaders });
         }
 
         await ensureResearchSchema(env.RADAR_DB);
 
         const runId = url.searchParams.get("run_id");
-        const mode = url.searchParams.get("mode") || "founder";
-        const tenantId = url.searchParams.get("tenant_id") || (mode === "tenant" ? "" : "founder");
+        const rawMode = url.searchParams.get("mode");
+        const rawTenantId = url.searchParams.get("tenant_id");
 
         if (!runId) {
           return Response.json({ error: "Missing required query parameter: run_id" }, { status: 400, headers: corsHeaders });
         }
+        if (!rawMode || !["founder", "tenant"].includes(rawMode)) {
+          return Response.json({ error: "Invalid or missing mode parameter: must be 'founder' or 'tenant'" }, { status: 400, headers: corsHeaders });
+        }
+        const mode = rawMode as "founder" | "tenant";
+
+        // Isolation validation
+        if (mode === "founder" && rawTenantId && rawTenantId !== "founder") {
+          return Response.json({ error: "Founder mode requires tenant_id='founder'" }, { status: 400, headers: corsHeaders });
+        }
+        if (mode === "tenant" && (!rawTenantId || rawTenantId === "founder")) {
+          return Response.json({ error: "Tenant mode requires its exact tenant_id" }, { status: 400, headers: corsHeaders });
+        }
+        const tenantId = mode === "founder" ? "founder" : (rawTenantId || "");
 
         const query = `
           SELECT 
@@ -2271,21 +2286,24 @@ export default {
             p.name AS business_name,
             p.city,
             p.trade,
-            COALESCE(c.website, p.website) AS website
+            p.website AS website
           FROM research_run_candidates c
           JOIN prospects p ON c.prospect_id = p.id
           WHERE c.run_id = ?
-            AND (c.tenant_id = ? OR (? = 'founder' AND c.mode = 'founder'))
-            AND COALESCE(c.website, p.website) IS NOT NULL
-            AND COALESCE(c.website, p.website) != ''
+            AND c.mode = ?
+            AND c.tenant_id = ?
+            AND p.mode = ?
+            AND COALESCE(p.tenant_id, 'founder') = ?
+            AND p.website IS NOT NULL
+            AND p.website != ''
           LIMIT 50
         `;
 
         const results = (await env.RADAR_DB.prepare(query)
-          .bind(runId, tenantId, tenantId)
+          .bind(runId, mode, tenantId, mode, tenantId)
           .all()) as any;
 
-        const candidates = ((results && results.results) || []).map((row: any) => ({
+        const records = ((results && results.results) || []).map((row: any) => ({
           prospect_id: row.prospect_id,
           business_name: row.business_name || "Unknown Business",
           city: row.city || "",
@@ -2297,13 +2315,12 @@ export default {
           run_id: runId,
           mode,
           tenant_id: tenantId,
-          candidates_count: candidates.length,
-          candidates
+          records
         }, { headers: corsHeaders });
       }
 
       if ((path === "/api/research/evidence" || path === "/research/evidence") && method === "POST") {
-        if (!isCallbackAuthorized(request, env)) {
+        if (!isSidecarCallbackAuthorized(request, env)) {
           return Response.json({ error: "Unauthorized. Missing or invalid callback key." }, { status: 401, headers: corsHeaders });
         }
 
@@ -2320,95 +2337,173 @@ export default {
           return Response.json({ error: "Invalid JSON payload." }, { status: 400, headers: corsHeaders });
         }
 
-        const items: any[] = Array.isArray(body) ? body : (body.items || body.evidence || []);
+        const runId = body.run_id;
+        const rawMode = body.mode;
+        const rawTenantId = body.tenant_id;
 
-        if (!Array.isArray(items) || items.length === 0) {
-          return Response.json({ error: "No evidence items provided." }, { status: 400, headers: corsHeaders });
+        if (!runId || typeof runId !== "string") {
+          return Response.json({ error: "Missing or invalid run_id in payload." }, { status: 400, headers: corsHeaders });
         }
+        if (!rawMode || !["founder", "tenant"].includes(rawMode)) {
+          return Response.json({ error: "Invalid or missing mode in payload." }, { status: 400, headers: corsHeaders });
+        }
+        const mode = rawMode as "founder" | "tenant";
 
-        if (items.length > 100) {
+        if (mode === "founder" && rawTenantId && rawTenantId !== "founder") {
+          return Response.json({ error: "Founder mode requires tenant_id='founder'" }, { status: 400, headers: corsHeaders });
+        }
+        if (mode === "tenant" && (!rawTenantId || rawTenantId === "founder")) {
+          return Response.json({ error: "Tenant mode requires its exact tenant_id" }, { status: 400, headers: corsHeaders });
+        }
+        const tenantId = mode === "founder" ? "founder" : (rawTenantId || "");
+
+        // Accept records array from body
+        const records: any[] = Array.isArray(body.records) ? body.records : (Array.isArray(body) ? body : []);
+
+        if (records.length > 100) {
           return Response.json({ error: "Batch size exceeds maximum limit of 100 items." }, { status: 400, headers: corsHeaders });
         }
 
         let insertedCount = 0;
-        const processedRuns = new Set<string>();
+        let duplicatedCount = 0;
+        let rejectedCount = 0;
 
-        for (const item of items) {
-          const prospectId = item.prospect_id || item.prospectId;
-          const runId = item.run_id || item.runId || null;
-          const sourceUrl = item.source_url || item.sourceUrl || item.url || "";
-          const extractedText = item.extracted_text || item.extractedText || item.summary || "";
-          const metadata = item.metadata || item.evidence || item.scrapling || {};
+        const now = new Date().toISOString();
 
-          if (!prospectId || !sourceUrl) {
+        for (const item of records) {
+          const prospectId = item.prospect_id;
+          const sourceId = item.source_id || "scrapling_business_website";
+          const sourceUrl = item.source_url || item.url || "";
+          const evidenceType = item.evidence_type || "business_website_profile";
+          const contentHash = item.content_hash || "";
+          const extractorVersion = item.extractor_version || body.extractor_version || "bvelt-scrapling-1.0.0";
+          const confidence = typeof item.confidence === "number" ? item.confidence : 0.65;
+          const observedAt = item.observed_at || now;
+          const evidenceData = item.evidence || {};
+
+          if (!prospectId || !sourceUrl || !contentHash) {
+            rejectedCount++;
             continue;
           }
 
-          const evidenceId = item.evidence_id || item.evidenceId || `ev_${crypto.randomUUID().replace(/-/g, "").substring(0, 16)}`;
-          const metadataJson = typeof metadata === "string" ? metadata : JSON.stringify(metadata);
+          // 1. Verify candidate belongs to research_run_candidates for this exact run_id + mode + tenant_id
+          const candidateMatch = (await env.RADAR_DB.prepare(`
+            SELECT 1 FROM research_run_candidates 
+            WHERE run_id = ? AND mode = ? AND tenant_id = ? AND prospect_id = ?
+          `).bind(runId, mode, tenantId, prospectId).first()) as any;
+
+          if (!candidateMatch) {
+            console.warn(`[ResearchEvidence] Rejected evidence for prospect ${prospectId}: not associated with run ${runId} and tenant ${tenantId}`);
+            rejectedCount++;
+            continue;
+          }
+
+          // 2. Verify prospect belongs to the same mode and tenant
+          const prospectRow = (await env.RADAR_DB.prepare(`
+            SELECT id, signals_json FROM prospects 
+            WHERE id = ? AND mode = ? AND COALESCE(tenant_id, 'founder') = ?
+          `).bind(prospectId, mode, tenantId).first()) as any;
+
+          if (!prospectRow) {
+            console.warn(`[ResearchEvidence] Rejected evidence for prospect ${prospectId}: mode/tenant mismatch in prospects table`);
+            rejectedCount++;
+            continue;
+          }
+
+          // 3. Idempotent check: UNIQUE (prospect_id, source_id, evidence_type, content_hash)
+          const existingEvidence = (await env.RADAR_DB.prepare(`
+            SELECT id FROM source_evidence 
+            WHERE prospect_id = ? AND source_id = ? AND evidence_type = ? AND content_hash = ?
+          `).bind(prospectId, sourceId, evidenceType, contentHash).first()) as any;
+
+          if (existingEvidence) {
+            duplicatedCount++;
+            continue;
+          }
+
+          // 4. Insert into source_evidence
+          const evidenceId = item.id || `ev_${crypto.randomUUID().replace(/-/g, '').substring(0, 16)}`;
+          const evidenceJson = typeof evidenceData === "string" ? evidenceData : JSON.stringify(evidenceData);
 
           try {
             await env.RADAR_DB.prepare(`
-              INSERT OR REPLACE INTO source_evidence (evidence_id, prospect_id, run_id, source_url, extracted_text, metadata_json, created_at)
-              VALUES (?, ?, ?, ?, ?, ?, ?)
+              INSERT INTO source_evidence (
+                id, run_id, mode, tenant_id, prospect_id, source_id, source_url,
+                evidence_type, evidence_json, content_hash, extractor_version,
+                confidence, observed_at, created_at
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             `).bind(
               evidenceId,
-              prospectId,
               runId,
+              mode,
+              tenantId,
+              prospectId,
+              sourceId,
               sourceUrl,
-              extractedText,
-              metadataJson,
-              new Date().toISOString()
+              evidenceType,
+              evidenceJson,
+              contentHash,
+              extractorVersion,
+              confidence,
+              observedAt,
+              now
             ).run();
 
-            const prospectRow = (await env.RADAR_DB.prepare(`
-              SELECT signals_json FROM prospects WHERE id = ?
-            `).bind(prospectId).first()) as any;
-
-            if (prospectRow) {
-              let signalsObj: any = {};
-              try {
-                signalsObj = JSON.parse(prospectRow.signals_json || "{}");
-              } catch (e) {
-                signalsObj = {};
-              }
-
-              if (!signalsObj.signals) signalsObj.signals = {};
-              signalsObj.scrapling = {
-                ...(signalsObj.scrapling || {}),
-                evidence_id: evidenceId,
-                source_url: sourceUrl,
-                extracted_summary: extractedText.substring(0, 500),
-                metadata: typeof metadata === "object" ? metadata : {},
-                received_at: new Date().toISOString()
-              };
-
-              await env.RADAR_DB.prepare(`
-                UPDATE prospects SET signals_json = ?, updated_at = ? WHERE id = ?
-              `).bind(JSON.stringify(signalsObj), new Date().toISOString(), prospectId).run();
+            // Safe merge into prospects.signals_json
+            let signalsObj: any = {};
+            try {
+              signalsObj = JSON.parse(prospectRow.signals_json || "{}");
+            } catch (e) {
+              signalsObj = {};
             }
 
+            if (!signalsObj.signals) signalsObj.signals = {};
+            const prevScrapling = signalsObj.scrapling || {};
+            signalsObj.scrapling = {
+              ...prevScrapling,
+              evidence_id: evidenceId,
+              source_url: sourceUrl,
+              evidence_type: evidenceType,
+              extractor_version: extractorVersion,
+              confidence,
+              observed_at: observedAt,
+              facts: {
+                ...(prevScrapling.facts || {}),
+                ...(typeof evidenceData === "object" && evidenceData !== null ? evidenceData : {})
+              },
+              updated_at: now
+            };
+
+            await env.RADAR_DB.prepare(`
+              UPDATE prospects SET signals_json = ?, updated_at = ? WHERE id = ?
+            `).bind(JSON.stringify(signalsObj), now, prospectId).run();
+
             insertedCount++;
-            if (runId) processedRuns.add(runId);
-          } catch (err) {
-            console.error(`[ResearchEvidence] Error saving evidence for prospect ${prospectId}:`, err);
+          } catch (insertErr: any) {
+            console.error(`[ResearchEvidence] Error saving evidence:`, insertErr);
+            if (insertErr.message && insertErr.message.toLowerCase().includes("unique")) {
+              duplicatedCount++;
+            } else {
+              rejectedCount++;
+            }
           }
         }
 
-        for (const rId of processedRuns) {
-          try {
-            await env.RADAR_DB.prepare(`
-              UPDATE sidecar_dispatches 
-              SET status = 'completed', updated_at = ? 
-              WHERE run_id = ?
-            `).bind(new Date().toISOString(), rId).run();
-          } catch (e) {}
-        }
+        // Finalize dispatch for exact (run_id, tenant_id)
+        try {
+          await env.RADAR_DB.prepare(`
+            UPDATE sidecar_dispatches 
+            SET status = 'completed', completed_at = ?, updated_at = ? 
+            WHERE run_id = ? AND tenant_id = ?
+          `).bind(now, now, runId, tenantId).run();
+        } catch (e) {}
 
         return Response.json({
           status: "ok",
-          processed: insertedCount,
-          total_received: items.length
+          inserted: insertedCount,
+          duplicated: duplicatedCount,
+          rejected: rejectedCount,
+          total_received: records.length
         }, { headers: corsHeaders });
       }
 
@@ -2681,45 +2776,67 @@ export async function ensureResearchSchema(db: D1Database): Promise<void> {
       db.prepare(`
         CREATE TABLE IF NOT EXISTS research_run_candidates (
           run_id TEXT NOT NULL,
-          mode TEXT NOT NULL DEFAULT 'founder',
-          tenant_id TEXT NOT NULL DEFAULT 'founder',
+          mode TEXT NOT NULL CHECK (mode IN ('founder', 'tenant')),
+          tenant_id TEXT NOT NULL,
           prospect_id TEXT NOT NULL,
-          website TEXT,
-          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-          PRIMARY KEY (run_id, prospect_id)
+          created_at TEXT NOT NULL,
+          PRIMARY KEY (run_id, tenant_id, prospect_id)
         );
+      `),
+      db.prepare(`
+        CREATE INDEX IF NOT EXISTS idx_research_candidates_run_tenant
+          ON research_run_candidates (run_id, tenant_id, mode);
       `),
       db.prepare(`
         CREATE TABLE IF NOT EXISTS sidecar_dispatches (
-          dispatch_id TEXT PRIMARY KEY,
+          id TEXT PRIMARY KEY,
           run_id TEXT NOT NULL,
-          mode TEXT NOT NULL DEFAULT 'founder',
-          tenant_id TEXT NOT NULL DEFAULT 'founder',
-          status TEXT NOT NULL DEFAULT 'dispatched',
-          candidates_count INTEGER NOT NULL DEFAULT 0,
-          dispatched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-          UNIQUE(run_id, tenant_id)
+          mode TEXT NOT NULL CHECK (mode IN ('founder', 'tenant')),
+          tenant_id TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending',
+          attempts INTEGER NOT NULL DEFAULT 0,
+          workflow_file TEXT NOT NULL DEFAULT 'radar-research.yml',
+          last_error TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          completed_at TEXT,
+          UNIQUE (run_id, tenant_id)
         );
+      `),
+      db.prepare(`
+        CREATE INDEX IF NOT EXISTS idx_sidecar_dispatch_status
+          ON sidecar_dispatches (status, updated_at);
       `),
       db.prepare(`
         CREATE TABLE IF NOT EXISTS source_evidence (
-          evidence_id TEXT PRIMARY KEY,
+          id TEXT PRIMARY KEY,
+          run_id TEXT NOT NULL,
+          mode TEXT NOT NULL CHECK (mode IN ('founder', 'tenant')),
+          tenant_id TEXT NOT NULL,
           prospect_id TEXT NOT NULL,
-          run_id TEXT,
+          source_id TEXT NOT NULL,
           source_url TEXT NOT NULL,
-          extracted_text TEXT,
-          metadata_json TEXT,
-          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+          evidence_type TEXT NOT NULL,
+          evidence_json TEXT NOT NULL,
+          content_hash TEXT NOT NULL,
+          extractor_version TEXT NOT NULL,
+          confidence REAL NOT NULL DEFAULT 0.5,
+          observed_at TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          UNIQUE (prospect_id, source_id, evidence_type, content_hash)
         );
       `),
       db.prepare(`
-        CREATE INDEX IF NOT EXISTS idx_research_candidates_run_tenant 
-        ON research_run_candidates(run_id, tenant_id);
+        CREATE INDEX IF NOT EXISTS idx_source_evidence_run_tenant
+          ON source_evidence (run_id, tenant_id, mode);
       `),
       db.prepare(`
-        CREATE INDEX IF NOT EXISTS idx_source_evidence_prospect 
-        ON source_evidence(prospect_id);
+        CREATE INDEX IF NOT EXISTS idx_source_evidence_prospect
+          ON source_evidence (prospect_id, tenant_id);
+      `),
+      db.prepare(`
+        CREATE INDEX IF NOT EXISTS idx_source_evidence_observed
+          ON source_evidence (observed_at);
       `)
     ]);
     researchSchemaEnsured = true;
@@ -2733,18 +2850,21 @@ export async function associateResearchCandidate(
   runId: string,
   mode: string,
   tenantId: string | null,
-  prospectId: string,
-  website?: string | null
+  prospectId: string
 ): Promise<void> {
   if (!runId || !prospectId || !db) return;
   await ensureResearchSchema(db);
-  const m = mode || 'founder';
-  const t = tenantId || (m === 'founder' ? 'founder' : 'default');
+  const m = (mode === 'tenant' ? 'tenant' : 'founder') as 'founder' | 'tenant';
+  const t = m === 'founder' ? 'founder' : (tenantId || '');
+  if (m === 'tenant' && (!t || t === 'founder')) {
+    console.warn(`[associateResearchCandidate] Tenant mode requires valid non-founder tenant_id`);
+    return;
+  }
   try {
     await db.prepare(`
-      INSERT OR IGNORE INTO research_run_candidates (run_id, mode, tenant_id, prospect_id, website)
+      INSERT OR IGNORE INTO research_run_candidates (run_id, mode, tenant_id, prospect_id, created_at)
       VALUES (?, ?, ?, ?, ?)
-    `).bind(runId, m, t, prospectId, website || null).run();
+    `).bind(runId, m, t, prospectId, new Date().toISOString()).run();
   } catch (err) {
     console.warn(`[associateResearchCandidate] Error linking prospect ${prospectId} to run ${runId}:`, err);
   }
@@ -2758,10 +2878,15 @@ export async function maybeDispatchSidecarResearch(
 ): Promise<boolean> {
   if (!runId || !env.RADAR_DB) return false;
   await ensureResearchSchema(env.RADAR_DB);
-  const m = mode || 'founder';
-  const t = tenantId || (m === 'founder' ? 'founder' : 'default');
+  const m = (mode === 'tenant' ? 'tenant' : 'founder') as 'founder' | 'tenant';
+  const t = m === 'founder' ? 'founder' : (tenantId || '');
+  if (m === 'tenant' && (!t || t === 'founder')) {
+    console.warn(`[maybeDispatchSidecarResearch] Tenant mode requires valid non-founder tenant_id`);
+    return false;
+  }
 
   try {
+    // 1. Verify all discovery jobs for this run are finished
     const pendingRes = (await env.RADAR_DB.prepare(`
       SELECT COUNT(*) as c FROM queue_jobs 
       WHERE run_id = ? AND job_type = 'discovery' AND status IN ('pending', 'processing')
@@ -2772,19 +2897,15 @@ export async function maybeDispatchSidecarResearch(
       return false;
     }
 
-    const existingDispatch = (await env.RADAR_DB.prepare(`
-      SELECT dispatch_id FROM sidecar_dispatches WHERE run_id = ? AND tenant_id = ?
-    `).bind(runId, t).first()) as any;
-
-    if (existingDispatch) {
-      console.log(`[maybeDispatchSidecarResearch] Sidecar research already dispatched for run ${runId}, tenant ${t}`);
-      return false;
-    }
-
+    // 2. Check if eligible candidates with non-empty websites exist
     const candidatesRes = (await env.RADAR_DB.prepare(`
-      SELECT COUNT(*) as cnt FROM research_run_candidates 
-      WHERE run_id = ? AND tenant_id = ? AND website IS NOT NULL AND website != ''
-    `).bind(runId, t).first()) as any;
+      SELECT COUNT(*) as cnt 
+      FROM research_run_candidates c
+      JOIN prospects p ON c.prospect_id = p.id
+      WHERE c.run_id = ? AND c.mode = ? AND c.tenant_id = ?
+        AND p.mode = ? AND COALESCE(p.tenant_id, 'founder') = ?
+        AND p.website IS NOT NULL AND p.website != ''
+    `).bind(runId, m, t, m, t).first()) as any;
 
     const candidateCount = candidatesRes?.cnt || 0;
     if (candidateCount === 0) {
@@ -2792,42 +2913,96 @@ export async function maybeDispatchSidecarResearch(
       return false;
     }
 
+    // 3 & 4. Atomic reservation in D1 before calling GitHub Actions using UNIQUE(run_id, tenant_id)
+    const now = new Date().toISOString();
+    const existingDispatch = (await env.RADAR_DB.prepare(`
+      SELECT id, status, attempts FROM sidecar_dispatches WHERE run_id = ? AND tenant_id = ?
+    `).bind(runId, t).first()) as any;
+
+    let dispatchId: string;
+    if (existingDispatch) {
+      // If already queued, running, completed, or dispatching, skip (idempotent)
+      if (['queued', 'running', 'completed', 'dispatching'].includes(existingDispatch.status)) {
+        console.log(`[maybeDispatchSidecarResearch] Sidecar research already in status '${existingDispatch.status}' for run ${runId}, tenant ${t}`);
+        return false;
+      }
+      // If failed, allow controlled recovery (max 3 attempts)
+      if (existingDispatch.status === 'failed') {
+        if (existingDispatch.attempts >= 3) {
+          console.warn(`[maybeDispatchSidecarResearch] Max retry attempts reached for run ${runId}, tenant ${t}`);
+          return false;
+        }
+        dispatchId = existingDispatch.id;
+        const updateRes = await env.RADAR_DB.prepare(`
+          UPDATE sidecar_dispatches 
+          SET status = 'dispatching', attempts = attempts + 1, updated_at = ? 
+          WHERE run_id = ? AND tenant_id = ? AND status = 'failed'
+        `).bind(now, runId, t).run();
+
+        if (!updateRes || (updateRes as any).meta?.changes === 0) {
+          return false;
+        }
+      } else {
+        return false;
+      }
+    } else {
+      // Atomically insert new reservation
+      dispatchId = `disp_${Date.now()}_${crypto.randomUUID().replace(/-/g, '').substring(0, 8)}`;
+      try {
+        await env.RADAR_DB.prepare(`
+          INSERT INTO sidecar_dispatches (
+            id, run_id, mode, tenant_id, status, attempts, workflow_file, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, 'dispatching', 1, 'radar-research.yml', ?, ?)
+        `).bind(dispatchId, runId, m, t, now, now).run();
+      } catch (insertErr: any) {
+        console.log(`[maybeDispatchSidecarResearch] Dispatch already created concurrently: ${insertErr.message}`);
+        return false;
+      }
+    }
+
+    // 5. Call GitHub Actions dispatch
     const dispatchResult = await dispatchScraplingResearch(env, {
       run_id: runId,
-      mode: m === 'tenant' ? 'tenant' : 'founder',
+      mode: m,
       tenant_id: t
     });
 
+    const updateTime = new Date().toISOString();
     if (dispatchResult.queued) {
-      const dispatchId = `dispatch_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
       await env.RADAR_DB.prepare(`
-        INSERT INTO sidecar_dispatches (dispatch_id, run_id, mode, tenant_id, status, candidates_count)
-        VALUES (?, ?, ?, ?, 'dispatched', ?)
-      `).bind(dispatchId, runId, m, t, candidateCount).run();
+        UPDATE sidecar_dispatches 
+        SET status = 'queued', updated_at = ? 
+        WHERE id = ?
+      `).bind(updateTime, dispatchId).run();
       console.log(`[maybeDispatchSidecarResearch] Successfully dispatched Scrapling research for run ${runId} (${candidateCount} candidates)`);
       return true;
     } else {
-      console.warn(`[maybeDispatchSidecarResearch] Dispatch skipped or failed: ${dispatchResult.reason}`);
+      // 6. Record failure without blocking main pipeline
+      await env.RADAR_DB.prepare(`
+        UPDATE sidecar_dispatches 
+        SET status = 'failed', last_error = ?, updated_at = ? 
+        WHERE id = ?
+      `).bind(dispatchResult.reason || 'DISPATCH_FAILED', updateTime, dispatchId).run();
+      console.warn(`[maybeDispatchSidecarResearch] Dispatch failed: ${dispatchResult.reason}`);
       return false;
     }
-  } catch (err) {
+  } catch (err: any) {
     console.error(`[maybeDispatchSidecarResearch] Error in dispatch check for run ${runId}:`, err);
     return false;
   }
 }
 
-function isCallbackAuthorized(request: Request, env: Env): boolean {
-  const authHeader = request.headers.get("authorization");
-  const callbackKeyHeader = request.headers.get("x-callback-key");
-  const expectedKey = env.RADAR_SIDECAR_CALLBACK_KEY;
+export function isSidecarCallbackAuthorized(request: Request, env: Env): boolean {
+  const secret = (env.RADAR_SIDECAR_CALLBACK_KEY || '').trim();
+  if (!secret) return false;
 
-  if (expectedKey) {
-    if (callbackKeyHeader && callbackKeyHeader === expectedKey) return true;
-    if (authHeader && authHeader === `Bearer ${expectedKey}`) return true;
-  }
+  const authHeader = request.headers.get("authorization") || "";
+  const callbackKeyHeader = request.headers.get("x-callback-key") || "";
 
-  const serviceKey = env.RADAR_SERVICE_KEY || "bvelt-service-key-default-2026";
-  return isAuthorized(request, env, serviceKey);
+  if (callbackKeyHeader && callbackKeyHeader === secret) return true;
+  if (authHeader && authHeader === `Bearer ${secret}`) return true;
+
+  return false;
 }
 
 /**
@@ -2994,7 +3169,7 @@ async function handleHealth(env: Env, headers: Record<string, string>, tenantId:
     await ensureResearchSchema(db);
     const dispRow = await db.prepare("SELECT COUNT(*) as c FROM sidecar_dispatches").first() as any;
     if (dispRow) sidecarDiagnostics.dispatches_count = dispRow.c || 0;
-    const latestDisp = await db.prepare("SELECT status FROM sidecar_dispatches ORDER BY dispatched_at DESC LIMIT 1").first() as any;
+    const latestDisp = await db.prepare("SELECT status FROM sidecar_dispatches ORDER BY created_at DESC LIMIT 1").first() as any;
     if (latestDisp) sidecarDiagnostics.latest_dispatch_status = latestDisp.status;
     const evRow = await db.prepare("SELECT COUNT(*) as c FROM source_evidence").first() as any;
     if (evRow) sidecarDiagnostics.evidence_count = evRow.c || 0;
@@ -4814,7 +4989,7 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
     const overlap = await findExistingProspectOverlap(env.RADAR_DB, candidate.email, candidate.website, candidate.phone, candidate.name, candidate.city, job.tenant_id || "founder");
     if (overlap) {
       const p = overlap.overlap;
-      await associateResearchCandidate(env.RADAR_DB, job.run_id, job.mode, job.tenant_id, p.id, p.website || candidate.website || null);
+      await associateResearchCandidate(env.RADAR_DB, job.run_id, job.mode, job.tenant_id, p.id);
       const status = (p.status || '').toLowerCase();
       const outcome = (p.outcome || '').toLowerCase();
 
@@ -4950,7 +5125,7 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
       postalCode
     ).run();
 
-    await associateResearchCandidate(env.RADAR_DB, job.run_id, job.mode, job.tenant_id, prospectId, candidate.website || null);
+    await associateResearchCandidate(env.RADAR_DB, job.run_id, job.mode, job.tenant_id, prospectId);
 
     if (candidate.seed_id) {
       try {

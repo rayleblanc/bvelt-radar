@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-from sidecar.radar_sidecar.url_policy import is_public_http_url
+from sidecar.radar_sidecar.url_policy import is_public_http_url, is_safe_redirect_target
 
 
 class URLPolicyTests(unittest.TestCase):
@@ -28,6 +28,15 @@ class URLPolicyTests(unittest.TestCase):
         mock_dns.return_value = [(None, None, None, None, ("10.0.0.4", 443))]
         self.assertFalse(is_public_http_url("https://example.com/"))
 
+    def test_rejects_redirect_to_private_address(self):
+        base_url = "https://example.com/start"
+        self.assertFalse(is_safe_redirect_target(base_url, "http://127.0.0.1:8080/admin"))
+        self.assertFalse(is_safe_redirect_target(base_url, "http://192.168.1.1/"))
+        self.assertFalse(is_safe_redirect_target(base_url, "http://169.254.169.254/latest/meta-data/"))
+        self.assertFalse(is_safe_redirect_target(base_url, "http://localhost/"))
+        self.assertFalse(is_safe_redirect_target(base_url, "file:///etc/hosts"))
+
 
 if __name__ == "__main__":
     unittest.main()
+

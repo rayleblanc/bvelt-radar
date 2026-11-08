@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import ipaddress
 import socket
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urljoin
 
 
 def is_public_http_url(url: str) -> bool:
@@ -29,3 +29,13 @@ def is_public_http_url(url: str) -> bool:
         return all(ipaddress.ip_address(item[4][0]).is_global for item in addresses)
     except (ValueError, OSError, socket.gaierror):
         return False
+
+
+def is_safe_redirect_target(base_url: str, target: str) -> bool:
+    """Resolve a redirect target relative to base_url and verify it is a public HTTP URL."""
+    try:
+        resolved = urljoin(base_url, (target or "").strip())
+        return is_public_http_url(resolved)
+    except Exception:
+        return False
+
