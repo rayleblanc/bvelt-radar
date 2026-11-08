@@ -174,10 +174,10 @@ export async function fetchPermitContractors(
       if (!rawCompanyName) continue;
 
       const dateStr = firstOf(r, DATE_KEYS, 'issue');
-      if (dateStr) {
-        const ms = new Date(dateStr).getTime();
-        if (!isNaN(ms) && ms < cutoff) continue;
-      }
+      // Only count permits with a verifiable issue date inside the 90-day window.
+      // Missing or malformed dates must never be presented as recent activity.
+      const issuedMs = dateStr ? Date.parse(dateStr) : NaN;
+      if (!Number.isFinite(issuedMs) || issuedMs < cutoff || issuedMs > Date.now() + 24 * 60 * 60 * 1000) continue;
 
       const desc = firstOf(r, DESC_KEYS);
       const tradeStr = firstOf(r, ['contractor_trade', 'contractor_trade_description']) || null;
