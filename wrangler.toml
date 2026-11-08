@@ -5,8 +5,11 @@ main = "src/worker.ts"
 compatibility_date = "2024-03-01"
 keep_vars = true
 
+[vars]
+BVELT_TENANT_INGEST_URL = "https://bvelt.app/api/radar/tenant-observations"
+
 [secrets]
-required = ["FOUNDER_SERVICE_KEY", "RADAR_SERVICE_KEY", "BVELT_TENANT_INGEST_KEY"]
+required = ["FOUNDER_SERVICE_KEY"]
 
 [build]
 command = "npm run build"
