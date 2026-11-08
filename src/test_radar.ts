@@ -1,6 +1,6 @@
 declare const process: any;
 
-import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized } from './worker';
+import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, resolveTenantBuyerSegments } from './worker';
 import { DEFAULT_FOUNDER_MISSION, MissionConfig } from './worker';
 import { fetchPermitContractors } from './permitSources';
 
@@ -22,6 +22,18 @@ function assert(condition: boolean, message: string) {
     throw new Error(message);
   }
 }
+
+tests.push({
+  name: "Tenant buyer segments never fall back to the tenant's own trade or generic unrelated markets",
+  run: () => {
+    const hvacBuyers = resolveTenantBuyerSegments("HVAC");
+    assert(hvacBuyers.length > 0, "Known tenant trade should resolve buyer segments");
+    assert(!hvacBuyers.some(value => value.toLowerCase() === "hvac"), "Tenant must not prospect for more HVAC businesses");
+    assert(resolveTenantBuyerSegments("specialized unknown service").length === 0, "Unknown trade must fail closed instead of defaulting to property management");
+    const aiSegments = resolveTenantBuyerSegments("unknown", ["medical clinics", "property groups"]);
+    assert(aiSegments.length === 2 && aiSegments[0] === "medical clinics", "Validated AI buyer segments must take precedence");
+  }
+});
 
 // Test 1: Market-Agnostic config rotation with custom geographies, countries, and niches
 tests.push({
