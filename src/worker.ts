@@ -1941,7 +1941,9 @@ export default {
         try {
           const runResult = await startProspectingRun(env, "tenant", tenantId, {
             cities: cities.join(";"),
-            trades: niches.join(";"),
+            // Leave trades unset so getPriorityTargets expands the tenant's own business niche
+            // through TENANT_TARGET_MAP instead of prospecting for more businesses like itself.
+            trades: null,
             countries: config.countries_json ? JSON.parse(config.countries_json).join(";") : null,
             languages: config.languages_json ? JSON.parse(config.languages_json).join(";") : null,
             min_score: null
