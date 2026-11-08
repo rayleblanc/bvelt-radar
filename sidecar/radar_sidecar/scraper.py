@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import threading
 import time
@@ -12,12 +13,30 @@ from typing import Any
 
 from sidecar.radar_sidecar.url_policy import is_public_http_url
 
-EXTRACTOR_VERSION = "bvelt-scrapling-1.0.0"
+EXTRACTOR_VERSION = "bvelt-scrapling-1.1.0"
 USER_AGENT = "BveltRadarResearch/1.0 (+https://bvelt.app; public business website research)"
 MAX_CANDIDATES = 50
 MAX_PAGES_PER_SITE = 5
-MAX_CONCURRENCY = 3
+# Candidates are almost always distinct domains, and politeness is enforced
+# per domain, so a wider pool only adds network parallelism, not load per site.
+MAX_CONCURRENCY = 6
 MAX_HTML_BYTES = 1_500_000
+
+# --- Time budget guards ---
+# Soft deadline for the whole research run. When it approaches, the scraper
+# stops issuing new requests and returns the evidence collected so far, so the
+# callback to the Worker ALWAYS happens before the GitHub Actions hard timeout
+# kills the job (which would leave the dispatch stuck in running state).
+DEFAULT_SOFT_DEADLINE_SECONDS = 1_320.0  # 22 min vs 30 min workflow timeout
+MIN_DEADLINE_RESERVE_SECONDS = 15.0      # never START a page fetch with less than this left
+SUBMIT_DEADLINE_RESERVE_SECONDS = 30.0    # never START a new candidate with less than this left
+MAX_SECONDS_PER_CANDIDATE = 90.0          # one slow site cannot eat the whole run
+
+_RUN_START = time.monotonic()
+# Candidates intentionally deferred because the soft deadline was hit. Read by
+# runner.py to report partial completion to the Worker.
+DEADLINE_SKIPPED_CANDIDATES = 0
+
 _ROBOTS_CACHE: dict[str, tuple[float, urllib.robotparser.RobotFileParser | None]] = {}
 _ROBOTS_LOCK = threading.Lock()
 _DOMAIN_LOCKS: dict[str, threading.Lock] = {}
@@ -31,6 +50,19 @@ PHONE_RE = re.compile(r"(?<!\w)(?:\+?\d[\d().\s/-]{7,}\d)(?!\w)")
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _soft_deadline_seconds() -> float:
+    raw = (os.environ.get("SIDECAR_DEADLINE_SECONDS") or "").strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_SOFT_DEADLINE_SECONDS
+    return value if value > 0 else DEFAULT_SOFT_DEADLINE_SECONDS
+
+
+def _seconds_remaining() -> float:
+    return _soft_deadline_seconds() - (time.monotonic() - _RUN_START)
 
 
 def _normalize_url(raw: str) -> str | None:
@@ -118,7 +150,7 @@ def _fetch(url: str):
             _wait_domain(current_url)
             response = Fetcher.get(
                 current_url,
-                timeout=12,
+                timeout=10,
                 retries=1,
                 retry_delay=1,
                 follow_redirects=False,
@@ -147,7 +179,7 @@ def _fetch(url: str):
                 time.sleep(delay)
                 _wait_domain(current_url)
                 response = Fetcher.get(
-                    current_url, timeout=12, retries=0, follow_redirects=False, stealthy_headers=False,
+                    current_url, timeout=10, retries=0, follow_redirects=False, stealthy_headers=False,
                     headers=headers,
                 )
             if response.status < 200 or response.status >= 300:
@@ -247,8 +279,17 @@ def _extract(candidate: dict[str, Any]) -> dict[str, Any] | None:
     all_text: list[str] = []
     first_page_html = ""
     successful_pages = 0
+    candidate_started = time.monotonic()
 
     while queue and len(pages) < MAX_PAGES_PER_SITE:
+        # Global soft deadline: stop early, keep what we have, always call back.
+        if _seconds_remaining() <= MIN_DEADLINE_RESERVE_SECONDS:
+            print("Soft deadline approaching; finishing with the pages collected so far.")
+            break
+        # Per-candidate budget: one slow site cannot consume the whole run.
+        if (time.monotonic() - candidate_started) >= MAX_SECONDS_PER_CANDIDATE:
+            print(f"Per-candidate budget of {MAX_SECONDS_PER_CANDIDATE:.0f}s exceeded; moving on.")
+            break
         url = queue.pop(0)
         if url in visited:
             continue
@@ -259,12 +300,14 @@ def _extract(candidate: dict[str, Any]) -> dict[str, Any] | None:
             continue
         html, status = fetched
         # Browser rendering is only used for a successful HTTP page that appears
-        # to be a JavaScript shell, not as a way around an HTTP denial.
+        # to be a JavaScript shell, not as a way around an HTTP denial. It is
+        # also skipped when the soft deadline leaves no room for a render.
         if (
             len(pages) == 0
             and status == 200
             and len(_strip_html(html)) < 350
-            and str(__import__("os").environ.get("SIDECAR_ENABLE_BROWSER", "0")) == "1"
+            and os.environ.get("SIDECAR_ENABLE_BROWSER", "0") == "1"
+            and _seconds_remaining() > 45.0
         ):
             browser_result = _browser_fetch(url)
             if browser_result is not None and browser_result[1] == 200:
@@ -347,10 +390,26 @@ def _extract(candidate: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def scrape_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    global DEADLINE_SKIPPED_CANDIDATES
     valid = [c for c in candidates[:MAX_CANDIDATES] if isinstance(c, dict)]
     results: list[dict[str, Any]] = []
+    DEADLINE_SKIPPED_CANDIDATES = 0
+    submitted = 0
     with ThreadPoolExecutor(max_workers=MAX_CONCURRENCY) as pool:
-        futures = [pool.submit(_extract, candidate) for candidate in valid]
+        futures = []
+        for candidate in valid:
+            # Stop submitting work once the soft deadline is close: candidates not
+            # attempted now are deferred to a future research run instead of
+            # risking a hard timeout that would lose every result.
+            if _seconds_remaining() <= SUBMIT_DEADLINE_RESERVE_SECONDS:
+                DEADLINE_SKIPPED_CANDIDATES = len(valid) - submitted
+                print(
+                    f"Soft deadline reached; deferring {DEADLINE_SKIPPED_CANDIDATES} "
+                    "candidates to a future research run."
+                )
+                break
+            futures.append(pool.submit(_extract, candidate))
+            submitted += 1
         for future in as_completed(futures):
             try:
                 item = future.result()
