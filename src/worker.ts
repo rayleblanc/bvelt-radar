@@ -2434,7 +2434,18 @@ export default {
           hunter_api: { ready: false, key_present: !!env.HUNTER_API_KEY, details: null },
           abstract_api: { ready: false, key_present: !!env.ABSTRACT_API_KEY, details: null },
           trust_stack: { ready: false, url_present: !!env.TRUST_STACK_URL, details: null },
-          cron_trigger: { ready: true, schedule: "0 14 * * *" },
+          bem_ingest: {
+            ready: Boolean(env.BVELT_INGEST_URL && (env.BVELT_INGEST_KEY || env.RADAR_SERVICE_KEY)),
+            url_present: Boolean(env.BVELT_INGEST_URL),
+            credential_present: Boolean(env.BVELT_INGEST_KEY || env.RADAR_SERVICE_KEY)
+          },
+          scrapling: {
+            ready: Boolean(env.GITHUB_ACTIONS_TOKEN && env.RADAR_SIDECAR_CALLBACK_KEY),
+            github_token_present: Boolean(env.GITHUB_ACTIONS_TOKEN),
+            callback_key_present: Boolean(env.RADAR_SIDECAR_CALLBACK_KEY),
+            repository: env.RADAR_RESEARCH_REPOSITORY || "rayleblanc/bvelt-radar"
+          },
+          cron_trigger: { ready: true, schedule: "0 12,17,22 * * *" },
           worker_routes: { ready: true, active_routes: ["/health", "/prospects", "/run", "/decision", "/stats", "/api/events", "/api/tenants/config"] }
         };
 
@@ -2653,11 +2664,13 @@ export default {
           const evidenceType = item.evidence_type || "business_website_profile";
           const contentHash = item.content_hash || "";
           const extractorVersion = item.extractor_version || body.extractor_version || "bvelt-scrapling-1.0.0";
-          const confidence = typeof item.confidence === "number" ? item.confidence : 0.65;
+          const confidence = typeof item.confidence === "number" && Number.isFinite(item.confidence)
+            ? Math.min(1, Math.max(0, item.confidence))
+            : 0.65;
           const observedAt = item.observed_at || now;
           const evidenceData = item.evidence || {};
 
-          if (!prospectId || !sourceUrl || !contentHash) {
+          if (!prospectId || !sourceUrl || !/^[a-f0-9]{64}$/i.test(String(contentHash))) {
             rejectedCount++;
             continue;
           }
@@ -2676,12 +2689,33 @@ export default {
 
           // 2. Verify prospect belongs to the same mode and tenant
           const prospectRow = (await env.RADAR_DB.prepare(`
-            SELECT id, signals_json FROM prospects 
+            SELECT id, signals_json, website FROM prospects
             WHERE id = ? AND mode = ? AND COALESCE(tenant_id, 'founder') = ?
           `).bind(prospectId, mode, tenantId).first()) as any;
 
           if (!prospectRow) {
             console.warn(`[ResearchEvidence] Rejected evidence for prospect ${prospectId}: mode/tenant mismatch in prospects table`);
+            rejectedCount++;
+            continue;
+          }
+
+          // Evidence may only describe the public website attached to this exact
+          // prospect. This prevents cross-domain evidence from being attached to a lead.
+          try {
+            const submittedUrl = new URL(String(sourceUrl));
+            const originalValue = String(prospectRow.website || "").trim();
+            const originalUrl = new URL(/^https?:\/\//i.test(originalValue) ? originalValue : `https://${originalValue}`);
+            const normalizedHost = (host: string) => host.toLowerCase().replace(/^www\./, "");
+            if (
+              !["http:", "https:"].includes(submittedUrl.protocol) ||
+              submittedUrl.username || submittedUrl.password ||
+              !originalUrl.hostname ||
+              normalizedHost(submittedUrl.hostname) !== normalizedHost(originalUrl.hostname)
+            ) {
+              rejectedCount++;
+              continue;
+            }
+          } catch {
             rejectedCount++;
             continue;
           }
