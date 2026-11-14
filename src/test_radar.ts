@@ -122,6 +122,38 @@ tests.push({
 });
 
 tests.push({
+  name: "Tenant learning uses CRM-confirmed contacts as its denominator when Radar did not send outreach",
+  run: async () => {
+    let query = "";
+    const mockDb: any = {
+      prepare: (sql: string) => ({
+        bind: (...args: any[]) => ({
+          all: async () => {
+            query = sql;
+            assert(args[0] === "tenant" && args[1] === "bvelt_tenant_alpha", "Learning reads must stay in the exact tenant scope");
+            return {
+              results: [{
+                key: "trade:plumbing",
+                sent_count: 0,
+                contacted_count: 2,
+                replied_count: 1,
+                qualified_count: 0,
+                booked_count: 0,
+                won_count: 1,
+                lost_count: 0
+              }]
+            };
+          }
+        })
+      })
+    };
+    const rates = await readScopedLearningStats(mockDb, "tenant", "bvelt_tenant_alpha");
+    assert(query.includes("contacted_count"), "Learning query must include CRM-confirmed contacts");
+    assert(rates["trade:plumbing"] === 0.5, "One win from two manually confirmed contacts must produce a smoothed 0.5 rate");
+  }
+});
+
+tests.push({
   name: "Tenant buyer segments never fall back to the tenant's own trade or generic unrelated markets",
   run: () => {
     const hvacBuyers = resolveTenantBuyerSegments("HVAC");
