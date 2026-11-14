@@ -161,7 +161,9 @@ export async function pickTargets(
     centerLabel?: string;
     serviceRadiusKm?: number;
     countries?: string[];
-    /** Restrict pool to these city labels (e.g. "City A, Region"). Prevents national drift to NYC etc. */
+    /** Soft ranking only; never excludes countries from the global pool. */
+    priorityCountries?: string[];
+    /** Restrict pool to these city labels (e.g. "City A, Region"). Prevents national drift to unrelated markets. */
     allowedCities?: string[];
   }
 ): Promise<{ place: GeoPlace; trade: string; why: string }[]> {
@@ -178,14 +180,18 @@ export async function pickTargets(
     if (!center) return [];
   }
 
-  // No implicit trade or country defaults. Tenant centers may supply their
-  // country; Founder discovery requires an explicit country scope.
+  // No implicit trade defaults. Explicit countries narrow the pool; otherwise
+  // Founder can explore the available global gazetteer. A Tenant center supplies
+  // its country when no explicit country scope was provided.
   const countries = (o.countries && o.countries.length > 0
     ? o.countries
     : center ? [center.country] : [])
     .map((c) => String(c).trim().toUpperCase())
     .filter(Boolean);
-  if (trades.length === 0 || countries.length === 0) return [];
+  const priorityCountries = new Set((o.priorityCountries || [])
+    .map((country) => String(country).trim().toUpperCase())
+    .filter(Boolean));
+  if (trades.length === 0) return [];
 
   const maxDist = o.serviceRadiusKm ?? 60;
 
@@ -277,9 +283,15 @@ export async function pickTargets(
       }
     }
   } else {
-    // Founder / national: top 150 by population + 150 random places in configured countries
-    const eligible = GEO_PLACES.filter((p) => countries.includes(p.country));
-    const byPop = [...eligible].sort(POP_DESC);
+    // Founder: explore every available country unless the operator explicitly narrows scope.
+    // Priority countries are ranked higher, never used as an allowlist.
+    const eligible = GEO_PLACES.filter((p) => countries.length === 0 || countries.includes(p.country));
+    const byPop = [...eligible].sort((a, b) => {
+      const priorityA = priorityCountries.has(a.country) ? 1.15 : 1;
+      const priorityB = priorityCountries.has(b.country) ? 1.15 : 1;
+      return (Math.log(Math.max(b.population || 1, 1)) * priorityB) -
+        (Math.log(Math.max(a.population || 1, 1)) * priorityA);
+    });
     const top = byPop.slice(0, 150);
     const mid = byPop.slice(150).filter((p) => (p.population || 0) >= 15000);
     const extra: GeoPlace[] = [];
@@ -337,6 +349,7 @@ export async function pickTargets(
       const st = regionStats.get(`${t}::${region}`) || { q: 0, c: 0 };
       const prior = (st.q + 1) / (st.c + 8);
       let score = Math.log(pop) * fresh * (0.5 + prior);
+      if (priorityCountries.has(place.country)) score *= 1.15;
       if (center) score *= 1 / (1 + dist / 30); // más cerca de la base = mejor
       cands.push({ place, trade, score, prior, isNew, dist });
     }
