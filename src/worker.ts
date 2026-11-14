@@ -5502,7 +5502,9 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
     if (!signalEvent) {
       try {
         const cityLabel = String(job.payload?.city || candidate.city || env.FOUNDING_CITIES || "");
-        const extractedStates = extractUsStateCodes(cityLabel.split(";"));
+        const configuredCountries = String(env.FOUNDING_COUNTRIES || "").split(";").map(value => value.trim().toUpperCase());
+        const isUsMarket = String(candidate.country || job.payload?.country || "").toUpperCase() === "US" || configuredCountries.includes("US");
+        const extractedStates = isUsMarket ? extractUsStateCodes(cityLabel.split(";")) : [];
         if (extractedStates.length > 0) {
           const alerts = await getAlerts(extractedStates);
           const candCity = (candidate.city || "").split(',')[0].trim().toLowerCase();
@@ -7423,10 +7425,13 @@ export async function getPriorityTargets(
   const pickedUsStates = picks
     .filter(p => ((p.place && p.place.country) || (p.place as any)?.país || p.place?.[2] || "").toUpperCase() === "US")
     .map(p => ((p.place && p.place.region) || (p.place as any)?.región || p.place?.[1] || "").toUpperCase().trim());
-  const extractedStates = extractUsStateCodes([
-    ...config.geographies,
-    ...pickedUsStates.map(state => `Market, ${state}`)
-  ]);
+  const explicitUsStates = config.countries.includes("US")
+    ? extractUsStateCodes(config.geographies)
+    : [];
+  const extractedStates = Array.from(new Set([
+    ...pickedUsStates.filter(state => US_STATE_CODES.has(state)),
+    ...explicitUsStates
+  ]));
 
   let weatherAlerts: WeatherAlert[] = [];
   if (!skipPicks && extractedStates.length > 0) {
