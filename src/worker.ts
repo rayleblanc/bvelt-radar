@@ -1008,6 +1008,8 @@ export default {
           recipientName: "Bvelt Founder Test",
           subject: "Bvelt email delivery check",
           body: `Hello,\n\nYou requested an email delivery check from Bvelt Radar. This message confirms that the configured sender can submit email to this mailbox.\n\nNo action is required.\n\nSent at: ${new Date().toISOString()}`,
+          includeSiteLink: false,
+          plainTextOnly: true,
           from: env.OUTBOUND_EMAIL_FROM,
           resendApiKey: env.RESEND_API_KEY,
           brevoApiKey: env.BREVO_API_KEY,
@@ -3955,6 +3957,8 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
           recipientName: "Bvelt Founder Test",
           subject: "Bvelt email delivery check",
           body: `Hello,\n\nYou requested an email delivery check from Bvelt Radar. Provider: ${env.RESEND_API_KEY ? "Resend" : env.BREVO_API_KEY ? "Brevo" : "simulated"}.\n\nNo action is required.\n\nSent at: ${new Date().toISOString()}`,
+          includeSiteLink: false,
+          plainTextOnly: true,
           from: env.OUTBOUND_EMAIL_FROM,
           resendApiKey: env.RESEND_API_KEY,
           brevoApiKey: env.BREVO_API_KEY,
@@ -10572,7 +10576,7 @@ export async function notifyFounder(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(15000)
+      signal: AbortSignal.timeout(20000)
     });
 
     const data: any = await res.json().catch(() => ({ ok: false, description: `HTTP ${res.status}: Failed to parse JSON` }));
