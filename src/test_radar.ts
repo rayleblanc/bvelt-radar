@@ -3,7 +3,7 @@ declare const process: any;
 import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, resolveTenantBuyerSegments } from './worker';
 import { DEFAULT_FOUNDER_MISSION, MissionConfig } from './worker';
 import { fetchPermitContractors } from './permitSources';
-import { learningCounterDelta } from './learningIntegrity';
+import { learningCounterDelta, readScopedLearningStats, recordScopedLearningEvent } from './learningIntegrity';
 
 console.log("=========================================");
 console.log("RUNNING BVELT RADAR CUSTOM MISSION TESTS");
@@ -49,6 +49,152 @@ tests.push({
 
     const won = learningCounterDelta("won");
     assert(won.won_count === 1 && won.sent_count === 0, "Only an explicit won outcome increments wins");
+  }
+});
+
+tests.push({
+  name: "Tenant CRM learning ingest is authenticated, tenant-scoped and idempotent",
+  run: async () => {
+    const storedKeys = new Set<string>();
+    const mockDb: any = {
+      prepare: (sql: string) => ({
+        bind: (...args: any[]) => ({
+          sql,
+          args,
+          first: async () => {
+            if (sql.includes("SELECT id FROM learning_events")) {
+              return storedKeys.has(String(args[1])) ? { id: "event_existing" } : null;
+            }
+            return null;
+          }
+        })
+      }),
+      batch: async (statements: any[]) => {
+        const key = String(statements[0].args[11]);
+        const inserted = !storedKeys.has(key);
+        if (inserted) storedKeys.add(key);
+        return statements.map((_: any, index: number) => ({
+          meta: { changes: index === 0 && inserted ? 1 : 0 }
+        }));
+      }
+    };
+    const env: any = { RADAR_DB: mockDb, RADAR_SERVICE_KEY: "radar-service-secret" };
+    const payload = {
+      mode: "tenant",
+      tenant_id: "bvelt_tenant_alpha",
+      items: [{
+        prospect_id: "radar_prospect_1",
+        event_type: "won",
+        city: "Toronto, ON",
+        trade: "plumbing",
+        occurred_at: "2026-11-14T10:00:00.000Z",
+        idempotency_key: "crm-status-evt-1"
+      }]
+    };
+
+    const unauthorized = await worker.fetch(new Request("https://radar.test/api/learning/events", {
+      method: "POST",
+      headers: { "Authorization": "Bearer wrong-key", "X-Tenant-Id": payload.tenant_id, "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    }), env, {} as any);
+    assert(unauthorized.status === 401, "Learning ingest must reject an invalid service key");
+
+    const mismatch = await worker.fetch(new Request("https://radar.test/api/learning/events", {
+      method: "POST",
+      headers: { "Authorization": "Bearer radar-service-secret", "X-Tenant-Id": "bvelt_tenant_beta", "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    }), env, {} as any);
+    assert(mismatch.status === 403, "Learning ingest must reject tenant header/body mismatch");
+
+    const send = () => worker.fetch(new Request("https://radar.test/api/learning/events", {
+      method: "POST",
+      headers: { "Authorization": "Bearer radar-service-secret", "X-Tenant-Id": payload.tenant_id, "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    }), env, {} as any);
+
+    const first = await send();
+    const firstBody = await first.json() as any;
+    const retry = await send();
+    const retryBody = await retry.json() as any;
+    assert(first.status === 200 && firstBody.inserted === 1, "First CRM outcome must be persisted");
+    assert(retry.status === 200 && retryBody.deduplicated === 1, "Exact retry must be acknowledged without a second insert");
+  }
+});
+
+tests.push({
+  name: "Tenant learning uses CRM-confirmed contacts as its denominator when Radar did not send outreach",
+  run: async () => {
+    let query = "";
+    const mockDb: any = {
+      prepare: (sql: string) => ({
+        bind: (...args: any[]) => ({
+          all: async () => {
+            query = sql;
+            assert(args[0] === "tenant" && args[1] === "bvelt_tenant_alpha", "Learning reads must stay in the exact tenant scope");
+            return {
+              results: [{
+                key: "trade:plumbing",
+                sent_count: 0,
+                contacted_count: 2,
+                replied_count: 1,
+                qualified_count: 0,
+                booked_count: 0,
+                won_count: 1,
+                lost_count: 0
+              }]
+            };
+          }
+        })
+      })
+    };
+    const rates = await readScopedLearningStats(mockDb, "tenant", "bvelt_tenant_alpha");
+    assert(query.includes("contacted_count"), "Learning query must include CRM-confirmed contacts");
+    assert(rates["trade:plumbing"] === 0.5, "One win from two manually confirmed contacts must produce a smoothed 0.5 rate");
+  }
+});
+
+tests.push({
+  name: "Learning event retries do not double-increment Tenant aggregates",
+  run: async () => {
+    const insertedKeys = new Set<string>();
+    const aggregates = new Map<string, number>();
+    const mockDb: any = {
+      prepare: (sql: string) => ({ bind: (...args: any[]) => ({ sql, args }) }),
+      batch: async (statements: any[]) => {
+        const key = String(statements[0].args[11]);
+        const inserted = !insertedKeys.has(key);
+        if (inserted) insertedKeys.add(key);
+        let previousChanges = inserted ? 1 : 0;
+        const results = [{ meta: { changes: previousChanges } }];
+        for (const statement of statements.slice(1)) {
+          const guarded = /WHERE changes\(\) = 1/i.test(statement.sql);
+          const applied = guarded && previousChanges === 1;
+          const aggregateKey = String(statement.args[2]);
+          if (applied) aggregates.set(aggregateKey, (aggregates.get(aggregateKey) || 0) + Number(statement.args[15] || 0));
+          previousChanges = applied ? 1 : 0;
+          results.push({ meta: { changes: previousChanges } });
+        }
+        return results;
+      }
+    };
+    const input = {
+      mode: "tenant" as const,
+      tenantId: "bvelt_tenant_alpha",
+      prospectId: "radar_prospect_1",
+      eventType: "won",
+      city: "Toronto, ON",
+      trade: "plumbing",
+      occurredAt: "2026-11-14T10:00:00.000Z",
+      idempotencyKey: "crm-status-event-1"
+    };
+    const first = await recordScopedLearningEvent(mockDb, input);
+    const countAfterFirst = Array.from(aggregates.values()).reduce((sum, value) => sum + value, 0);
+    const retry = await recordScopedLearningEvent(mockDb, input);
+    const countAfterRetry = Array.from(aggregates.values()).reduce((sum, value) => sum + value, 0);
+    assert(first, "First outcome must be inserted");
+    assert(!retry, "Duplicate outcome must be acknowledged as no new insert");
+    assert(countAfterFirst === 3, "City, trade and pair aggregates must increment once");
+    assert(countAfterRetry === countAfterFirst, "Retry must not increment aggregates again");
   }
 });
 
@@ -1197,7 +1343,7 @@ tests.push({
       },
       {
         id: "p_2",
-        tenant_id: "t_tenant123",
+        tenant_id: "bvelt_tenant123",
         name: "Lone Star Plumbing",
         city: "Dallas, TX",
         trade: "plumbing",
@@ -1234,7 +1380,14 @@ tests.push({
         TELEGRAM_CHAT_ID: "",
         RADAR_DB: {
           prepare: (sql: string) => ({
-            all: async () => ({ results: mockProspects })
+            bind: (...args: any[]) => ({
+              all: async () => ({ results: mockProspects }),
+              first: async () => null,
+              run: async () => ({ success: true })
+            }),
+            all: async () => ({ results: mockProspects }),
+            first: async () => null,
+            run: async () => ({ success: true })
           })
         }
       };
@@ -1278,16 +1431,17 @@ tests.push({
 
       try {
         const tenantEnv: any = {
-          BVELT_INGEST_URL: "https://bvelt.app/api/radar/observations",
-          BVELT_INGEST_KEY: "test_tenant_key_456",
+          BVELT_TENANT_INGEST_URL: "https://bvelt.app/api/radar/observations",
+          BVELT_TENANT_INGEST_KEY: "test_tenant_key_456",
           RADAR_DB: {
+            batch: async (statements: any[]) => statements.map(() => ({ meta: { changes: 1 } })),
             prepare: (sql: string) => ({
               bind: (...args: any[]) => ({
                 all: async () => ({
                   results: [
                     {
                       id: "p_tenant_1",
-                      tenant_id: "t_tenant123",
+                      tenant_id: "bvelt_tenant123",
                       name: "Lone Star Plumbing",
                       city: "Dallas, TX",
                       trade: "plumbing",
@@ -1301,18 +1455,22 @@ tests.push({
                       created_at: new Date().toISOString()
                     }
                   ]
-                })
-              })
+                }),
+                first: async () => null,
+                run: async () => ({ success: true })
+              }),
+              first: async () => null,
+              run: async () => ({ success: true })
             })
           }
         };
 
-        const tenantRes = await sendTenantObservationsToBvelt(tenantEnv, "t_tenant123");
+        const tenantRes = await sendTenantObservationsToBvelt(tenantEnv, "bvelt_tenant123");
         assert(tenantRes.ok === true, "Tenant observation push must succeed");
         assert(tenantRes.sent_count === 1, "Should send 1 tenant prospect");
         assert(Boolean(tenantPostCalled), "Fetch must be invoked for tenant push");
-        assert(tenantHeaderTenantId === "t_tenant123", "X-Bvelt-Tenant-Id header must match tenant ID");
-        assert(tenantPostBody.tenant_id === "t_tenant123", "Payload tenant_id must be t_tenant123");
+        assert(tenantHeaderTenantId === "bvelt_tenant123", "X-Bvelt-Tenant-Id header must match tenant ID");
+        assert(tenantPostBody.tenant_id === "bvelt_tenant123", "Payload tenant_id must be t_tenant123");
         assert(tenantPostBody.items[0].name === "Lone Star Plumbing", "Item should be Lone Star Plumbing");
       } finally {
         globalThis.fetch = originalFetch2;
@@ -1376,7 +1534,7 @@ tests.push({
     ];
 
     const mockDb: any = {
-      batch: async (statements: any[]) => [],
+      batch: async (statements: any[]) => Promise.all(statements.map(statement => statement.run())),
       prepare: (sql: string) => {
         const sqlLower = sql.toLowerCase().replace(/\s+/g, " ");
         return {
@@ -1454,9 +1612,9 @@ tests.push({
                 } else if (sqlLower.includes("select 1 from research_run_candidates")) {
                   const c = candidatesStore.find(x => x.run_id === args[0] && x.mode === args[1] && x.tenant_id === args[2] && x.prospect_id === args[3]);
                   return c ? { 1: 1 } : null;
-                } else if (sqlLower.includes("select id, signals_json from prospects")) {
+                } else if (sqlLower.includes("select id, signals_json") && sqlLower.includes("from prospects")) {
                   const p = prospectsStore.find(x => x.id === args[0] && x.mode === args[1] && (x.tenant_id || "founder") === args[2]);
-                  return p ? { id: p.id, signals_json: p.signals_json } : null;
+                  return p ? { id: p.id, signals_json: p.signals_json, website: p.website } : null;
                 } else if (sqlLower.includes("select id from source_evidence")) {
                   const ev = evidenceStore.find(x => x.prospect_id === args[0] && x.source_id === args[1] && x.evidence_type === args[2] && x.content_hash === args[3]);
                   return ev ? { id: ev.id } : null;
@@ -1538,7 +1696,7 @@ tests.push({
             source_url: "https://acmeplumbing.com",
             evidence_type: "business_website_profile",
             evidence: { contact_form_observed: true, page_title: "Acme Plumbing Services" },
-            content_hash: "hash_001",
+            content_hash: "a".repeat(64),
             extractor_version: "bvelt-scrapling-1.0.0",
             confidence: 0.78,
             observed_at: new Date().toISOString()
@@ -1770,7 +1928,9 @@ tests.push({
         bind: (...args: any[]) => ({
           first: async () => {
             if (sql.includes("FROM prospects WHERE id = ?")) {
-              return { id: "p_target_01", tenant_id: "tenant_alpha" };
+              return args[1] === "tenant_alpha"
+                ? { id: "p_target_01", tenant_id: "tenant_alpha" }
+                : null;
             }
             if (sql.includes("FROM tenant_config WHERE tenant_id = ?")) {
               return { tenant_id: args[0], tenant_name: "Test Tenant" };
@@ -1842,7 +2002,10 @@ tests.push({
       body: JSON.stringify({ prospect_id: "p_target_01", tenant_id: "tenant_gamma", outcome: "won" })
     });
     const resCrossOutcome = await worker.fetch(crossOutcomeReq, mockEnv, {} as any);
-    assert(resCrossOutcome.status === 403, "Outcome submission with mismatched prospect tenant must return 403");
+    assert(
+      resCrossOutcome.status === 403 || resCrossOutcome.status === 404,
+      "Outcome submission with mismatched prospect tenant must be denied without revealing its existence"
+    );
 
     // 7. Unauthenticated CSV export -> 401
     const unauthCsvReq = new Request("https://radar.bvelt.app/api/tenants/leads.csv?tenant_id=tenant_alpha", { method: "GET" });
@@ -2002,11 +2165,13 @@ tests.push({
         id: "p_sync_01",
         mode: "founder",
         tenant_id: "founder",
+        website: "https://testbusiness.com",
         signals_json: JSON.stringify({ existing_fact: true })
       }
     ];
 
     const mockDb: any = {
+      batch: async (statements: any[]) => Promise.all(statements.map(statement => statement.run())),
       prepare: (sql: string) => ({
         bind: (...args: any[]) => ({
           first: async () => {
@@ -2112,7 +2277,7 @@ tests.push({
             source_id: "scrapling_test",
             source_url: "https://testbusiness.com",
             evidence_type: "business_profile",
-            content_hash: "hash_sync_123",
+            content_hash: "b".repeat(64),
             evidence: {
               page_title: "Test Business Homepage",
               public_business_phones: ["+15551234567"]

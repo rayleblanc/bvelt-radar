@@ -134,8 +134,9 @@ export async function recordScopedLearningEvent(
         ),
     ];
 
-    // Event and derived counters commit together. Aggregate updates only apply
-    // if this exact event row was inserted (idempotent retries no-op cleanly).
+    // D1 executes batch statements sequentially. WHERE changes() = 1 gates each
+    // aggregate on the immediately preceding successful insert/update so exact
+    // INSERT OR IGNORE retries (changes=0) do not double-count.
     for (const key of keys) {
       statements.push(
         db
@@ -148,7 +149,7 @@ export async function recordScopedLearningEvent(
         unknown_count, total_events, updated_at
       )
       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-      WHERE EXISTS (SELECT 1 FROM learning_events WHERE id = ?)
+      WHERE changes() = 1
       ON CONFLICT(mode, tenant_id, key) DO UPDATE SET
         sent_count = sent_count + excluded.sent_count,
         delivered_count = delivered_count + excluded.delivered_count,
@@ -183,8 +184,7 @@ export async function recordScopedLearningEvent(
             delta.contacted_count,
             delta.unknown_count,
             delta.event_count,
-            occurredAt,
-            eventId
+            occurredAt
           )
       );
     }
@@ -192,8 +192,6 @@ export async function recordScopedLearningEvent(
     const results = await db.batch(statements);
     return Number(results?.[0]?.meta?.changes || 0) > 0;
   } catch (err: any) {
-    // Tables may not exist until migrations 0023/0024 are applied.
-    // Never take down outreach / decision paths for learning storage failures.
     console.warn("[learningIntegrity] recordScopedLearningEvent skipped:", err?.message || err);
     return false;
   }
@@ -212,18 +210,29 @@ export async function readScopedLearningStats(
     const rows = await db
       .prepare(
         `
-    SELECT key, sent_count, replied_count, booked_count, won_count, lost_count
+    SELECT key, sent_count, contacted_count, replied_count, qualified_count,
+      booked_count, won_count, lost_count
     FROM learning_stats_scoped
-    WHERE mode = ? AND tenant_id = ? AND sent_count >= 2
+    WHERE mode = ? AND tenant_id = ?
+      AND (sent_count + contacted_count + replied_count + qualified_count + booked_count + won_count + lost_count) >= 2
   `
       )
       .bind(mode, tenantId)
       .all();
 
     for (const row of (rows?.results || []) as any[]) {
-      const sent = Math.max(1, Number(row.sent_count || 0));
-      const won = Math.min(sent, Number(row.won_count || 0));
-      rates[String(row.key)] = (won + 1) / (sent + 2);
+      const attempts = Math.max(
+        Number(row.sent_count || 0),
+        Number(row.contacted_count || 0),
+        Number(row.replied_count || 0),
+        Number(row.qualified_count || 0),
+        Number(row.booked_count || 0),
+        Number(row.won_count || 0),
+        Number(row.lost_count || 0),
+        1
+      );
+      const won = Math.min(attempts, Number(row.won_count || 0));
+      rates[String(row.key)] = (won + 1) / (attempts + 2);
     }
   } catch (err: any) {
     console.warn("[learningIntegrity] readScopedLearningStats skipped:", err?.message || err);
