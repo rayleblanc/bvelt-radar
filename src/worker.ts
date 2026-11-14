@@ -4174,6 +4174,18 @@ async function handleDecision(
   const timestamp = new Date().toISOString();
 
   if (action === "sent" || action === "approve") {
+    if (!prospect.email || !String(prospect.email).includes("@")) {
+      await db.prepare("UPDATE prospects SET status = 'hold', outcome = 'approved_but_no_valid_email', updated_at = ? WHERE id = ?")
+        .bind(timestamp, id).run();
+      return Response.json({
+        success: false,
+        blocked: true,
+        reason: "prospect_email_missing",
+        message: "Prospect approval recorded, but no valid recipient email exists. No message was sent.",
+        id
+      }, { status: 409, headers });
+    }
+
     // Mandatory Trust-Stack Governor Firewall Gate Check
     const gate = await verifyTrustStackGate(prospect, 'manual_send', env);
     if (!gate.allowed) {
@@ -4250,12 +4262,14 @@ async function handleDecision(
         touchCount: manualEligibility.nextTouch,
         includeSiteLink: manualEligibility.nextTouch > 1,
         plainTextOnly: true,
+        founderOutreach: String(prospect.mode || (prospect.tenant_id ? "tenant" : "founder")).toLowerCase() !== "tenant",
+        legalFooter: buildLegalFooter(env),
         resendApiKey: env.RESEND_API_KEY,
         brevoApiKey: env.BREVO_API_KEY,
         senderName: env.SENDER_NAME
       });
 
-      if (dispatchOutcome.status === "failed") {
+      if (dispatchOutcome.status !== "dispatched") {
         try {
           await db.prepare(
             "UPDATE prospects SET dispatch_provider = ?, dispatch_status = 'failed', dispatch_error = ?, updated_at = ? WHERE id = ?"
@@ -4304,7 +4318,7 @@ async function handleDecision(
       } catch (e) {}
     }
 
-    // Update prospect with outcome sent and 21-day cooldown (max 21 days for normal outreach)
+    // Update prospect only after the provider confirms a real dispatch.
     const cooldown21d = new Date(Date.now() + 21 * 24 * 60 * 60 * 1000).toISOString();
     try {
       await db.prepare(
@@ -4335,6 +4349,11 @@ async function handleDecision(
           timestamp
         ).run();
       }
+    } catch (e) {}
+
+    try {
+      await db.prepare("UPDATE opportunities SET status = 'closed', decision_state = 'closed', updated_at = ? WHERE prospect_id = ?")
+        .bind(timestamp, id).run();
     } catch (e) {}
 
     // Auto-suppress email and domain for 21-day cooldown window
@@ -9640,10 +9659,12 @@ export async function getFounderOutreachEligibility(db: D1Database, prospect: an
   if (String(prospect.mode || "").toLowerCase() === "tenant") {
     return { allowed: true, reason: "tenant_policy", nextTouch: getOutreachTouch(prospect) };
   }
+  const founderScope = prospect.tenant_id || "founder";
+  const recipientEmail = String(prospect.email || "").trim().toLowerCase();
   const [history, idempotency, pending] = await Promise.all([
-    db.prepare("SELECT COUNT(DISTINCT message_id) AS touch_count, MAX(created_at) AS last_send_at FROM email_dispatch_logs WHERE prospect_id = ? AND message_id IS NOT NULL").bind(prospect.id).first(),
-    db.prepare("SELECT COUNT(DISTINCT idempotency_key) AS touch_count, MAX(updated_at) AS last_send_at FROM outreach_idempotency WHERE prospect_id = ? AND status IN ('queued','sent','scheduled','provider_unknown')").bind(prospect.id).first(),
-    db.prepare("SELECT status FROM outreach_idempotency WHERE prospect_id = ? AND status IN ('reserved','queued','scheduled','provider_unknown') ORDER BY updated_at DESC LIMIT 1").bind(prospect.id).first()
+    db.prepare("SELECT COUNT(DISTINCT message_id) AS touch_count, MAX(created_at) AS last_send_at FROM email_dispatch_logs WHERE COALESCE(NULLIF(tenant_id,''),'founder') = ? AND (prospect_id = ? OR lower(recipient_email) = ?) AND message_id IS NOT NULL").bind(founderScope, prospect.id, recipientEmail).first(),
+    db.prepare("SELECT COUNT(DISTINCT idempotency_key) AS touch_count, MAX(updated_at) AS last_send_at FROM outreach_idempotency WHERE COALESCE(NULLIF(tenant_id,''),'founder') = ? AND (prospect_id = ? OR lower(email) = ?) AND status IN ('reserved','queued','sent','scheduled','provider_unknown')").bind(founderScope, prospect.id, recipientEmail).first(),
+    db.prepare("SELECT status FROM outreach_idempotency WHERE COALESCE(NULLIF(tenant_id,''),'founder') = ? AND (prospect_id = ? OR lower(email) = ?) AND status IN ('reserved','queued','scheduled','provider_unknown') ORDER BY updated_at DESC LIMIT 1").bind(founderScope, prospect.id, recipientEmail).first()
   ]) as any[];
   if (pending) return { allowed: false, reason: "outreach_" + String(pending.status || "pending") + "_pending", nextTouch: 0 };
   const state = String(prospect.status || "").toLowerCase();
