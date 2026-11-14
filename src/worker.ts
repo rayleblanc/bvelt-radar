@@ -1006,8 +1006,8 @@ export default {
         const testRes = await dispatchEmail({
           to: recipient,
           recipientName: "Bvelt Founder Test",
-          subject: "⚡ Test de Verificación Outbound - Bvelt Radar",
-          body: `Hola,\n\nEste es un email de verificación enviado desde Bvelt Radar.\n\nFecha: ${new Date().toISOString()}\n\nReply STOP to opt out`,
+          subject: "Bvelt email delivery check",
+          body: `Hello,\n\nYou requested an email delivery check from Bvelt Radar. This message confirms that the configured sender can submit email to this mailbox.\n\nNo action is required.\n\nSent at: ${new Date().toISOString()}`,
           from: env.OUTBOUND_EMAIL_FROM,
           resendApiKey: env.RESEND_API_KEY,
           brevoApiKey: env.BREVO_API_KEY,
@@ -3953,8 +3953,8 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
         const testRes = await dispatchEmail({
           to: targetEmail,
           recipientName: "Bvelt Founder Test",
-          subject: "⚡ Test Outbound Live - Bvelt Radar",
-          body: `Hola,\n\nEste es un mensaje de prueba enviado desde tu bot de Telegram en Bvelt Radar.\n\nProveedor detectado: ${env.RESEND_API_KEY ? "Resend API" : env.BREVO_API_KEY ? "Brevo API" : "Simulado"}\nFecha: ${new Date().toISOString()}\n\nReply STOP to opt out`,
+          subject: "Bvelt email delivery check",
+          body: `Hello,\n\nYou requested an email delivery check from Bvelt Radar. Provider: ${env.RESEND_API_KEY ? "Resend" : env.BREVO_API_KEY ? "Brevo" : "simulated"}.\n\nNo action is required.\n\nSent at: ${new Date().toISOString()}`,
           from: env.OUTBOUND_EMAIL_FROM,
           resendApiKey: env.RESEND_API_KEY,
           brevoApiKey: env.BREVO_API_KEY,
@@ -10042,16 +10042,34 @@ export function buildLegalFooter(env: Env): string {
  * Antes, cuando el envío se bloqueaba (breaker, falta de dirección postal, sin proveedor de email, presupuesto...)
  * el prospecto pasaba a "hold" en D1 SIN avisar, y desde Telegram el radar parecía muerto.
  */
-export async function notifyOnce(env: Env, reasonKey: string, text: string): Promise<void> {
+export interface NotifyOnceDependencies {
+  cacheGet?: typeof cacheGet;
+  cachePut?: typeof cachePut;
+  send?: typeof notifyFounder;
+}
+
+export async function notifyOnce(
+  env: Env,
+  reasonKey: string,
+  text: string,
+  dependencies: NotifyOnceDependencies = {}
+): Promise<void> {
   try {
     const day = new Date().toISOString().split("T")[0];
     const key = `radar_notify_once_${day}_${String(reasonKey).toLowerCase().replace(/[^a-z0-9]+/g, "_").slice(0, 60)}`;
+    const readCache = dependencies.cacheGet || cacheGet;
+    const writeCache = dependencies.cachePut || cachePut;
+    const send = dependencies.send || notifyFounder;
+
     if (env.RADAR_DB) {
-      const seen = await cacheGet(env, key);
+      const seen = await readCache(env, key);
       if (seen) return;
-      await cachePut(env, key, "1", 86400);
     }
-    await notifyFounder(env, text);
+
+    const delivery = await send(env, text);
+    if (env.RADAR_DB && delivery.ok) {
+      await writeCache(env, key, "1", 86400);
+    }
   } catch (e) {
     console.warn("[notifyOnce] failed:", e);
   }
@@ -10897,6 +10915,19 @@ export interface EmailVerificationResult {
   reason: string;
 }
 
+export function isVerifiedDeliverableEmail(
+  deliverability: string,
+  qualityScore: number,
+  isDisposable: boolean,
+  isCatchall: boolean
+): boolean {
+  return String(deliverability || "").toUpperCase() === "DELIVERABLE"
+    && Number.isFinite(Number(qualityScore))
+    && Number(qualityScore) >= 0.7
+    && !isDisposable
+    && !isCatchall;
+}
+
 export async function verifyEmail(email: string, env: Env): Promise<EmailVerificationResult> {
   const normEmail = (email || "").toLowerCase().trim();
   const timestamp = new Date().toISOString();
@@ -10913,18 +10944,29 @@ export async function verifyEmail(email: string, env: Env): Promise<EmailVerific
     };
   }
 
-  // 3. Check D1 cache
+  // Only trust recent provider-backed results. Legacy UNVERIFIED_PASSED rows are
+  // deliberately rechecked instead of being treated as proof of deliverability.
   try {
     const cached = await env.RADAR_DB.prepare("SELECT * FROM email_verifications WHERE email = ?").bind(normEmail).first() as any;
     if (cached) {
-      return {
-        valid: cached.is_valid === 1,
-        deliverability: cached.deliverability || "UNKNOWN",
-        is_disposable: cached.is_disposable === 1,
-        is_catchall: cached.is_catchall === 1,
-        quality_score: cached.quality_score,
-        reason: cached.reason || "Cached verification result"
-      };
+      const deliverability = String(cached.deliverability || "UNKNOWN").toUpperCase();
+      const verifiedAt = Date.parse(String(cached.verified_at || ""));
+      const ageMs = Date.now() - verifiedAt;
+      const cacheTtl = deliverability === "DELIVERABLE" || deliverability === "UNDELIVERABLE" ? 30 * 86400000 : 6 * 3600000;
+      if (deliverability !== "UNVERIFIED_PASSED" && Number.isFinite(verifiedAt) && ageMs >= 0 && ageMs < cacheTtl) {
+        const isDisposable = cached.is_disposable === 1;
+        const isCatchall = cached.is_catchall === 1;
+        const qualityScore = Number(cached.quality_score || 0);
+        const valid = isVerifiedDeliverableEmail(deliverability, qualityScore, isDisposable, isCatchall);
+        return {
+          valid,
+          deliverability,
+          is_disposable: isDisposable,
+          is_catchall: isCatchall,
+          quality_score: qualityScore,
+          reason: valid ? "Recently verified deliverable by Abstract API" : (cached.reason || "Email is not positively verified as deliverable")
+        };
+      }
     }
   } catch (e) {}
 
@@ -10935,22 +10977,26 @@ export async function verifyEmail(email: string, env: Env): Promise<EmailVerific
       const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
       if (res.ok) {
         const data: any = await res.json();
-        const isUndeliverable = data.deliverability === "UNDELIVERABLE";
+        const deliverability = String(data.deliverability || "UNKNOWN").toUpperCase();
         const isDisposable = data.is_disposable_email?.value === true;
         const isCatchall = data.is_catchall_email?.value === true;
-        const qualityScore = data.quality_score || 0.8;
-
-        // 0.65 floor reduces permanent bounces (Resend ~38% was driven by weak guesses)
-        const isValid = !isUndeliverable && !isDisposable && (qualityScore >= 0.65);
-        const reason = isUndeliverable 
-          ? "Abstract API marked as UNDELIVERABLE" 
-          : isDisposable 
-            ? "Abstract API marked as DISPOSABLE" 
-            : "Verified via Abstract API";
+        const qualityScore = Number(data.quality_score);
+        const isValid = isVerifiedDeliverableEmail(deliverability, qualityScore, isDisposable, isCatchall);
+        const reason = isValid
+          ? "Abstract API confirmed deliverable"
+          : deliverability === "UNDELIVERABLE"
+            ? "Abstract API marked as UNDELIVERABLE"
+            : isDisposable
+              ? "Abstract API marked as DISPOSABLE"
+              : isCatchall
+                ? "Catch-all mailbox excluded from cold outreach"
+                : deliverability !== "DELIVERABLE"
+                  ? `Abstract API did not confirm DELIVERABLE status (${deliverability})`
+                  : `Abstract API quality score below 0.70 (${Number.isFinite(qualityScore) ? qualityScore : "unknown"})`;
 
         const result: EmailVerificationResult = {
           valid: isValid,
-          deliverability: data.deliverability || "UNKNOWN",
+          deliverability,
           is_disposable: isDisposable,
           is_catchall: isCatchall,
           quality_score: qualityScore,
@@ -10980,24 +11026,18 @@ export async function verifyEmail(email: string, env: Env): Promise<EmailVerific
     }
   }
 
-  // Fallback if no API key or timeout
-  const fallbackResult: EmailVerificationResult = {
-    valid: true,
-    deliverability: "UNVERIFIED_PASSED",
+  // Fail closed: format validity and MX presence are not proof that a mailbox exists.
+  // Transient provider failures are not cached, so a later run can verify again.
+  return {
+    valid: false,
+    deliverability: "UNVERIFIED",
     is_disposable: false,
     is_catchall: false,
-    quality_score: 0.7,
-    reason: "Passed basic format and disposable safety checks"
+    quality_score: 0,
+    reason: env.ABSTRACT_API_KEY
+      ? "Abstract API verification unavailable; outbound send held to protect sender reputation"
+      : "ABSTRACT_API_KEY missing; outbound send held until mailbox verification is available"
   };
-
-  try {
-    await env.RADAR_DB.prepare(`
-      INSERT OR REPLACE INTO email_verifications (email, is_valid, deliverability, is_disposable, is_catchall, quality_score, reason, verified_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).bind(normEmail, 1, "UNVERIFIED_PASSED", 0, 0, 0.7, "Format valid", timestamp).run();
-  } catch (e) {}
-
-  return fallbackResult;
 }
 
 /**
@@ -11226,8 +11266,11 @@ export async function sendOrQueueOutreach(prospect: any, runId: string, env: Env
   }
   const emailVer = await verifyEmail(prospect.email, env);
   if (!emailVer.valid) {
-    await env.RADAR_DB.prepare("UPDATE prospects SET status = 'disqualified', outcome = 'email_verification_failed', updated_at = ? WHERE id = ?")
-      .bind(new Date().toISOString(), prospect.id).run();
+    const temporary = ["UNKNOWN", "UNVERIFIED", "UNVERIFIED_PASSED"].includes(String(emailVer.deliverability || "").toUpperCase());
+    const nextStatus = temporary ? "hold" : "disqualified";
+    const nextOutcome = temporary ? "email_verification_pending" : "email_verification_failed";
+    await env.RADAR_DB.prepare("UPDATE prospects SET status = ?, outcome = ?, updated_at = ? WHERE id = ?")
+      .bind(nextStatus, nextOutcome, new Date().toISOString(), prospect.id).run();
     return { success: false, reason: `EMAIL_VERIFICATION_FAILED: ${emailVer.reason}` };
   }
 

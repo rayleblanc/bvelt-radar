@@ -60,43 +60,21 @@ function escapeHtml(s: string): string {
     .replace(/"/g, '&quot;');
 }
 
-export function buildBrandedEmailHtml(bodyText: string, logoUrl?: string): string {
-  const logo = logoUrl || BVELT_ICON_URL;
+export function buildBrandedEmailHtml(bodyText: string, _logoUrl?: string): string {
   const paragraphs = escapeHtml(bodyText)
     .split(/\n\n+/)
-    .map((p) => p.replace(/\n/g, '<br/>'))
-    .map((p) => `<p style="margin:0 0 14px 0;line-height:1.5;color:#0f172a;font-size:15px;">${p}</p>`)
-    .join('');
+    .map((p) => p.replace(/\n/g, "<br/>"))
+    .map((p) => `<p style="margin:0 0 14px 0;line-height:1.55;color:#172033;font-size:15px;">${p}</p>`)
+    .join("");
 
-  return `<!DOCTYPE html>
+  // Lightweight, text-first markup: no tracking image, button, or duplicate CTA links.
+  return `<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"/><meta name="viewport" content="width=device-width"/></head>
-<body style="margin:0;padding:0;background:#f1f5f9;">
-  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f1f5f9;padding:24px 12px;">
-    <tr><td align="center">
-      <table role="presentation" width="100%" style="max-width:560px;background:#ffffff;border-radius:12px;overflow:hidden;border:1px solid #e2e8f0;">
-        <tr>
-          <td style="padding:20px 24px 8px 24px;background:#0f172a;">
-            <img src="${escapeHtml(logo)}" width="48" height="48" alt="Bvelt" style="display:block;border:0;border-radius:10px;"/>
-            <div style="margin-top:10px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:13px;font-weight:700;letter-spacing:0.04em;color:#93c5fd;">BVELT</div>
-          </td>
-        </tr>
-        <tr>
-          <td style="padding:20px 24px 8px 24px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
-            ${paragraphs}
-          </td>
-        </tr>
-        <tr>
-          <td style="padding:8px 24px 24px 24px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
-            <a href="${BVELT_SITE}" style="display:inline-block;background:#2563eb;color:#ffffff;text-decoration:none;font-weight:600;font-size:14px;padding:12px 18px;border-radius:8px;">Open Bvelt</a>
-            <p style="margin:16px 0 0 0;font-size:12px;color:#64748b;line-height:1.4;">
-              <a href="${BVELT_SITE}" style="color:#2563eb;text-decoration:none;">${BVELT_SITE}</a>
-            </p>
-          </td>
-        </tr>
-      </table>
-    </td></tr>
-  </table>
+<body style="margin:0;padding:20px;background:#ffffff;font-family:Arial,Helvetica,sans-serif;">
+  <main style="max-width:600px;margin:0 auto;color:#172033;">
+    ${paragraphs}
+  </main>
 </body>
 </html>`;
 }

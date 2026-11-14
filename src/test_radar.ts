@@ -1,8 +1,8 @@
 declare const process: any;
 
-import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, resolveTenantBuyerSegments, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey } from './worker';
+import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, resolveTenantBuyerSegments, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey, notifyOnce, isVerifiedDeliverableEmail } from './worker';
 import { DEFAULT_FOUNDER_MISSION, MissionConfig } from './worker';
-import { buildResendIdempotencyKey } from './emailDispatcher';
+import { buildResendIdempotencyKey, buildBrandedEmailHtml } from './emailDispatcher';
 import { fetchPermitContractors } from './permitSources';
 import { pickTargets } from './geoFrontier';
 import { isOffIcpName } from './emailSanitizer';
@@ -26,6 +26,58 @@ function assert(condition: boolean, message: string) {
     throw new Error(message);
   }
 }
+
+tests.push({
+  name: "Telegram notifyOnce only caches after confirmed delivery",
+  run: async () => {
+    const env = { RADAR_DB: {} } as any;
+    const failedEvents: string[] = [];
+    await notifyOnce(env, "delivery-test", "message", {
+      cacheGet: async () => null,
+      cachePut: async () => { failedEvents.push("cache"); },
+      send: async () => { failedEvents.push("send"); return { ok: false }; }
+    });
+    assert(failedEvents.join(",") === "send", "Failed Telegram delivery must not be cached");
+
+    const successEvents: string[] = [];
+    await notifyOnce(env, "delivery-test", "message", {
+      cacheGet: async () => null,
+      cachePut: async () => { successEvents.push("cache"); },
+      send: async () => { successEvents.push("send"); return { ok: true }; }
+    });
+    assert(successEvents.join(",") === "send,cache", "Successful Telegram delivery must be cached after send");
+
+    let sendCount = 0;
+    await notifyOnce(env, "delivery-test", "message", {
+      cacheGet: async () => "1",
+      cachePut: async () => undefined,
+      send: async () => { sendCount++; return { ok: true }; }
+    });
+    assert(sendCount === 0, "Already delivered notification must remain deduplicated");
+  }
+});
+
+tests.push({
+  name: "Outbound email requires provider-confirmed deliverability",
+  run: () => {
+    assert(isVerifiedDeliverableEmail("DELIVERABLE", 0.9, false, false), "Confirmed deliverable mailbox should pass");
+    assert(!isVerifiedDeliverableEmail("UNVERIFIED_PASSED", 0.9, false, false), "Legacy format-only verification must fail");
+    assert(!isVerifiedDeliverableEmail("UNKNOWN", 0.9, false, false), "Unknown deliverability must fail closed");
+    assert(!isVerifiedDeliverableEmail("DELIVERABLE", 0.9, true, false), "Disposable mailbox must fail");
+    assert(!isVerifiedDeliverableEmail("DELIVERABLE", 0.9, false, true), "Catch-all mailbox must fail cold outreach");
+    assert(!isVerifiedDeliverableEmail("DELIVERABLE", 0.69, false, false), "Low quality score must fail");
+  }
+});
+
+tests.push({
+  name: "Outbound email HTML stays lightweight and text-first",
+  run: () => {
+    const html = buildBrandedEmailHtml("Hello\n\nhttps://bvelt.app/");
+    assert(!/<img\b/i.test(html), "Email HTML should not load remote images");
+    assert(!/<a\b/i.test(html), "Email HTML should not add duplicate CTA links");
+    assert(html.includes("https://bvelt.app/"), "Plain-text URL must remain visible in the body");
+  }
+});
 
 tests.push({
   name: "Learning Integrity: sent, delivered, replied and won remain distinct outcomes",
