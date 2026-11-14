@@ -25,6 +25,8 @@ export interface EmailDispatchOptions {
   brevoApiKey?: string;
   senderName?: string;
   logoUrl?: string;
+  includeSiteLink?: boolean;
+  plainTextOnly?: boolean;
 }
 
 export function resolveBveltSender(raw?: string): { email: string; from: string } | null {
@@ -150,12 +152,12 @@ export interface EmailDispatchResult {
   details?: string;
 }
 
-export function normalizeOutreachBody(body: string): string {
+export function normalizeOutreachBody(body: string, includeSiteLink = true): string {
   let b = (body || '').trim();
   b = b.replace(/https?:\/\/bvelt\.app\/demo\?[^\s)\]>"]+/gi, BVELT_SITE);
   b = b.replace(/https?:\/\/bvelt\.app\/demo\b/gi, BVELT_SITE);
   b = b.replace(/https?:\/\/[a-z0-9.-]*workers\.dev\/demo[^\s)\]>"]*/gi, BVELT_SITE);
-  if (!/bvelt\.app/i.test(b)) {
+  if (includeSiteLink && !/bvelt\.app/i.test(b)) {
     b = `${b}\n\n${BVELT_SITE}`;
   }
   return b.trim();
@@ -228,9 +230,9 @@ export async function dispatchEmail(options: EmailDispatchOptions): Promise<Emai
   }
 
   const subject = (options.subject || 'Quick question from Bvelt').trim();
-  const body = normalizeOutreachBody(options.body || '');
+  const body = normalizeOutreachBody(options.body || '', options.includeSiteLink !== false);
   const senderName = options.senderName || 'Rainer — Bvelt';
-  const html = buildBrandedEmailHtml(body, options.logoUrl);
+  const html = options.plainTextOnly ? undefined : buildBrandedEmailHtml(body, options.logoUrl);
 
   if (options.resendApiKey && options.resendApiKey.trim()) {
     try {
@@ -241,7 +243,7 @@ export async function dispatchEmail(options: EmailDispatchOptions): Promise<Emai
         to: [to],
         subject,
         text: body,
-        html,
+        ...(html ? { html } : {}),
         headers: { 'X-Entity-Ref-ID': options.prospectId || `lead_${Date.now()}` },
       };
       if (options.replyTo && options.replyTo.includes('@')) {
@@ -305,7 +307,7 @@ export async function dispatchEmail(options: EmailDispatchOptions): Promise<Emai
           to: [{ email: to, name: options.recipientName || to }],
           subject,
           textContent: body,
-          htmlContent: html,
+          ...(html ? { htmlContent: html } : {}),
         }),
       });
       const data: any = await res.json().catch(() => ({}));
