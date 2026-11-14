@@ -161,23 +161,38 @@ export async function pickTargets(
     centerLabel?: string;
     serviceRadiusKm?: number;
     countries?: string[];
-    /** Restrict pool to these city labels (e.g. "Tampa, FL"). Prevents national drift to NYC etc. */
+    /** Soft ranking only; never excludes countries from the global pool. */
+    priorityCountries?: string[];
+    /** Restrict pool to these city labels (e.g. "City A, Region"). Prevents national drift to unrelated markets. */
     allowedCities?: string[];
   }
 ): Promise<{ place: GeoPlace; trade: string; why: string }[]> {
   const count = Math.max(1, Math.min(30, o.count || 5));
-  const trades = (o.trades && o.trades.length > 0 ? o.trades : ["general"])
+  const trades = (o.trades || [])
     .map((t) => String(t).trim())
     .filter(Boolean);
-  const countries = (o.countries && o.countries.length > 0 ? o.countries : ["US", "CA"]).map((c) => c.toUpperCase());
   const isTenantArea = !!o.centerLabel;
 
-  // 1) Centro del tenant: si se pidió y no se puede resolver, NO devolvemos nada
+  // 1) Resolve the configured center before deriving its country.
   let center: GeoPlace | null = null;
   if (isTenantArea) {
     center = findPlace(o.centerLabel as string);
     if (!center) return [];
   }
+
+  // No implicit trade defaults. Explicit countries narrow the pool; otherwise
+  // Founder can explore the available global gazetteer. A Tenant center supplies
+  // its country when no explicit country scope was provided.
+  const countries = (o.countries && o.countries.length > 0
+    ? o.countries
+    : center ? [center.country] : [])
+    .map((c) => String(c).trim().toUpperCase())
+    .filter(Boolean);
+  const priorityCountries = new Set((o.priorityCountries || [])
+    .map((country) => String(country).trim().toUpperCase())
+    .filter(Boolean));
+  if (trades.length === 0) return [];
+
   const maxDist = o.serviceRadiusKm ?? 60;
 
   // Resolve allowedCities into GeoPlace centers (strict configured markets only)
@@ -235,8 +250,7 @@ export async function pickTargets(
   // 3) Pool de lugares
   // Tenant (centerLabel): radio alrededor de la base.
   // allowedCities: solo cuando se pasa explícito (p.ej. tenant multi-ciudad).
-  // Founder sin centro: US+CA nacional (top población + muestra aleatoria 15k+).
-  // Sun Belt NO es filtro duro: es boost de score más abajo (x1.25).
+  // Founder sin centro: solo países configurados; sin fallback geográfico implícito.
   let pool: GeoPlace[];
   if (center) {
     const dLat = maxDist / 111 + 0.05;
@@ -269,9 +283,15 @@ export async function pickTargets(
       }
     }
   } else {
-    // Founder / national: top 150 by population + 150 random places with 15k+ pop (US+CA)
-    const eligible = GEO_PLACES.filter((p) => countries.includes(p.country));
-    const byPop = [...eligible].sort(POP_DESC);
+    // Founder: explore every available country unless the operator explicitly narrows scope.
+    // Priority countries are ranked higher, never used as an allowlist.
+    const eligible = GEO_PLACES.filter((p) => countries.length === 0 || countries.includes(p.country));
+    const byPop = [...eligible].sort((a, b) => {
+      const priorityA = priorityCountries.has(a.country) ? 1.15 : 1;
+      const priorityB = priorityCountries.has(b.country) ? 1.15 : 1;
+      return (Math.log(Math.max(b.population || 1, 1)) * priorityB) -
+        (Math.log(Math.max(a.population || 1, 1)) * priorityA);
+    });
     const top = byPop.slice(0, 150);
     const mid = byPop.slice(150).filter((p) => (p.population || 0) >= 15000);
     const extra: GeoPlace[] = [];
@@ -329,12 +349,8 @@ export async function pickTargets(
       const st = regionStats.get(`${t}::${region}`) || { q: 0, c: 0 };
       const prior = (st.q + 1) / (st.c + 8);
       let score = Math.log(pop) * fresh * (0.5 + prior);
+      if (priorityCountries.has(place.country)) score *= 1.15;
       if (center) score *= 1 / (1 + dist / 30); // más cerca de la base = mejor
-      // Soft priority (not a hard filter): Sun Belt markets Bvelt sells into first
-      const SUN_BELT = new Set(["FL", "TX", "GA", "TN", "NC", "SC", "AL", "AZ", "NV", "LA"]);
-      if (!isTenantArea && SUN_BELT.has((place.region || "").toUpperCase())) {
-        score *= 1.25;
-      }
       cands.push({ place, trade, score, prior, isNew, dist });
     }
   }
