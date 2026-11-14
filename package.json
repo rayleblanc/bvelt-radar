@@ -8,7 +8,7 @@
     "build": "tsc && vite build",
     "lint": "tsc --noEmit",
     "preview": "vite preview",
-    "test:radar": "node src/restore_test_radar.js && npx --yes tsx src/test_radar.ts"
+    "test:radar": "node src/restore_test_radar.cjs && npx --yes tsx src/test_radar.ts"
   },
   "dependencies": {
     "lucide-react": "0.546.0",
