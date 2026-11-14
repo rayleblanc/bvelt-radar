@@ -3991,7 +3991,7 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
           `<b>DMARC:</b> ${auth.dmarcPresent ? escapeHtml(auth.dmarcPolicy) : "MISSING"}`,
           ...auth.resendRecordStatuses.map(item => `• ${escapeHtml(item)}`),
           ...auth.errors.map(item => `⚠️ ${escapeHtml(item)}`)
-        ].join("\\n");
+        ].join("\n");
         await notifyFounder(env, report);
       } else if (command === "/status" || command === "status" || command === "/estado" || command === "estado") {
         const provStatus = env.RESEND_API_KEY ? "✅ Resend (3,000/mes gratis)" : env.BREVO_API_KEY ? "✅ Brevo (300/día gratis)" : "⚠️ Simulado (Falta RESEND_API_KEY)";
