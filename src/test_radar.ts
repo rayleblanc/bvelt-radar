@@ -70,7 +70,7 @@ tests.push({
         const results = [{ meta: { changes: previousChanges } }];
 
         for (const statement of statements.slice(1)) {
-          const guarded = /WHERE changes\\(\\) = 1/i.test(statement.sql);
+          const guarded = /WHERE changes\(\) = 1/i.test(statement.sql);
           const applied = guarded ? previousChanges === 1 : true;
           const key = String(statement.args[2]);
           if (applied) aggregates.set(key, (aggregates.get(key) || 0) + Number(statement.args[15] || 0));
