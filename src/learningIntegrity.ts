@@ -145,15 +145,15 @@ export async function readScopedLearningStats(
   const tenantId = normalizeScope(mode, tenantIdInput);
   const rates: Record<string, number> = {};
   const rows = await db.prepare(`
-    SELECT key, sent_count, replied_count, booked_count, won_count, lost_count
+    SELECT key, sent_count, contacted_count, replied_count, booked_count, won_count, lost_count
     FROM learning_stats_scoped
-    WHERE mode = ? AND tenant_id = ? AND sent_count >= 2
+    WHERE mode = ? AND tenant_id = ? AND (sent_count + contacted_count) >= 2
   `).bind(mode, tenantId).all();
 
   for (const row of (rows?.results || []) as any[]) {
-    const sent = Math.max(1, Number(row.sent_count || 0));
-    const won = Math.min(sent, Number(row.won_count || 0));
-    rates[String(row.key)] = (won + 1) / (sent + 2);
+    const attempts = Math.max(1, Number(row.sent_count || 0) + Number(row.contacted_count || 0));
+    const won = Math.min(attempts, Number(row.won_count || 0));
+    rates[String(row.key)] = (won + 1) / (attempts + 2);
   }
   return rates;
 }
