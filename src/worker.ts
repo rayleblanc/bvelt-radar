@@ -1309,11 +1309,12 @@ export default {
 
       // 8. Single Production Prospects Fetching Endpoint
       if ((path === "/prospects" || path === "/api/prospects") && method === "GET") {
-        const limit = url.searchParams.get("limit") || "100";
+        const requestedLimit = Number.parseInt(url.searchParams.get("limit") || "500", 10);
+        const limit = Number.isFinite(requestedLimit) ? Math.min(1000, Math.max(1, requestedLimit)) : 500;
         const status = url.searchParams.get("status");
         const tenantId = url.searchParams.get("tenant_id") || "founder";
         
-        let queryStr = "SELECT * FROM prospects WHERE COALESCE(tenant_id,'founder') = ?";
+        let queryStr = "SELECT * FROM prospects WHERE COALESCE(NULLIF(TRIM(tenant_id),''),'founder') = ?";
         const params: any[] = [tenantId];
         
         if (status) {
@@ -1322,7 +1323,7 @@ export default {
         }
         
         queryStr += " ORDER BY created_at DESC LIMIT ?";
-        params.push(parseInt(limit, 10));
+        params.push(limit);
 
         const results = await env.RADAR_DB.prepare(queryStr).bind(...params).all();
         return Response.json(results.results || [], { headers: corsHeaders });
