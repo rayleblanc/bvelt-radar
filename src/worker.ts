@@ -363,15 +363,23 @@ export interface MissionConfig {
 }
 
 const MARKET_UNIVERSE_POLICY = marketUniverse as {
-  priority_countries?: string[];
-  default_priority_countries?: string[];
+  market_tiers?: {
+    core_english_commercial?: string[];
+    additional_english_commercial?: string[];
+  };
+  geography_policy?: {
+    priority_countries?: string[];
+    default_priority_countries?: string[];
+  };
   bvelt_compatible_segments?: string[];
   excluded_business_categories?: string[];
 };
 
 const MARKET_PRIORITY_COUNTRIES = Array.from(new Set([
-  ...(MARKET_UNIVERSE_POLICY.default_priority_countries || []),
-  ...(MARKET_UNIVERSE_POLICY.priority_countries || [])
+  ...(MARKET_UNIVERSE_POLICY.market_tiers?.core_english_commercial || []),
+  ...(MARKET_UNIVERSE_POLICY.market_tiers?.additional_english_commercial || []),
+  ...(MARKET_UNIVERSE_POLICY.geography_policy?.default_priority_countries || []),
+  ...(MARKET_UNIVERSE_POLICY.geography_policy?.priority_countries || [])
 ].map(country => String(country).trim().toUpperCase()).filter(Boolean)));
 
 const DEFAULT_FOUNDER_SEGMENTS = (MARKET_UNIVERSE_POLICY.bvelt_compatible_segments || [])
