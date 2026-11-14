@@ -3131,7 +3131,7 @@ export default {
         const rows = await env.RADAR_DB.prepare(`
           SELECT id FROM prospects
           WHERE COALESCE(NULLIF(TRIM(tenant_id),''),'founder') = 'founder'
-            AND lower(status) = 'sent'
+            AND lower(status) IN ('sent','delivered','opened','clicked')
             AND (last_reply_at IS NULL OR TRIM(last_reply_at) = '')
             AND last_contact_at IS NOT NULL
             AND last_contact_at <= datetime('now', '-5 days')
@@ -3144,7 +3144,8 @@ export default {
           try {
             const p = await env.RADAR_DB.prepare("SELECT * FROM prospects WHERE id = ?").bind(r.id).first() as any;
             if (!p) continue;
-            const touch = getOutreachTouch(p);
+            const history = await env.RADAR_DB.prepare("SELECT COUNT(DISTINCT message_id) AS touch_count FROM email_dispatch_logs WHERE prospect_id = ?").bind(r.id).first() as any;
+            const touch = resolveOutreachTouchCount(getOutreachTouch(p), history?.touch_count);
             if (touch >= 3) continue;
             if (env.RADAR_QUEUE && typeof env.RADAR_QUEUE.send === "function") {
               await env.RADAR_QUEUE.send({
@@ -6582,7 +6583,7 @@ async function handleApproveJob(job: RadarJobMessage, env: Env): Promise<void> {
     return;
   }
 
-  if (['approved', 'drafted', 'queued', 'notified', 'sent'].includes(prospect.status)) return;
+  if (['approved', 'drafted', 'queued', 'notified', 'sent', 'delivered', 'opened', 'clicked', 'bounced', 'unsubscribed', 'complained', 'replied'].includes(String(prospect.status || '').toLowerCase())) return;
 
   await env.RADAR_DB.prepare(`
     UPDATE prospects SET status = 'approved', updated_at = ? WHERE id = ?
@@ -6633,22 +6634,21 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
     return;
   }
 
-  // Follow-up: if already sent, only continue when 5+ days, no reply, touch < 3
+  let followupAuthorized = false;
   {
     const st = String(prospect.status || "").toLowerCase();
     const touchNow = getOutreachTouch(prospect);
     if (prospect.draft_body && ['queued', 'notified'].includes(st)) return;
-    if (st === 'sent' && prospect.draft_body) {
-      if (prospect.last_reply_at) return;
-      const last = prospect.last_contact_at ? new Date(prospect.last_contact_at).getTime() : 0;
-      const days = last ? (Date.now() - last) / 86400000 : 999;
-      if (days < 5) return;
-      if (touchNow >= 3) return; // max 2 follow-ups
-      // bump touch for this generation
+    if (["bounced", "unsubscribed", "complained", "replied", "blocked"].includes(st)) return;
+    if (["sent", "delivered", "opened", "clicked"].includes(st)) {
+      const history = await env.RADAR_DB.prepare("SELECT COUNT(DISTINCT message_id) AS touch_count FROM email_dispatch_logs WHERE prospect_id = ?").bind(prospect.id).first() as any;
+      const effectiveTouch = resolveOutreachTouchCount(touchNow, history?.touch_count);
+      if (!shouldSendFounderFollowUp(st, prospect.last_contact_at, prospect.last_reply_at, effectiveTouch)) return;
       prospect.signals_json = JSON.stringify({
         ...((): any => { try { return JSON.parse(prospect.signals_json || "{}"); } catch { return {}; } })(),
-        outreach_touch: touchNow + 1,
+        outreach_touch: effectiveTouch + 1,
       });
+      followupAuthorized = true;
     }
   }
 
@@ -6736,8 +6736,8 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
   const idempotencyKey = `idempotency:${prospect.id}:${(prospect.email || '').toLowerCase().trim()}:${todayDate}`;
 
   // Idempotency check: If already sent today or in D1
-  if (prospect.status === 'sent') {
-    console.log(`[Outreach Idempotency] Prospect ${prospect.id} (${prospect.email}) is already sent. Marking already_sent.`);
+  if (["sent", "delivered", "opened", "clicked"].includes(String(prospect.status || "").toLowerCase()) && !followupAuthorized) {
+    console.log(`[Outreach Idempotency] Prospect ${prospect.id} (${prospect.email}) already contacted; no eligible follow-up. Marking already_sent.`);
     try {
       await env.RADAR_DB.prepare(
         "INSERT OR IGNORE INTO outreach_idempotency (idempotency_key, prospect_id, email, status, created_at, updated_at) VALUES (?, ?, ?, 'already_sent', ?, ?)"
@@ -9439,6 +9439,31 @@ async function bumpOutreachTouch(db: D1Database, prospect: any, nextTouch: numbe
 }
 
 
+export function resolveOutreachTouchCount(signalTouch: unknown, historicalTouchCount: unknown): number {
+  const signal = Number(signalTouch);
+  const historical = Number(historicalTouchCount);
+  return Math.max(1, Number.isFinite(signal) ? Math.floor(signal) : 1, Number.isFinite(historical) ? Math.floor(historical) : 1);
+}
+
+export function shouldSendFounderFollowUp(status: string, lastContactAt: string | null, lastReplyAt: string | null, touchCount: number, now = Date.now()): boolean {
+  const state = String(status || "").toLowerCase();
+  if (!["sent", "delivered", "opened", "clicked"].includes(state)) return false;
+  if (lastReplyAt && String(lastReplyAt).trim()) return false;
+  const raw = String(lastContactAt || "").trim();
+  if (!raw) return false;
+  const parsed = Date.parse(raw.includes("T") ? raw : raw.replace(" ", "T") + "Z");
+  if (!Number.isFinite(parsed)) return false;
+  const age = now - parsed;
+  if (age < 5 * 86400000 || age > 45 * 86400000) return false;
+  const touch = Number(touchCount);
+  return Number.isFinite(touch) && touch >= 1 && touch < 3;
+}
+
+export function buildOutreachIdempotencyKey(tenantId: string, prospectId: string, sequenceId: string, touchCount: number): string {
+  const touch = Math.max(1, Math.floor(Number(touchCount) || 1));
+  return `idempotency:${tenantId}:${prospectId}:${sequenceId}:touch:${touch}`;
+}
+
 async function generateAICopy(
   prospect: any, 
   variantId: string, 
@@ -11258,7 +11283,7 @@ export async function sendOrQueueOutreach(prospect: any, runId: string, env: Env
   }
 
   const sequenceId = hasHunter ? env.HUNTER_SEQUENCE_ID!.trim() : (hasResend ? 'resend_live' : 'brevo_live');
-  const idempotencyKey = `idempotency:${tenantId}:${prospect.id}:${sequenceId}`;
+  const idempotencyKey = buildOutreachIdempotencyKey(tenantId, prospect.id, sequenceId, getOutreachTouch(prospect));
 
   // 10. Idempotency Check
   try {
