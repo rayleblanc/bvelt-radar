@@ -144,10 +144,33 @@ export async function readScopedLearningStats(
 ): Promise<Record<string, number>> {
   const tenantId = normalizeScope(mode, tenantIdInput);
   const rates: Record<string, number> = {};
+  // The append-only event log is canonical. Aggregated rows are a rebuildable projection.
   const rows = await db.prepare(`
-    SELECT key, sent_count, contacted_count, replied_count, booked_count, won_count, lost_count
-    FROM learning_stats_scoped
-    WHERE mode = ? AND tenant_id = ? AND (sent_count + contacted_count) >= 2
+    SELECT key,
+      SUM(CASE WHEN event_type = 'sent' THEN 1 ELSE 0 END) AS sent_count,
+      SUM(CASE WHEN event_type = 'contacted' THEN 1 ELSE 0 END) AS contacted_count,
+      SUM(CASE WHEN event_type IN ('won','converted') THEN 1 ELSE 0 END) AS won_count
+    FROM (
+      SELECT mode, tenant_id, 'city:' || city AS key, event_type
+      FROM learning_events WHERE city IS NOT NULL AND city != ''
+      UNION ALL
+      SELECT mode, tenant_id, 'trade:' || lower(trade) AS key, event_type
+      FROM learning_events WHERE trade IS NOT NULL AND trade != ''
+      UNION ALL
+      SELECT mode, tenant_id, 'pair:' || city || '|' || lower(trade) AS key, event_type
+      FROM learning_events WHERE city IS NOT NULL AND city != '' AND trade IS NOT NULL AND trade != ''
+      UNION ALL
+      SELECT mode, tenant_id, 'variant:' || variant_id AS key, event_type
+      FROM learning_events WHERE variant_id IS NOT NULL AND variant_id != ''
+      UNION ALL
+      SELECT mode, tenant_id, 'angle:' || angle AS key, event_type
+      FROM learning_events WHERE angle IS NOT NULL AND angle != ''
+    ) scoped_events
+    WHERE mode = ? AND tenant_id = ?
+    GROUP BY key
+    HAVING
+      SUM(CASE WHEN event_type = 'sent' THEN 1 ELSE 0 END) +
+      SUM(CASE WHEN event_type = 'contacted' THEN 1 ELSE 0 END) >= 2
   `).bind(mode, tenantId).all();
 
   for (const row of (rows?.results || []) as any[]) {
