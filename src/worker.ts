@@ -4231,7 +4231,7 @@ async function handleDecision(
       }
     }
 
-    await recordLearningEvent(db, prospect.city, prospect.trade, prospect.variant_id, false);
+    await recordLearningEvent(db, prospect.city, prospect.trade, prospect.variant_id, false, { event_type: "suppressed", prospect_id: id, mode: prospect.mode, tenant_id: prospect.tenant_id || "founder" });
 
     return Response.json({ success: true, message: `Prospect ${id} fully suppressed.`, id }, { headers });
   }
