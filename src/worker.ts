@@ -12,7 +12,7 @@
  */
 
 import { getAlerts, tradeForEvent, eventAppliesToTrade, WeatherAlert } from './weatherSignals';
-import { dispatchEmail, normalizeOutreachBody, BVELT_SITE, EmailDispatchResult } from './emailDispatcher';
+import { dispatchEmail, normalizeOutreachBody, BVELT_SITE, EmailDispatchResult, inspectOutboundEmailAuth } from './emailDispatcher';
 import { auditDomainSecurityAndMx, auditWebsitePerformance, auditCityWeatherEmergency } from './openAudits';
 import { pickTargets, findPlace, findNearestPlace, formatPlaceLabel, markSearched, placeKey, radiusKm, haversineKm } from './geoFrontier';
 import { sanitizeEmail, sanitizeProspectEmail, isOffIcpName, hasMxRecords } from './emailSanitizer';
@@ -783,7 +783,7 @@ export default {
           let webhookInfo: any = null;
           try {
             const infoRes = await fetch(`https://api.telegram.org/bot${botToken}/getWebhookInfo`, {
-              signal: AbortSignal.timeout(4000)
+              signal: AbortSignal.timeout(15000)
             });
             webhookInfo = await infoRes.json().catch(() => null);
           } catch (e) {}
@@ -921,7 +921,7 @@ export default {
             // First verify bot token with getMe
             try {
               const meRes = await fetch(`https://api.telegram.org/bot${botToken}/getMe`, {
-                signal: AbortSignal.timeout(4000)
+                signal: AbortSignal.timeout(15000)
               });
               botSelfTest = await meRes.json().catch(() => null);
             } catch (e: any) {
@@ -952,7 +952,7 @@ export default {
 
             try {
               const infoRes = await fetch(`https://api.telegram.org/bot${botToken}/getWebhookInfo`, {
-                signal: AbortSignal.timeout(4000)
+                signal: AbortSignal.timeout(15000)
               });
               webhookInfo = await infoRes.json().catch(() => null);
             } catch (e: any) {
@@ -3798,7 +3798,7 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
             text: `👋 <b>¡Hola desde Bvelt Radar!</b>\n\nTu <b>Telegram Chat ID</b> es:\n<code>${chatId}</code>\n\nPara activar el bot y recibir alertas, agrega esta variable en tus Secretos de Cloudflare:\n<code>TELEGRAM_CHAT_ID = ${chatId}</code>`,
             parse_mode: "HTML"
           }),
-          signal: AbortSignal.timeout(4000)
+          signal: AbortSignal.timeout(15000)
         }).catch(e => console.warn("Error sending setup message:", e));
       }
       return Response.json({ ok: true, notice: "TELEGRAM_CHAT_ID not configured" }, { headers });
@@ -3816,7 +3816,7 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
             text: `⚠️ <b>Chat ID no autorizado</b>\n\nTu Telegram Chat ID actual es: <code>${chatId}</code>\nPero en Cloudflare está configurado: <code>${configuredChatId ? configuredChatId.substring(0, 4) + '...' : 'Ninguno'}</code>\n\nSi este es tu chat personal, actualiza en Cloudflare Dashboard:\n<code>TELEGRAM_CHAT_ID = ${chatId}</code>`,
             parse_mode: "HTML"
           }),
-          signal: AbortSignal.timeout(4000)
+          signal: AbortSignal.timeout(15000)
         }).catch(() => {});
       }
       return Response.json({ ok: true, ignored: "Unauthorized Chat ID" }, { headers });
@@ -3854,7 +3854,7 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
               text: `${actionText} (${prospectId.substring(0, 8)})`,
               show_alert: false,
             }),
-            signal: AbortSignal.timeout(4000)
+            signal: AbortSignal.timeout(15000)
           }).catch(e => console.warn("answerCallbackQuery warning: ", e));
 
           let dispatchInfo = "";
@@ -3875,7 +3875,7 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
               text: `<b>${actionText}</b>: ID <code>${escapeHtml(prospectId)}</code> registrado en D1.${dispatchInfo}`,
               parse_mode: "HTML"
             }),
-            signal: AbortSignal.timeout(4000)
+            signal: AbortSignal.timeout(15000)
           }).catch(e => console.warn("sendMessage confirmation warning: ", e));
         }
       } else {
@@ -3888,7 +3888,7 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ callback_query_id: callbackId, text: "📊 Consultando estado...", show_alert: false }),
-              signal: AbortSignal.timeout(4000)
+              signal: AbortSignal.timeout(15000)
             }).catch(() => {});
 
             const provStatus = env.RESEND_API_KEY ? "✅ Resend (3,000/mes gratis)" : env.BREVO_API_KEY ? "✅ Brevo (300/día gratis)" : "⚠️ Simulado (Falta RESEND_API_KEY)";
@@ -3899,7 +3899,7 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ chat_id: chatId, text: statusMsg, parse_mode: "HTML" }),
-              signal: AbortSignal.timeout(4000)
+              signal: AbortSignal.timeout(15000)
             }).catch(() => {});
 
           } else if (lowerAction === "digest" || lowerAction === "resumen" || lowerAction === "oportunidades") {
@@ -3907,7 +3907,7 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ callback_query_id: callbackId, text: "🔍 Cargando oportunidades...", show_alert: false }),
-              signal: AbortSignal.timeout(4000)
+              signal: AbortSignal.timeout(15000)
             }).catch(() => {});
 
             const topOpps = await env.RADAR_DB.prepare(
@@ -3921,7 +3921,7 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ chat_id: chatId, text: "🔍 No hay prospectos pendientes en cola en este momento.", parse_mode: "HTML" }),
-                signal: AbortSignal.timeout(4000)
+                signal: AbortSignal.timeout(15000)
               }).catch(() => {});
             }
 
@@ -3931,7 +3931,7 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ callback_query_id: callbackId, text: `Acción recibida: ${callbackData}` }),
-              signal: AbortSignal.timeout(4000)
+              signal: AbortSignal.timeout(15000)
             }).catch(() => {});
           }
         }
@@ -3955,6 +3955,8 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
           recipientName: "Bvelt Founder Test",
           subject: "Bvelt email delivery check",
           body: `Hello,\n\nYou requested an email delivery check from Bvelt Radar. Provider: ${env.RESEND_API_KEY ? "Resend" : env.BREVO_API_KEY ? "Brevo" : "simulated"}.\n\nNo action is required.\n\nSent at: ${new Date().toISOString()}`,
+          includeSiteLink: false,
+          plainTextOnly: true,
           from: env.OUTBOUND_EMAIL_FROM,
           resendApiKey: env.RESEND_API_KEY,
           brevoApiKey: env.BREVO_API_KEY,
@@ -3974,9 +3976,23 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ chat_id: chatId, text: replyMsg, parse_mode: "HTML" }),
-          signal: AbortSignal.timeout(4000)
+          signal: AbortSignal.timeout(15000)
         }).catch(() => {});
 
+      } else if (command === "/emailstatus" || command === "emailstatus" || command === "/mailstatus") {
+        const auth = await inspectOutboundEmailAuth(env.OUTBOUND_EMAIL_FROM, env.RESEND_API_KEY);
+        const report = [
+          "<b>📨 Bvelt outbound email authentication</b>",
+          `<b>Sender:</b> <code>${escapeHtml(auth.sender || "invalid")}</code>`,
+          `<b>Resend domain:</b> <code>${escapeHtml(auth.resendDomainStatus)}</code>`,
+          `<b>DKIM:</b> ${auth.dkimPresent ? "present" : "MISSING"}`,
+          `<b>SPF (send subdomain):</b> ${auth.spfPresent ? "present" : "MISSING"}`,
+          `<b>Return-path MX:</b> ${auth.returnPathMxPresent ? "present" : "MISSING"}`,
+          `<b>DMARC:</b> ${auth.dmarcPresent ? escapeHtml(auth.dmarcPolicy) : "MISSING"}`,
+          ...auth.resendRecordStatuses.map(item => `• ${escapeHtml(item)}`),
+          ...auth.errors.map(item => `⚠️ ${escapeHtml(item)}`)
+        ].join("\\n");
+        await notifyFounder(env, report);
       } else if (command === "/status" || command === "status" || command === "/estado" || command === "estado") {
         const provStatus = env.RESEND_API_KEY ? "✅ Resend (3,000/mes gratis)" : env.BREVO_API_KEY ? "✅ Brevo (300/día gratis)" : "⚠️ Simulado (Falta RESEND_API_KEY)";
         const webhookStatus = env.TELEGRAM_WEBHOOK_SECRET ? "🔒 Protegido con Secret Token" : "⚡ Activo (validación por Chat ID)";
@@ -3985,7 +4001,7 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ chat_id: chatId, text: statusMsg, parse_mode: "HTML" }),
-          signal: AbortSignal.timeout(4000)
+          signal: AbortSignal.timeout(15000)
         }).catch(() => {});
 
       } else if (command === "/digest" || command === "digest" || command === "/resumen" || command === "resumen") {
@@ -4000,7 +4016,7 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ chat_id: chatId, text: "🔍 No hay prospectos pendientes en cola en este momento.", parse_mode: "HTML" }),
-            signal: AbortSignal.timeout(4000)
+            signal: AbortSignal.timeout(15000)
           }).catch(() => {});
         }
 
@@ -4010,28 +4026,28 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ chat_id: chatId, text: idMsg, parse_mode: "HTML" }),
-          signal: AbortSignal.timeout(4000)
+          signal: AbortSignal.timeout(15000)
         }).catch(() => {});
 
       } else if (command === "/start" || command === "start" || command === "/help" || command === "help" || command === "/ayuda" || command === "ayuda" || command === "hola" || command === "hi" || command === "hey") {
         const provStatus = env.RESEND_API_KEY ? "✅ Resend Activo" : env.BREVO_API_KEY ? "✅ Brevo Activo" : "⚠️ Simulado (Configura RESEND_API_KEY)";
-        const helpMsg = `🤖 <b>Bvelt Radar Founder Bot</b>\n\n¡Bot conectado y listo para interactuar!\n\n<b>Comandos disponibles:</b>\n• /status - Ver cuotas y estado de proveedores\n• /digest - Enviar las 3 mejores oportunidades con botones para aprobar\n• /testmail &lt;correo&gt; - Enviar email de prueba inmediato\n• /id - Ver tu Telegram Chat ID\n• /help - Mostrar este menú\n\n<b>Email Outbound:</b> ${provStatus}`;
+        const helpMsg = `🤖 <b>Bvelt Radar Founder Bot</b>\n\n¡Bot conectado y listo para interactuar!\n\n<b>Comandos disponibles:</b>\n• /status - Ver cuotas y estado de proveedores\n• /digest - Enviar las 3 mejores oportunidades con botones para aprobar\n• /testmail &lt;correo&gt; - Enviar email de prueba inmediato\n• /emailstatus - Comprobar SPF, DKIM, DMARC y Resend\n• /id - Ver tu Telegram Chat ID\n• /help - Mostrar este menú\n\n<b>Email Outbound:</b> ${provStatus}`;
         await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ chat_id: chatId, text: helpMsg, parse_mode: "HTML" }),
-          signal: AbortSignal.timeout(4000)
+          signal: AbortSignal.timeout(15000)
         }).catch(() => {});
 
       } else {
         // Fallback for ANY OTHER free text message so the bot NEVER stays silent
         const snippet = msgText.length > 60 ? msgText.substring(0, 60) + "..." : msgText;
-        const fallbackMsg = `🤖 <b>Bvelt Radar Founder Bot</b>\n\nRecibí tu mensaje: <i>"${escapeHtml(snippet)}"</i>\n\n<b>Comandos disponibles:</b>\n• /status - Ver estado del sistema\n• /digest - Ver oportunidades pendientes de aprobación\n• /testmail &lt;correo&gt; - Probar envío de email\n• /help - Ayuda y comandos\n• /id - Ver tu Telegram Chat ID`;
+        const fallbackMsg = `🤖 <b>Bvelt Radar Founder Bot</b>\n\nRecibí tu mensaje: <i>"${escapeHtml(snippet)}"</i>\n\n<b>Comandos disponibles:</b>\n• /status - Ver estado del sistema\n• /digest - Ver oportunidades pendientes de aprobación\n• /testmail &lt;correo&gt; - Probar envío de email\n• /emailstatus - Diagnóstico de autenticación de correo\n• /help - Ayuda y comandos\n• /id - Ver tu Telegram Chat ID`;
         await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ chat_id: chatId, text: fallbackMsg, parse_mode: "HTML" }),
-          signal: AbortSignal.timeout(4000)
+          signal: AbortSignal.timeout(15000)
         }).catch(() => {});
       }
     }
@@ -7020,7 +7036,7 @@ export async function handleProspectEvent(
               text: `👀 *PROSPECT CLICKED DEMO / LINK!*\n\n*Business:* ${escapeMarkdown(prospect.name)}\n*City:* ${escapeMarkdown(prospect.city)}\n*Trade:* ${escapeMarkdown(prospect.trade)}\n*Email:* ${escapeMarkdown(prospect.email || "N/A")}\n\n🔥 _El contratista hizo click en el enlace / demo de Bvelt._`,
               parse_mode: "Markdown"
             }),
-            signal: AbortSignal.timeout(4000)
+            signal: AbortSignal.timeout(15000)
           });
         } catch (e) {}
       }
@@ -7078,7 +7094,7 @@ export async function handleProspectEvent(
               text: `🔥 *POSITIVE RESPONSE DETECTED!*\n\n*Business:* ${escapeMarkdown(prospect.name)}\n*City:* ${escapeMarkdown(prospect.city)}\n*Trade:* ${escapeMarkdown(prospect.trade)}\n*Email:* ${escapeMarkdown(prospect.email || "N/A")}\n\n*Message:* "${escapeMarkdown(params.content || "Interested")}"\n\n⚠️ _Automation STOPPED. Requires human follow-up._`,
               parse_mode: "Markdown"
             }),
-            signal: AbortSignal.timeout(4000)
+            signal: AbortSignal.timeout(15000)
           });
         } catch (e) {}
       }
@@ -7098,7 +7114,7 @@ export async function handleProspectEvent(
               text: `❓ *PROSPECT QUESTION DETECTED!*\n\n*Business:* ${escapeMarkdown(prospect.name)}\n*City:* ${escapeMarkdown(prospect.city)}\n*Trade:* ${escapeMarkdown(prospect.trade)}\n*Email:* ${escapeMarkdown(prospect.email || "N/A")}\n\n*Question:* "${escapeMarkdown(params.content || "Inquiry")}"\n\n⚠️ _Automation STOPPED. Requires human answer._`,
               parse_mode: "Markdown"
             }),
-            signal: AbortSignal.timeout(4000)
+            signal: AbortSignal.timeout(15000)
           });
         } catch (e) {}
       }
