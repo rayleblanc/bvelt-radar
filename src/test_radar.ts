@@ -3,6 +3,7 @@ declare const process: any;
 import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, resolveTenantBuyerSegments } from './worker';
 import { DEFAULT_FOUNDER_MISSION, MissionConfig } from './worker';
 import { fetchPermitContractors } from './permitSources';
+import { pickTargets } from './geoFrontier';
 import { learningCounterDelta, readScopedLearningStats, recordScopedLearningEvent } from './learningIntegrity';
 
 console.log("=========================================");
@@ -143,6 +144,25 @@ tests.push({
 
     const rates = await readScopedLearningStats(mockDb, "tenant", "tenant_alpha");
     assert(Math.abs(rates["trade:plumbing"] - (2 / 6)) < 0.0001, "Win rate must use four unique contacted prospects, including lost/booked outcomes");
+  }
+});
+
+tests.push({
+  name: "Founder targeting fails closed without configured markets and niches",
+  run: async () => {
+    const targets = await getPriorityTargets(1, {} as any, "founder", null);
+    assert(targets.activeCities.length === 0, "Founder must not invent default cities");
+    assert(targets.activeTrades.length === 0, "Founder must not invent default trades");
+    assert(targets.missionConfig.countries.length === 0, "Founder must not silently default to US/CA");
+    assert(DEFAULT_FOUNDER_MISSION.geographies.length === 0 && DEFAULT_FOUNDER_MISSION.niches.length === 0, "Default Founder mission must remain neutral");
+
+    const picks = await pickTargets({} as any, {
+      tenantId: "founder",
+      trades: [],
+      count: 5,
+      countries: []
+    });
+    assert(picks.length === 0, "GeoFrontier must return no targets without explicit countries and trades");
   }
 });
 
