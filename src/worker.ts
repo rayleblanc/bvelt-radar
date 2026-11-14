@@ -4190,6 +4190,18 @@ async function handleDecision(
   };
 
   if (action === "sent" || action === "approve") {
+    if (!prospect.email || !String(prospect.email).includes("@")) {
+      await db.prepare("UPDATE prospects SET status = 'hold', outcome = 'approved_but_no_valid_email', updated_at = ? WHERE id = ?")
+        .bind(timestamp, id).run();
+      return Response.json({
+        success: false,
+        blocked: true,
+        reason: "prospect_email_missing",
+        message: "Prospect approval recorded, but no valid recipient email exists. No message was sent.",
+        id
+      }, { status: 409, headers });
+    }
+
     // Mandatory Trust-Stack Governor Firewall Gate Check
     const gate = await verifyTrustStackGate(prospect, 'manual_send', env);
     if (!gate.allowed) {
