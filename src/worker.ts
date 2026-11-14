@@ -1065,7 +1065,7 @@ export default {
       const isTenantScopedRequest =
         ((method === "GET" || method === "POST") && ["/api/tenants/config", "/tenants/config"].includes(path)) ||
         (method === "POST" && ["/api/tenants/search", "/tenants/search", "/api/bvelt/bootstrap", "/bvelt/bootstrap", "/api/prospects/outcome", "/prospects/outcome"].includes(path)) ||
-        (method === "GET" && ["/api/tenants/leads.csv", "/tenants/leads.csv", "/api/bvelt/leads", "/bvelt/leads"].includes(path));
+        (method === "GET" && ["/api/tenants/leads.csv", "/tenants/leads.csv", "/api/tenants/roi", "/tenants/roi", "/api/bvelt/leads", "/bvelt/leads"].includes(path));
 
       if (isResearchCallbackPath) {
         if (!isSidecarCallbackAuthorized(request, env)) {
