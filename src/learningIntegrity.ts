@@ -106,6 +106,8 @@ export async function recordScopedLearningEvent(
     if (input.variantId) keys.add(`variant:${input.variantId}`);
     if (input.angle) keys.add(`angle:${input.angle}`);
 
+    // Prefer EXISTS(event id) over changes(): D1 batch change-count semantics vary,
+    // and an extra unused bind previously broke aggregate statements.
     const statements = [
       db
         .prepare(
@@ -134,9 +136,6 @@ export async function recordScopedLearningEvent(
         ),
     ];
 
-    // D1 batch statements run sequentially: changes() gates each aggregate on the
-    // immediately preceding insert/update. Duplicate INSERT OR IGNORE retries
-    // yield zero and keep the rest of the aggregate chain closed.
     for (const key of keys) {
       statements.push(
         db
@@ -149,7 +148,7 @@ export async function recordScopedLearningEvent(
         unknown_count, total_events, updated_at
       )
       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-      WHERE changes() = 1
+      WHERE EXISTS (SELECT 1 FROM learning_events WHERE id = ?)
       ON CONFLICT(mode, tenant_id, key) DO UPDATE SET
         sent_count = sent_count + excluded.sent_count,
         delivered_count = delivered_count + excluded.delivered_count,
@@ -193,8 +192,6 @@ export async function recordScopedLearningEvent(
     const results = await db.batch(statements);
     return Number(results?.[0]?.meta?.changes || 0) > 0;
   } catch (err: any) {
-    // Tables may not exist until migrations 0023/0024 are applied.
-    // Never take down outreach / decision paths for learning storage failures.
     console.warn("[learningIntegrity] recordScopedLearningEvent skipped:", err?.message || err);
     return false;
   }
@@ -217,16 +214,13 @@ export async function readScopedLearningStats(
       booked_count, won_count, lost_count
     FROM learning_stats_scoped
     WHERE mode = ? AND tenant_id = ?
-      AND MAX(sent_count, contacted_count, replied_count, qualified_count, booked_count, won_count, lost_count) >= 2
+      AND (sent_count + contacted_count + replied_count + qualified_count + booked_count + won_count + lost_count) >= 2
   `
       )
       .bind(mode, tenantId)
       .all();
 
     for (const row of (rows?.results || []) as any[]) {
-      // Tenant CRM confirms contact attempts manually; use the furthest observed
-      // funnel count as denominator so replied/won feedback can train Tenant mode
-      // even when Radar itself did not send the message.
       const attempts = Math.max(
         Number(row.sent_count || 0),
         Number(row.contacted_count || 0),
@@ -234,7 +228,8 @@ export async function readScopedLearningStats(
         Number(row.qualified_count || 0),
         Number(row.booked_count || 0),
         Number(row.won_count || 0),
-        Number(row.lost_count || 0)
+        Number(row.lost_count || 0),
+        1
       );
       const won = Math.min(attempts, Number(row.won_count || 0));
       rates[String(row.key)] = (won + 1) / (attempts + 2);
