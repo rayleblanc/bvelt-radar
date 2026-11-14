@@ -27,6 +27,17 @@ export interface EmailDispatchOptions {
   logoUrl?: string;
 }
 
+export function resolveBveltSender(raw?: string): { email: string; from: string } | null {
+  const value = String(raw || '').trim();
+  if (!value) return null;
+  const match = value.match(/^(.*?)\s*<([^<>]+)>$/);
+  const displayName = match?.[1]?.trim().replace(/[<>\r\n]/g, '') || 'Bvelt';
+  const candidate = (match?.[2] || value).trim();
+  const parsed = sanitizeEmail(candidate);
+  if (!parsed.valid || !parsed.email || parsed.email.split('@')[1] !== 'bvelt.app') return null;
+  return { email: parsed.email, from: `${displayName} <${parsed.email}>` };
+}
+
 export function buildResendIdempotencyKey(prospectId: string, touchCount = 1): string {
   const touch = Math.max(1, Math.floor(Number(touchCount) || 1));
   return `send-prospect/${prospectId}/touch/${touch}`.substring(0, 256);
@@ -106,6 +117,18 @@ export async function dispatchEmail(options: EmailDispatchOptions): Promise<Emai
     };
   }
 
+  const sender = resolveBveltSender(options.from);
+  const provider = options.resendApiKey?.trim() ? 'resend' : options.brevoApiKey?.trim() ? 'brevo' : 'simulated';
+  if (provider !== 'simulated' && !sender) {
+    return {
+      success: false,
+      provider,
+      messageId: '',
+      status: 'failed',
+      error: 'Unverified sender configuration. Set OUTBOUND_EMAIL_FROM to an authenticated @bvelt.app address; sending was blocked.',
+    };
+  }
+
   const subject = (options.subject || 'Quick question from Bvelt').trim();
   const body = normalizeOutreachBody(options.body || '');
   const senderName = options.senderName || 'Rainer — Bvelt';
@@ -113,10 +136,7 @@ export async function dispatchEmail(options: EmailDispatchOptions): Promise<Emai
 
   if (options.resendApiKey && options.resendApiKey.trim()) {
     try {
-      const fromAddress =
-        options.from && options.from.includes('@')
-          ? options.from.trim()
-          : `${senderName} <onboarding@resend.dev>`;
+      const fromAddress = sender!.from;
 
       const payload: Record<string, unknown> = {
         from: fromAddress,
@@ -173,10 +193,7 @@ export async function dispatchEmail(options: EmailDispatchOptions): Promise<Emai
 
   if (options.brevoApiKey && options.brevoApiKey.trim()) {
     try {
-      const fromEmail =
-        options.from && options.from.includes('@')
-          ? options.from.replace(/.*</, '').replace(/>.*/, '').trim()
-          : 'noreply@bvelt.app';
+      const fromEmail = sender!.email;
 
       const res = await fetch('https://api.brevo.com/v3/smtp/email', {
         method: 'POST',

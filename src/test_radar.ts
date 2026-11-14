@@ -1,11 +1,11 @@
 declare const process: any;
 
-import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, resolveTenantBuyerSegments, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey, notifyOnce, isVerifiedDeliverableEmail } from './worker';
+import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, resolveTenantBuyerSegments, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey, notifyOnce, isVerifiedDeliverableEmail, evaluateFounderOutreachEligibility } from './worker';
 import { DEFAULT_FOUNDER_MISSION, MissionConfig } from './worker';
-import { buildResendIdempotencyKey, buildBrandedEmailHtml } from './emailDispatcher';
+import { buildResendIdempotencyKey, buildBrandedEmailHtml, resolveBveltSender } from './emailDispatcher';
 import { fetchPermitContractors } from './permitSources';
 import { pickTargets } from './geoFrontier';
-import { isOffIcpName } from './emailSanitizer';
+import { isOffIcpName, sanitizeEmail } from './emailSanitizer';
 import { learningCounterDelta, readScopedLearningStats, recordScopedLearningEvent } from './learningIntegrity';
 
 console.log("=========================================");
@@ -256,6 +256,20 @@ tests.push({
 });
 
 tests.push({
+  name: "Outbound mail rejects placeholder recipients and unaligned sender domains",
+  run: () => {
+    assert(!sanitizeEmail("example@mail.com").valid, "Placeholder local part must be rejected");
+    assert(!sanitizeEmail("owner@example.com").valid, "Reserved example domains must be rejected");
+    assert(sanitizeEmail("owner@realbusiness.com").valid, "Real business email syntax remains eligible");
+    const sender = resolveBveltSender("Bvelt <bvelt@bvelt.app>");
+    assert(sender?.email === "bvelt@bvelt.app", "Authenticated Bvelt sender must be accepted");
+    assert(!resolveBveltSender("Bvelt <onboarding@resend.dev>"), "Resend shared onboarding sender must be rejected");
+    assert(!resolveBveltSender("Bvelt <founder@gmail.com>"), "Unaligned external sender must be rejected");
+    assert(!resolveBveltSender(""), "Missing sender must fail closed");
+  }
+});
+
+tests.push({
   name: "Founder follow-ups enforce contact spacing, reply stop, and three-touch cap",
   run: async () => {
     const now = Date.parse("2026-11-14T12:00:00.000Z");
@@ -270,6 +284,15 @@ tests.push({
     assert(resolveOutreachTouchCount(1, 5) === 5, "Historical provider messages must override missing legacy touch metadata");
     assert(buildOutreachIdempotencyKey("founder", "p1", "resend_live", 1) !== buildOutreachIdempotencyKey("founder", "p1", "resend_live", 2), "Each touch needs its own D1 idempotency key");
     assert(buildResendIdempotencyKey("p1", 1) !== buildResendIdempotencyKey("p1", 2), "Each touch needs its own Resend idempotency key");
+    assert(evaluateFounderOutreachEligibility("qualified", null, 0, null, null, null, now).allowed, "A new prospect can receive its first touch");
+    assert(!evaluateFounderOutreachEligibility("delivered", null, 2, "2026-11-14T11:00:00.000Z", "2026-11-14T11:00:00.000Z", null, now).allowed, "A recent prior message blocks a duplicate");
+    assert(evaluateFounderOutreachEligibility("delivered", null, 1, fiveDaysAgo, fiveDaysAgo, null, now).nextTouch === 2, "A follow-up after five days is touch two");
+    assert(!evaluateFounderOutreachEligibility("delivered", null, 3, fiveDaysAgo, fiveDaysAgo, null, now).allowed, "Three historical touches block any more email");
+    assert(!evaluateFounderOutreachEligibility("delivered", "Thanks, received.", 1, fiveDaysAgo, fiveDaysAgo, null, now).allowed, "Actual reply content stops future outreach");
+    assert(!evaluateFounderOutreachEligibility("bounced", null, 1, fiveDaysAgo, fiveDaysAgo, null, now).allowed, "Bounced prospects are terminal");
+    assert(!evaluateFounderOutreachEligibility("delivered", null, 1, fiveDaysAgo, fiveDaysAgo, "2026-11-20T12:00:00.000Z", now).allowed, "Existing cooldowns are respected");
+    assert(!evaluateFounderOutreachEligibility("sent", null, 0, null, null, null, now).allowed, "Sent state without reliable send history must not resend");
+    assert(!evaluateFounderOutreachEligibility("delivered", null, 1, "2026-09-01T12:00:00.000Z", "2026-09-01T12:00:00.000Z", null, now).allowed, "Expired follow-up window must not send");
   }
 });
 

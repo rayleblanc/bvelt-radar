@@ -3132,7 +3132,7 @@ export default {
           SELECT id FROM prospects
           WHERE COALESCE(NULLIF(TRIM(tenant_id),''),'founder') = 'founder'
             AND lower(status) IN ('sent','delivered','opened','clicked')
-            AND (last_reply_at IS NULL OR TRIM(last_reply_at) = '')
+            AND (last_reply_content IS NULL OR TRIM(last_reply_content) = '')
             AND last_contact_at IS NOT NULL
             AND last_contact_at <= datetime('now', '-5 days')
             AND last_contact_at >= datetime('now', '-45 days')
@@ -6643,7 +6643,7 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
     if (["sent", "delivered", "opened", "clicked"].includes(st)) {
       const history = await env.RADAR_DB.prepare("SELECT COUNT(DISTINCT message_id) AS touch_count FROM email_dispatch_logs WHERE prospect_id = ?").bind(prospect.id).first() as any;
       const effectiveTouch = resolveOutreachTouchCount(touchNow, history?.touch_count);
-      if (!shouldSendFounderFollowUp(st, prospect.last_contact_at, prospect.last_reply_at, effectiveTouch)) return;
+      if (!shouldSendFounderFollowUp(st, prospect.last_contact_at, prospect.last_reply_content, effectiveTouch)) return;
       prospect.signals_json = JSON.stringify({
         ...((): any => { try { return JSON.parse(prospect.signals_json || "{}"); } catch { return {}; } })(),
         outreach_touch: effectiveTouch + 1,
@@ -6953,6 +6953,7 @@ export async function handleProspectEvent(
 ): Promise<{ success: boolean; prospect_id: string; classification: ReplyClassificationType; auto_stopped: boolean; message: string }> {
   const db = env.RADAR_DB;
   const timestamp = new Date().toISOString();
+  const replyAt = params.content && String(params.content).trim() ? timestamp : null;
 
   let prospect: any = null;
   if (params.prospect_id) {
@@ -7135,7 +7136,7 @@ export async function handleProspectEvent(
         outcome = ?,
         response_type = ?,
         last_reply_content = ?,
-        last_reply_at = ?,
+        last_reply_at = COALESCE(?, last_reply_at),
         cooldown_until = ?,
         updated_at = ?
     WHERE id = ?
@@ -7143,8 +7144,8 @@ export async function handleProspectEvent(
     newStatus,
     newOutcome,
     classification,
-    params.content || null,
-    timestamp,
+    params.content && String(params.content).trim() ? params.content : null,
+    replyAt,
     cooldownUntil,
     timestamp,
     prospect.id
@@ -9445,10 +9446,61 @@ export function resolveOutreachTouchCount(signalTouch: unknown, historicalTouchC
   return Math.max(1, Number.isFinite(signal) ? Math.floor(signal) : 1, Number.isFinite(historical) ? Math.floor(historical) : 1);
 }
 
-export function shouldSendFounderFollowUp(status: string, lastContactAt: string | null, lastReplyAt: string | null, touchCount: number, now = Date.now()): boolean {
+export function evaluateFounderOutreachEligibility(
+  status: string,
+  lastReplyContent: string | null,
+  historicalTouchCount: unknown,
+  lastSendAt: string | null,
+  lastContactAt: string | null,
+  cooldownUntil: string | null,
+  now = Date.now()
+): { allowed: boolean; reason: string; nextTouch: number } {
+  const state = String(status || "").toLowerCase();
+  if (["bounced", "unsubscribed", "complained", "suppressed", "replied", "blocked"].includes(state)) return { allowed: false, reason: "terminal_contact_state", nextTouch: 0 };
+  if (lastReplyContent && String(lastReplyContent).trim()) return { allowed: false, reason: "reply_received", nextTouch: 0 };
+  const touches = Math.max(0, Math.floor(Number(historicalTouchCount) || 0));
+  if (touches >= 3) return { allowed: false, reason: "three_touch_cap_reached", nextTouch: 0 };
+  const cooldown = Date.parse(String(cooldownUntil || ""));
+  if (Number.isFinite(cooldown) && cooldown > now) return { allowed: false, reason: "cooldown_active", nextTouch: 0 };
+  const contactStates = ["sent", "delivered", "opened", "clicked", "scheduled"];
+  if (contactStates.includes(state) && touches === 0 && !lastContactAt) return { allowed: false, reason: "last_send_unknown", nextTouch: 0 };
+  if (touches > 0 || (lastContactAt && contactStates.includes(state))) {
+    const raw = String(lastSendAt || lastContactAt || "").trim();
+    if (!raw) return { allowed: false, reason: "last_send_unknown", nextTouch: 0 };
+    const parsed = Date.parse(raw.includes("T") ? raw : raw.replace(" ", "T") + "Z");
+    if (!Number.isFinite(parsed)) return { allowed: false, reason: "last_send_invalid", nextTouch: 0 };
+    const age = now - parsed;
+    if (age < 5 * 86400000) return { allowed: false, reason: "five_day_contact_cooldown", nextTouch: 0 };
+    if (age > 45 * 86400000) return { allowed: false, reason: "followup_window_expired", nextTouch: 0 };
+  }
+  return { allowed: true, reason: "eligible", nextTouch: touches + 1 };
+}
+
+export async function getFounderOutreachEligibility(db: D1Database, prospect: any, now = Date.now()) {
+  if (String(prospect.mode || "").toLowerCase() === "tenant") {
+    return { allowed: true, reason: "tenant_policy", nextTouch: getOutreachTouch(prospect) };
+  }
+  const history = await db.prepare(
+    "SELECT COUNT(DISTINCT message_id) AS touch_count, MAX(created_at) AS last_send_at FROM email_dispatch_logs WHERE prospect_id = ? AND message_id IS NOT NULL"
+  ).bind(prospect.id).first() as any;
+  const state = String(prospect.status || "").toLowerCase();
+  const fallbackTouch = prospect.last_contact_at && ["sent", "delivered", "opened", "clicked", "scheduled"].includes(state) ? 1 : 0;
+  const touches = Math.max(Number(history?.touch_count || 0), fallbackTouch);
+  return evaluateFounderOutreachEligibility(
+    state,
+    prospect.last_reply_content || null,
+    touches,
+    history?.last_send_at || null,
+    prospect.last_contact_at || null,
+    prospect.cooldown_until || null,
+    now
+  );
+}
+
+export function shouldSendFounderFollowUp(status: string, lastContactAt: string | null, lastReplyContent: string | null, touchCount: number, now = Date.now()): boolean {
   const state = String(status || "").toLowerCase();
   if (!["sent", "delivered", "opened", "clicked"].includes(state)) return false;
-  if (lastReplyAt && String(lastReplyAt).trim()) return false;
+  if (lastReplyContent && String(lastReplyContent).trim()) return false;
   const raw = String(lastContactAt || "").trim();
   if (!raw) return false;
   const parsed = Date.parse(raw.includes("T") ? raw : raw.replace(" ", "T") + "Z");
@@ -10572,7 +10624,7 @@ export async function notifyFounder(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(15000)
+      signal: AbortSignal.timeout(20000)
     });
 
     const data: any = await res.json().catch(() => ({ ok: false, description: `HTTP ${res.status}: Failed to parse JSON` }));
@@ -11297,6 +11349,11 @@ export async function sendOrQueueOutreach(prospect: any, runId: string, env: Env
 
   // 8. Budget check: Reserve outreach unit from authoritative Daily Budget Governor
   const tenantId = prospect.tenant_id || "founder";
+  const founderEligibility = await getFounderOutreachEligibility(env.RADAR_DB, prospect);
+  if (!founderEligibility.allowed) {
+    return { success: false, reason: "FOUNDER_OUTREACH_GUARD: " + founderEligibility.reason };
+  }
+  const nextTouch = founderEligibility.nextTouch;
   const outreachReserved = await reserveBudget(env.RADAR_DB, tenantId, 'outreach_units', 1);
   if (!outreachReserved) {
     await env.RADAR_DB.prepare("UPDATE prospects SET status = 'held', outcome = 'outreach_budget_limit_exceeded', updated_at = ? WHERE id = ?")
@@ -11328,7 +11385,7 @@ export async function sendOrQueueOutreach(prospect: any, runId: string, env: Env
   }
 
   const sequenceId = hasHunter ? env.HUNTER_SEQUENCE_ID!.trim() : (hasResend ? 'resend_live' : 'brevo_live');
-  const idempotencyKey = buildOutreachIdempotencyKey(tenantId, prospect.id, sequenceId, getOutreachTouch(prospect));
+  const idempotencyKey = buildOutreachIdempotencyKey(tenantId, prospect.id, sequenceId, nextTouch);
 
   // 10. Idempotency Check
   try {
@@ -11370,7 +11427,7 @@ export async function sendOrQueueOutreach(prospect: any, runId: string, env: Env
       body: prospect.draft_body,
       from: env.OUTBOUND_EMAIL_FROM,
       prospectId: prospect.id,
-      touchCount: getOutreachTouch(prospect),
+      touchCount: nextTouch,
       resendApiKey: env.RESEND_API_KEY,
       brevoApiKey: env.BREVO_API_KEY,
       senderName: env.SENDER_NAME
