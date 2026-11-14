@@ -4142,13 +4142,14 @@ async function handleDecision(
   if (action === "sent" || action === "approve") {
     const manualEligibility = await getFounderOutreachEligibility(db, prospect);
     if (!manualEligibility.allowed) return Response.json({ success: false, blocked: true, reason: manualEligibility.reason, id }, { status: 409, headers });
+    const manualSuppression = await checkSuppressedComposite(db, prospect.email, prospect.website, prospect.phone, prospect.name, prospect.city, prospect.tenant_id || "founder");
+    if (manualSuppression) return Response.json({ success: false, blocked: true, reason: "suppressed: " + manualSuppression.reason, id }, { status: 409, headers });
     const manualSequenceId = env.RESEND_API_KEY ? "resend_live" : env.BREVO_API_KEY ? "brevo_live" : "manual_simulated";
     const manualIdempotencyKey = buildOutreachIdempotencyKey(prospect.tenant_id || "founder", prospect.id, manualSequenceId, manualEligibility.nextTouch);
     const existingManual = await db.prepare("SELECT status FROM outreach_idempotency WHERE idempotency_key = ?").bind(manualIdempotencyKey).first() as any;
     if (existingManual && ["reserved", "sent", "scheduled", "queued"].includes(String(existingManual.status || "").toLowerCase())) {
       return Response.json({ success: false, blocked: true, reason: "already_processed_for_this_touch", id }, { status: 409, headers });
     }
-    await db.prepare("INSERT OR REPLACE INTO outreach_idempotency (idempotency_key, prospect_id, tenant_id, email, status, created_at, updated_at) VALUES (?, ?, ?, ?, 'reserved', ?, ?)").bind(manualIdempotencyKey, prospect.id, prospect.tenant_id || "founder", prospect.email || "", timestamp, timestamp).run();
     // Mandatory Trust-Stack Governor Firewall Gate Check
     const gate = await verifyTrustStackGate(prospect, 'manual_send', env);
     if (!gate.allowed) {
@@ -4187,6 +4188,8 @@ async function handleDecision(
         }, { status: 400, headers });
       }
 
+      const manualReservation = await db.prepare("INSERT OR IGNORE INTO outreach_idempotency (idempotency_key, prospect_id, tenant_id, email, status, created_at, updated_at) VALUES (?, ?, ?, ?, 'reserved', ?, ?)").bind(manualIdempotencyKey, prospect.id, prospect.tenant_id || "founder", prospect.email || "", timestamp, timestamp).run() as any;
+      if (!(manualReservation?.meta?.changes > 0)) return Response.json({ success: false, blocked: true, reason: "outreach_reservation_conflict", id }, { status: 409, headers });
       dispatchOutcome = await dispatchEmail({
         to: prospect.email,
         recipientName: prospect.name,
@@ -9488,7 +9491,7 @@ export async function getFounderOutreachEligibility(db: D1Database, prospect: an
   if (String(prospect.mode || "").toLowerCase() === "tenant") return { allowed: true, reason: "tenant_policy", nextTouch: getOutreachTouch(prospect) };
   const history = await db.prepare("SELECT COUNT(DISTINCT message_id) AS touch_count, MAX(created_at) AS last_send_at FROM email_dispatch_logs WHERE prospect_id = ? AND message_id IS NOT NULL").bind(prospect.id).first() as any;
   const state = String(prospect.status || "").toLowerCase();
-  const fallbackTouch = prospect.last_contact_at && ["sent", "delivered", "opened", "clicked", "scheduled"].includes(state) ? 1 : 0;
+  const fallbackTouch = prospect.last_contact_at ? 1 : 0;
   const touches = Math.max(Number(history?.touch_count || 0), fallbackTouch);
   return evaluateFounderOutreachEligibility(state, prospect.last_reply_content || null, touches, history?.last_send_at || null, prospect.last_contact_at || null, prospect.cooldown_until || null, now);
 }
