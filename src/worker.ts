@@ -4703,7 +4703,7 @@ export async function bootstrapBveltTenant(
     } catch { /* ok */ }
   }
 
-  const pendingBuyerIcp = niches.length === 0 || runId === "no_buyer_segments";
+  const pendingBuyerIcp = niches.length === 0 && (!runId || runId === "no_buyer_segments" || runId === "no_targets");
   return {
     success: true,
     status: pendingBuyerIcp ? "pending_configuration" : "active",
