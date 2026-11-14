@@ -5432,9 +5432,8 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
 
     // Descartes baratos ANTES de reservar presupuesto (evita 3 escrituras a D1 por cada candidato que se rechaza)
     const preName = (candidate.name || "").toLowerCase();
-    const allowGym = job.mode === 'tenant';
-    const EXTRA_SYNTACTIC_ICP_EXCLUSION = /\b(store|shop|market|pet|nails|hair|grocery|florist|boutique)\b/i;
-    if (isOffIcpName(candidate.name, allowGym) || EXTRA_SYNTACTIC_ICP_EXCLUSION.test(candidate.name)) {
+    const allowTenantBuyer = job.mode === 'tenant';
+    if (isOffIcpName(candidate.name, allowTenantBuyer)) {
       console.log(`[ICP Gate: Discarded] "${candidate.name}" matched off-ICP exclusion in handleDiscoveryJob`);
       filteredCount++;
       continue;
