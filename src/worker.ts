@@ -2266,12 +2266,25 @@ export default {
           return Response.json({ error: "value_usd must be a finite non-negative number" }, { status: 400, headers: corsHeaders });
         }
 
+        const terminalOutcomes = ["won", "lost"];
+        const currentOutcome = String(prospect.tenant_outcome || "").toLowerCase();
+        if (terminalOutcomes.includes(currentOutcome) && currentOutcome !== outcome) {
+          return Response.json({ error: "A terminal outcome cannot be overwritten; submit a reviewed correction instead." }, { status: 409, headers: corsHeaders });
+        }
+        const effectiveWonValue = outcome === "won"
+          ? (parsedValue ?? (prospect.won_value_usd == null ? null : Number(prospect.won_value_usd)))
+          : null;
+        if (outcome === "won" && currentOutcome === "won" &&
+            (prospect.won_value_usd ?? null) !== effectiveWonValue) {
+          return Response.json({ error: "The recorded won value is immutable; use a reviewed correction." }, { status: 409, headers: corsHeaders });
+        }
+
         const timestamp = new Date().toISOString();
         await env.RADAR_DB.prepare(
           "UPDATE prospects SET tenant_outcome = ?, won_value_usd = CASE WHEN ? = 'won' THEN COALESCE(?, won_value_usd) ELSE won_value_usd END, updated_at = ? WHERE id = ? AND mode = 'tenant' AND tenant_id = ?"
-        ).bind(outcome, outcome, parsedValue, timestamp, prospect_id, tenant_id).run();
+        ).bind(outcome, outcome, effectiveWonValue, timestamp, prospect_id, tenant_id).run();
 
-        await recordLearningEvent(
+        const learningPersisted = await recordLearningEvent(
           env.RADAR_DB,
           prospect.city,
           prospect.trade,
@@ -2284,10 +2297,17 @@ export default {
             prospect_id: String(prospect.id),
             mode: "tenant",
             tenant_id: tenant_id,
-            value_usd: parsedValue,
+            value_usd: effectiveWonValue,
             idempotency_key: `tenant-outcome:${prospect.id}:${outcome}`
           }
         );
+        if (!learningPersisted) {
+          return Response.json({
+            success: false,
+            error: "outcome_saved_learning_pending",
+            message: "The outcome was saved, but learning persistence could not be confirmed. Retry the same outcome safely."
+          }, { status: 503, headers: corsHeaders });
+        }
 
         await sendTenantObservationsToBvelt(env, tenant_id, {
           prospectIds: [String(prospect_id)]
@@ -11407,7 +11427,8 @@ async function recordLearningEvent(
         score: details?.score,
         response_type: details?.response_type,
         outcome: details?.outcome,
-        source: "radar_worker"
+        source: mode === "tenant" ? "tenant_user_reported" : "radar_system",
+        provenance: mode === "tenant" ? "user_reported_not_independently_verified" : "system_recorded"
       }
     });
   } catch (e) {
