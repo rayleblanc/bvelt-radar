@@ -1,6 +1,6 @@
 declare const process: any;
 
-import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, resolveTenantBuyerSegments, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey, notifyOnce, isVerifiedDeliverableEmail, evaluateFounderOutreachEligibility, buildTechnicalAuditSnapshot, isEmailValidatedForOutreach, isCompletePostalAddress, sendTelegramWithRetry, extractEmailAddress, evaluateResearchEvidenceQuality, classifyReplyText } from './worker';
+import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, resolveTenantBuyerSegments, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey, notifyOnce, isVerifiedDeliverableEmail, evaluateFounderOutreachEligibility, buildTechnicalAuditSnapshot, isEmailValidatedForOutreach, isCompletePostalAddress, buildRecipientOutreachIdempotencyKey, sendTelegramWithRetry, extractEmailAddress, evaluateResearchEvidenceQuality, classifyReplyText } from './worker';
 import { DEFAULT_FOUNDER_MISSION, MissionConfig } from './worker';
 import { buildResendIdempotencyKey, buildBrandedEmailHtml, resolveBveltSender, inspectOutboundEmailAuth, normalizeOutreachBody, normalizeFounderOutreachCopy } from './emailDispatcher';
 import { fetchPermitContractors } from './permitSources';
@@ -2753,6 +2753,18 @@ tests.push({
   run: () => {
     assert(!isCompletePostalAddress("123 Main Street, Toronto, ON"), "Street/city/region without postal code or country must not pass");
     assert(isCompletePostalAddress("123 Main Street, Toronto, ON M5V 2T6, Canada"), "Complete Canadian address must pass");
+  }
+});
+
+tests.push({
+  name: "Founder repeat-contact reservation is shared by normalized recipient email",
+  run: () => {
+    const first = buildRecipientOutreachIdempotencyKey("founder", "Sales@Example.com", "resend_live", 2);
+    const sameRecipient = buildRecipientOutreachIdempotencyKey("founder", " sales@example.com ", "resend_live", 2);
+    const differentRecipient = buildRecipientOutreachIdempotencyKey("founder", "other@example.com", "resend_live", 2);
+    assert(first === sameRecipient, "Case and whitespace differences must share the same recipient reservation");
+    assert(first !== differentRecipient, "Different recipients must not share a reservation");
+    assert(first.length < 120 && !first.includes("@"), "Reservation key must be bounded and must not expose the recipient email");
   }
 });
 
