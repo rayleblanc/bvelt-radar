@@ -11748,10 +11748,9 @@ export function inferTradeFromTextDetailed(...textParts: (string | undefined)[])
     return { trade: 'general', confidence: 'none', isNonHomeService: false };
   }
 
-  // Check off-ICP first
-  if (isOffIcpName(combined)) {
-    return { trade: 'non_home_service', confidence: 'high', isNonHomeService: true, detectedClue: 'off_icp_token' };
-  }
+  // ICP eligibility is mode-aware and enforced by checkTradeCoherence; this
+  // helper only classifies the observed trade so Tenant buyers are not
+  // accidentally filtered by Founder-only exclusions.
 
   const tradePatterns: [string, RegExp][] = [
     ['lawn_care', /\b(lawn\s*care|lawn\s*mowing|mowing|turf|weed\s*control|aeration|yard\s*care|lawn\s*service)\b/i],
