@@ -4503,6 +4503,26 @@ export async function bootstrapBveltTenant(
         ? "property management"
         : primaryNiche;
 
+  const suppliedCountries = Array.isArray(body.countries)
+    ? body.countries
+    : typeof body.countries === "string" ? body.countries.split(/[;,]/) : [];
+  const explicitCountries = suppliedCountries.length
+    ? suppliedCountries
+    : body.country_code || body.country ? [body.country_code || body.country] : [];
+  const resolvedCountry = findPlace(cityLabel)?.country;
+  const countries = Array.from(new Set(
+    (explicitCountries.length ? explicitCountries : resolvedCountry ? [resolvedCountry] : [])
+      .map((value: any) => String(value).trim().toUpperCase())
+      .filter(Boolean)
+  ));
+  const suppliedLanguages = Array.isArray(body.languages)
+    ? body.languages
+    : typeof body.languages === "string" ? body.languages.split(/[;,]/)
+      : body.language ? [body.language] : [];
+  const languages = Array.from(new Set(
+    suppliedLanguages.map((value: any) => String(value).trim().toLowerCase()).filter(Boolean)
+  ));
+
   const timestamp = new Date().toISOString();
   await env.RADAR_DB.prepare(`
     INSERT INTO tenant_config (
@@ -4527,29 +4547,10 @@ export async function bootstrapBveltTenant(
     JSON.stringify(niches.slice(0, 5)),
     JSON.stringify([userTrade]),
     JSON.stringify([cityLabel]),
-    JSON.stringify((() => {
-      const supplied = Array.isArray(body.countries)
-        ? body.countries
-        : typeof body.countries === "string" ? body.countries.split(/[;,]/) : [];
-      const explicit = supplied.length
-        ? supplied
-        : body.country_code || body.country
-          ? [body.country_code || body.country]
-          : [];
-      const resolvedCountry = findPlace(cityLabel)?.country;
-      return Array.from(new Set((explicit.length ? explicit : resolvedCountry ? [resolvedCountry] : [])
-        .map((value: any) => String(value).trim().toUpperCase())
-        .filter(Boolean)));
-    })()),
+    JSON.stringify(countries),
     JSON.stringify([]),
     JSON.stringify([cityLabel]),
-    JSON.stringify((() => {
-      const supplied = Array.isArray(body.languages)
-        ? body.languages
-        : typeof body.languages === "string" ? body.languages.split(/[;,]/)
-          : body.language ? [body.language] : [];
-      return Array.from(new Set(supplied.map((value: any) => String(value).trim().toLowerCase()).filter(Boolean)));
-    })()),
+    JSON.stringify(languages),
     `Buyers near ${cityLabel} for a local ${userTrade} operator (auto from Bvelt ${source}).`,
     JSON.stringify(niches),
     45,
