@@ -56,6 +56,7 @@ tests.push({
   name: "Tenant CRM learning ingest is authenticated, tenant-scoped and idempotent",
   run: async () => {
     const storedKeys = new Set<string>();
+    let storedMetadata: any = null;
     const mockDb: any = {
       prepare: (sql: string) => ({
         bind: (...args: any[]) => ({
@@ -71,6 +72,7 @@ tests.push({
       }),
       batch: async (statements: any[]) => {
         const key = String(statements[0].args[11]);
+        storedMetadata = JSON.parse(String(statements[0].args[10] || "{}"));
         const inserted = !storedKeys.has(key);
         if (inserted) storedKeys.add(key);
         return statements.map((_: any, index: number) => ({
@@ -85,6 +87,8 @@ tests.push({
       items: [{
         prospect_id: "radar_prospect_1",
         event_type: "won",
+        customer_choice_reason_code: "PRICE",
+        customer_choice_provenance: "OWNER_REPORTED_CUSTOMER_STATEMENT",
         city: "Toronto, ON",
         trade: "plumbing",
         occurred_at: "2026-11-14T10:00:00.000Z",
@@ -118,6 +122,8 @@ tests.push({
     const retryBody = await retry.json() as any;
     assert(first.status === 200 && firstBody.inserted === 1, "First CRM outcome must be persisted");
     assert(retry.status === 200 && retryBody.deduplicated === 1, "Exact retry must be acknowledged without a second insert");
+    assert(storedMetadata?.customer_choice?.reason_code === "PRICE", "Declared choice reason must be preserved as event metadata");
+    assert(storedMetadata?.customer_choice?.provenance === "OWNER_REPORTED_CUSTOMER_STATEMENT", "Choice provenance must remain explicit");
   }
 });
 
