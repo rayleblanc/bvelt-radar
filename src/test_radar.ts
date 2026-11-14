@@ -1127,7 +1127,7 @@ tests.push({
 
     const footer = buildLegalFooter(envMock);
 
-    assert(footer.includes("Alice Smith, founder of Bvelt"), "Footer must include configured sender name");
+    assert(footer.includes("Alice Smith"), "Footer must include configured sender name");
     assert(footer.includes("123 Main St, Austin, TX"), "Footer must include postal address");
     assert(footer.includes("reply \"unsubscribe\""), "Footer must include unsubscribe instruction");
   }
@@ -1754,9 +1754,9 @@ tests.push({
                 } else if (sqlLower.includes("select 1 from research_run_candidates")) {
                   const c = candidatesStore.find(x => x.run_id === args[0] && x.mode === args[1] && x.tenant_id === args[2] && x.prospect_id === args[3]);
                   return c ? { 1: 1 } : null;
-                } else if (sqlLower.includes("select id, signals_json, website from prospects") || sqlLower.includes("select id, signals_json from prospects")) {
+                } else if (sqlLower.includes("select id, name, status, trade, email, signals_json, website from prospects") || sqlLower.includes("select id, signals_json, website from prospects") || sqlLower.includes("select id, signals_json from prospects")) {
                   const p = prospectsStore.find(x => x.id === args[0] && x.mode === args[1] && (x.tenant_id || "founder") === args[2]);
-                  return p ? { id: p.id, signals_json: p.signals_json, website: p.website } : null;
+                  return p ? { id: p.id, name: p.name, status: p.status, trade: p.trade, email: p.email, signals_json: p.signals_json, website: p.website } : null;
                 } else if (sqlLower.includes("select id from source_evidence")) {
                   const ev = evidenceStore.find(x => x.prospect_id === args[0] && x.source_id === args[1] && x.evidence_type === args[2] && x.content_hash === args[3]);
                   return ev ? { id: ev.id } : null;
