@@ -11577,6 +11577,8 @@ export async function sendOrQueueOutreach(
       touchCount: nextTouch,
       includeSiteLink: nextTouch > 1,
       plainTextOnly: true,
+      founderOutreach: String(prospect.mode || (prospect.tenant_id ? "tenant" : "founder")).toLowerCase() !== "tenant",
+      legalFooter: buildLegalFooter(env),
       resendApiKey: env.RESEND_API_KEY,
       brevoApiKey: env.BREVO_API_KEY,
       senderName: env.SENDER_NAME
@@ -11602,13 +11604,40 @@ export async function sendOrQueueOutreach(
         SET status = 'sent', provider_reference = ?, updated_at = ?
         WHERE idempotency_key = ?
       `).bind(dispatch.messageId, timestamp, idempotencyKey).run();
+      try {
+        await env.RADAR_DB.prepare("UPDATE opportunities SET status = 'closed', decision_state = 'closed', updated_at = ? WHERE prospect_id = ?")
+          .bind(timestamp, prospect.id).run();
+      } catch (e) {}
+      try {
+        await env.RADAR_DB.prepare(`
+          INSERT INTO email_dispatch_logs
+            (id, prospect_id, tenant_id, recipient_email, subject, provider, status, message_id, error_message, payload_preview, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, 'dispatched', ?, NULL, ?, ?)
+        `).bind(
+          `disp_${crypto.randomUUID()}`,
+          prospect.id,
+          tenantId,
+          prospect.email.toLowerCase().trim(),
+          String(prospect.draft_subject || 'Bvelt outreach').slice(0, 240),
+          dispatch.provider,
+          dispatch.messageId,
+          String(prospect.draft_body || '').slice(0, 150),
+          timestamp
+        ).run();
+      } catch (logError) {
+        console.warn("[Email Dispatch Log] Persist failed; idempotency record retained.");
+      }
 
       return { success: true, reason: `Dispatched via ${dispatch.provider}` };
     } else {
       await releaseBudget(env.RADAR_DB, tenantId, 'outreach_units', 1);
-      await env.RADAR_DB.prepare("UPDATE prospects SET status = 'hold', outcome = ?, updated_at = ? WHERE id = ?")
-        .bind(dispatch.error || 'dispatch_failed', timestamp, prospect.id).run();
-      return { success: false, reason: dispatch.error || 'dispatch_failed' };
+      const ambiguous = /network|fetch|timeout|timed out|abort|socket|connection|reset|econn/i.test(String(dispatch.error || ''));
+      const failureState = ambiguous ? 'provider_unknown' : 'failed';
+      await env.RADAR_DB.prepare("UPDATE outreach_idempotency SET status = ?, updated_at = ? WHERE idempotency_key = ?")
+        .bind(failureState, timestamp, idempotencyKey).run();
+      await env.RADAR_DB.prepare("UPDATE prospects SET status = ?, outcome = ?, updated_at = ? WHERE id = ?")
+        .bind(ambiguous ? 'provider_unknown' : 'hold', ambiguous ? 'provider_reconciliation_required' : (dispatch.error || 'dispatch_failed'), timestamp, prospect.id).run();
+      return { success: false, reason: ambiguous ? "provider_unknown: reconciliation required" : (dispatch.error || 'dispatch_failed') };
     }
   }
 
