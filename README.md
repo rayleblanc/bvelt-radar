@@ -8,7 +8,7 @@
 
 ## 🚀 Novedades v2
 
-1. **Mercados configurables:** Founder usa ciudades, países y nichos explícitos. No hay ciudades, países ni oficios predeterminados; si la configuración está vacía, discovery se detiene sin inventar mercados.
+1. **Mercados abiertos:** Founder rota ciudades del catálogo disponible y usa los segmentos amplios de `market-universe.json` como prioridades, no como allowlist. No hay ciudades ni países fijos; los nichos personalizados siguen siendo válidos.
 2. **Scoring Multi-Factor Realista (0-100):** Evalúa web real (+22), email validado (+28), teléfono (+12), handle corporativo (+8), ciudad prioritaria (+10), trade prioritario (+8), datos Overpass (+6), contacto dual (+6) y penalización por supresión (-100).
 3. **Copy con Psicología de Trades (A/B Testing):** 90-110 palabras, 1 frase clara de Bvelt, sin promesas falsas de dinero, footer obligatorio "Reply STOP to opt out" y variantes A/B (`missed_calls` vs `dormant_leads`).
 4. **Bot de Telegram con Botones Interactivos (`InlineKeyboardMarkup`):** Cada prospecto incluye botones `[✅ Mark Sent]`, `[❌ Discard]` y `[🚫 Suppress Domain]`.
@@ -63,7 +63,7 @@ FOUNDING_LANGUAGES = "en"
 FOUNDING_MIN_SCORE = "50"
 ```
 
-Los valores son ejemplos, no defaults. Puedes configurar ciudades explícitas de cualquier mercado. El catálogo actual de rotación automática cubre US/CA; para otros países configura ciudades explícitas. No existe fallback silencioso a US/CA. Si no hay ciudades y nichos configurados, Founder no encola trabajos.
+Los valores son ejemplos. `FOUNDING_CITIES` y `FOUNDING_COUNTRIES` son opcionales; si se indican, acotan la búsqueda. `FOUNDING_TRADES` sustituye las prioridades amplias de `market-universe.json`, pero no existe una allowlist de industrias. El catálogo actual de rotación automática cubre US/CA; para otros países configura ciudades explícitas (la geocodificación de esas ciudades usa Nominatim). Los países prioritarios solo elevan el ranking, no excluyen mercados fuera de la lista.
 
 ### 4. Configurar el Webhook de Telegram (Botones Interactivos)
 Para que los botones `[✅ Mark Sent]`, `[❌ Discard]` y `[🚫 Suppress]` funcionen directamente desde Telegram:
