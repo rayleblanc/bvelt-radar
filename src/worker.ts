@@ -10128,7 +10128,7 @@ export async function sendTenantObservationsToBvelt(
   params.push(limit);
 
   const rows = await env.RADAR_DB.prepare(`
-    SELECT id, tenant_id, name, city, trade, website, phone, email, score, status, tenant_outcome, bvelt_angle, created_at
+    SELECT id, tenant_id, name, city, trade, website, phone, email, score, status, tenant_outcome, bvelt_angle, created_at, updated_at
     FROM prospects
     WHERE tenant_id = ?
       AND mode = 'tenant'
@@ -10156,7 +10156,8 @@ export async function sendTenantObservationsToBvelt(
     status: r.status,
     outcome: r.tenant_outcome,
     angle: r.bvelt_angle,
-    created_at: r.created_at
+    created_at: r.created_at,
+    updated_at: r.updated_at
   }));
 
   const payload = {
