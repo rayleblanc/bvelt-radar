@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from urllib.parse import urljoin, urlsplit, urlunsplit
 from typing import Any
 
-from sidecar.radar_sidecar.url_policy import is_public_http_url
+from sidecar.radar_sidecar.url_policy import is_public_http_url, is_safe_redirect_target
 
 EXTRACTOR_VERSION = "bvelt-scrapling-1.1.0"
 USER_AGENT = "BveltRadarResearch/1.0 (+https://bvelt.app; public business website research)"
@@ -161,14 +161,9 @@ def _fetch(url: str):
                 location = (response.headers or {}).get("location") or (response.headers or {}).get("Location")
                 if not location or redirect_count >= 5:
                     return None
-                target = urljoin(current_url, str(location).strip())
-                if not is_public_http_url(target):
+                if not is_safe_redirect_target(current_url, str(location).strip()):
                     return None
-                old_host = _host(current_url).removeprefix("www.")
-                new_host = _host(target).removeprefix("www.")
-                if old_host != new_host:
-                    return None
-                current_url = target
+                current_url = urljoin(current_url, str(location).strip())
                 continue
             if response.status in {429, 503}:
                 retry_after = (response.headers or {}).get("retry-after") or (response.headers or {}).get("Retry-After")
