@@ -1423,6 +1423,10 @@ export default {
                   LEFT JOIN prospects p ON o.prospect_id = p.id
                   WHERE COALESCE(o.strategic_score, 0) >= ?
                     AND COALESCE(NULLIF(TRIM(o.tenant_id), ''), 'founder') = ?
+                     AND lower(COALESCE(o.status, 'open')) = 'open'
+                     AND lower(COALESCE(o.decision_state, '')) != 'closed'
+                     AND (p.id IS NULL OR lower(COALESCE(p.status, '')) NOT IN ('sent','delivered','opened','clicked','bounced','unsubscribed','replied','human_review','discarded','blocked','suppressed','converted','disqualified'))
+                     AND (p.cooldown_until IS NULL OR datetime(p.cooldown_until) <= datetime('now'))
                   ORDER BY COALESCE(o.strategic_score, 0) DESC, o.created_at DESC LIMIT ?`,
             binds: [minScore, scopeTenant, limit],
           },
@@ -1430,7 +1434,9 @@ export default {
             sql: `SELECT * FROM opportunities
                   WHERE COALESCE(strategic_score, 0) >= ?
                     AND COALESCE(NULLIF(TRIM(tenant_id), ''), 'founder') = ?
-                  ORDER BY COALESCE(strategic_score, 0) DESC LIMIT ?`,
+                  AND lower(COALESCE(status, 'open')) = 'open'
+                     AND lower(COALESCE(decision_state, '')) != 'closed'
+                   ORDER BY COALESCE(strategic_score, 0) DESC LIMIT ?`,
             binds: [minScore, scopeTenant, limit],
           },
           {
@@ -1441,13 +1447,19 @@ export default {
                   INNER JOIN prospects p ON o.prospect_id = p.id
                   WHERE COALESCE(NULLIF(TRIM(p.tenant_id), ''), 'founder') = ?
                     AND COALESCE(p.score, p.opportunity_score, o.strategic_score, 0) >= ?
-                  ORDER BY COALESCE(o.strategic_score, p.score, 0) DESC LIMIT ?`,
+                  AND lower(COALESCE(o.status, 'open')) = 'open'
+                     AND lower(COALESCE(o.decision_state, '')) != 'closed'
+                     AND lower(COALESCE(p.status, '')) NOT IN ('sent','delivered','opened','clicked','bounced','unsubscribed','replied','human_review','discarded','blocked','suppressed','converted','disqualified')
+                     AND (p.cooldown_until IS NULL OR datetime(p.cooldown_until) <= datetime('now'))
+                   ORDER BY COALESCE(o.strategic_score, p.score, 0) DESC LIMIT ?`,
             binds: [scopeTenant, minScore, limit],
           },
           {
             sql: `SELECT * FROM opportunities
                   WHERE COALESCE(NULLIF(TRIM(tenant_id), ''), 'founder') = ?
-                  ORDER BY rowid DESC LIMIT ?`,
+                  AND lower(COALESCE(status, 'open')) = 'open'
+                     AND lower(COALESCE(decision_state, '')) != 'closed'
+                   ORDER BY rowid DESC LIMIT ?`,
             binds: [scopeTenant, limit],
           },
         ];
@@ -1880,13 +1892,13 @@ export default {
                 const inboundId = String(body.data.email_id || "");
                 const apiKey = String((env as any).RESEND_API_KEY || "").trim();
                 if (inboundId && apiKey) {
-                  const inboundRes = await fetch(`https://api.resend.com/emails/${encodeURIComponent(inboundId)}`, {
+                  const inboundRes = await fetch(`https://api.resend.com/emails/receiving/${encodeURIComponent(inboundId)}`, {
                     headers: { Authorization: `Bearer ${apiKey}` },
                     signal: AbortSignal.timeout(8000)
                   });
                   if (inboundRes.ok) {
                     const inboundData: any = await inboundRes.json().catch(() => ({}));
-                    content = inboundData?.text || inboundData?.subject || content;
+                    content = inboundData?.text || inboundData?.html || inboundData?.subject || content;
                     // Opcional: reenviar la respuesta al correo personal del founder (REPLY_FORWARD_TO).
                     const forwardTo = String((env as any).REPLY_FORWARD_TO || "").trim();
                     if (forwardTo) {
@@ -4157,6 +4169,14 @@ async function handleDecision(
   }
 
   const timestamp = new Date().toISOString();
+  const closeLinkedOpportunities = async () => {
+    try {
+      await db.prepare("UPDATE opportunities SET status = 'closed', decision_state = 'closed', updated_at = ? WHERE prospect_id = ?")
+        .bind(timestamp, id).run();
+    } catch (e) {
+      console.warn("[Decision] Could not close linked opportunity:", (e as any)?.message || e);
+    }
+  };
 
   if (action === "sent" || action === "approve") {
     // Mandatory Trust-Stack Governor Firewall Gate Check
@@ -4236,6 +4256,7 @@ async function handleDecision(
         includeSiteLink: manualEligibility.nextTouch > 1,
         plainTextOnly: true,
         founderOutreach: String(prospect.mode || (prospect.tenant_id ? "tenant" : "founder")).toLowerCase() !== "tenant",
+        legalFooter: buildLegalFooter(env),
         resendApiKey: env.RESEND_API_KEY,
         brevoApiKey: env.BREVO_API_KEY,
         senderName: env.SENDER_NAME
@@ -4348,6 +4369,7 @@ async function handleDecision(
       } catch (e) {}
     }
 
+    await closeLinkedOpportunities();
     return Response.json({
       success: true,
       message: `Prospect ${id} marked as SENT. Dispatch: ${dispatchOutcome.status} (${dispatchOutcome.provider}). Added to suppression.`,
@@ -4370,6 +4392,7 @@ async function handleDecision(
 
     await recordLearningEvent(db, prospect.city, prospect.trade, prospect.variant_id, false, { event_type: "replied", response_type: "positive", prospect_id: id, mode: prospect.mode, tenant_id: prospect.tenant_id || "founder" });
 
+    await closeLinkedOpportunities();
     return Response.json({ success: true, message: `Prospect ${id} marked as REPLIED.`, id }, { headers });
 
   } else if (action === "demo") {
@@ -4385,6 +4408,7 @@ async function handleDecision(
       } catch (e) {}
     }
 
+    await closeLinkedOpportunities();
     return Response.json({ success: true, message: `Prospect ${id} marked as DEMO.`, id }, { headers });
 
   } else if (action === "won" || action === "converted") {
@@ -4402,6 +4426,7 @@ async function handleDecision(
 
     await recordLearningEvent(db, prospect.city, prospect.trade, prospect.variant_id, false, { event_type: "won", response_type: "converted", is_win: true, prospect_id: id, mode: prospect.mode, tenant_id: prospect.tenant_id || "founder" });
 
+    await closeLinkedOpportunities();
     return Response.json({ success: true, message: `Prospect ${id} marked as WON/CONVERTED.`, id }, { headers });
 
   } else if (action === "discard") {
@@ -4429,6 +4454,7 @@ async function handleDecision(
 
     await recordLearningEvent(db, prospect.city, prospect.trade, prospect.variant_id, false, { event_type: "discarded", prospect_id: id, mode: prospect.mode, tenant_id: prospect.tenant_id || "founder" });
 
+    await closeLinkedOpportunities();
     return Response.json({ success: true, message: `Prospect ${id} discarded with 30-day cooldown.`, id }, { headers });
 
   } else if (action === "suppress") {
@@ -4454,6 +4480,7 @@ async function handleDecision(
 
     await recordLearningEvent(db, prospect.city, prospect.trade, prospect.variant_id, false, { event_type: "suppressed", prospect_id: id, mode: prospect.mode, tenant_id: prospect.tenant_id || "founder" });
 
+    await closeLinkedOpportunities();
     return Response.json({ success: true, message: `Prospect ${id} fully suppressed.`, id }, { headers });
   }
 
@@ -7219,6 +7246,13 @@ export async function handleProspectEvent(
     prospect.id
   ).run();
 
+  if (["bounced", "unsubscribe", "positive", "question", "negative", "replied", "unknown"].includes(classification)) {
+    try {
+      await db.prepare("UPDATE opportunities SET status = 'closed', decision_state = 'closed', updated_at = ? WHERE prospect_id = ?")
+        .bind(timestamp, prospect.id).run();
+    } catch (e) {}
+  }
+
   await recordLearningEvent(
     db,
     prospect.city,
@@ -9667,7 +9701,7 @@ async function generateAICopy(
     1. Idioma: Español técnico y profesional.
     2. Longitud: 45 a 65 palabras en el primer contacto; 35 a 55 en seguimiento.
     3. Tono: Respetuoso, directo, mentalidad de emprendedor de guerrilla.
-    4. Explica el valor sin prometer resultados: "${tenantInfo ? `Bvelt ayuda a dar seguimiento a solicitudes y clientes.` : "Bvelt ayuda a negocios de servicios a dar seguimiento por SMS a llamadas no atendidas y presupuestos pendientes."}"
+    4. Explica el valor sin prometer resultados: "${tenantInfo ? `Bvelt ayuda a dar seguimiento a solicitudes y clientes.` : "Bvelt ayuda a negocios de servicios a organizar solicitudes y dar seguimiento a llamadas no atendidas y presupuestos pendientes mediante los canales actualmente disponibles."}"
     5. Primer contacto: pregunta si quiere recibir un ejemplo breve; no incluyas enlaces. Seguimiento: puedes incluir un único enlace simple a ${demoLink}.
     6. No inventes hechos, porcentajes, velocidad web, llamadas perdidas ni pérdidas de ingresos. No uses "auditoría gratis", "garantizado", "instantáneo" ni promesas de 60 segundos sin evidencia explícita. Sin emojis ni signos de exclamación. SIN FIRMA NI PIE DE PÁGINA (el sistema añade el legal).
     7. ${!tenantInfo && founderLine ? `FRASE FUNDADOR (úsala una vez, natural, no inventes otra biografía): "${founderLine}"` : "No inventes historia personal del fundador."}
@@ -9688,7 +9722,7 @@ async function generateAICopy(
     RULES:
     1. Length: ${isFollowUp ? "35 to 55" : "45 to 65"} words. Contractor-friendly and concise.
     2. Tone: Respectful, direct, guerrilla entrepreneur mindset. Never beg. Never play for pity.
-    3. Explain value without promising outcomes: "${tenantInfo ? `Bvelt helps manage follow-up with enquiries and customers.` : "Bvelt helps service businesses follow up by SMS with missed calls and pending estimates."}"
+    3. Explain value without promising outcomes: "${tenantInfo ? `Bvelt helps manage follow-up with enquiries and customers.` : "Bvelt helps service businesses organize enquiries and follow up on missed calls and pending estimates using the channels currently available."}"
     4. First touch: ask whether a short example would be useful; include no URL. Follow-up: one plain-text link to ${demoLink} is allowed.
     5. Never invent facts, percentages, site-speed measurements, missed calls, or lost revenue. Do not use "free audit", "guaranteed", "instant", or 60-second promises without explicit evidence. No emoji, hype, or exclamation marks. NO SIGNATURE OR FOOTER (system adds legal footer).
     6. ${!tenantInfo && founderLine ? `FOUNDER LINE (use once, natural English, do not invent a different bio): "${founderLine}"` : "Do not invent a personal founder story."}
