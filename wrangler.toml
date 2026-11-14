@@ -9,8 +9,12 @@ keep_vars = true
 BVELT_INGEST_URL = "https://bvelt.app/api/radar/observations"
 BVELT_TENANT_INGEST_URL = "https://bvelt.app/api/radar/tenant-observations"
 
-[secrets]
-required = ["FOUNDER_SERVICE_KEY", "RADAR_SERVICE_KEY", "BVELT_TENANT_INGEST_KEY", "GITHUB_ACTIONS_TOKEN", "RADAR_SIDECAR_CALLBACK_KEY"]
+# Secrets are configured in the Cloudflare Dashboard (not required in this file
+# for preview builds). Runtime auth stays fail-closed when a key is missing:
+# - FOUNDER_SERVICE_KEY (required for founder routes)
+# - RADAR_SERVICE_KEY (service-to-service)
+# - BVELT_TENANT_INGEST_KEY (tenant observation push)
+# - GITHUB_ACTIONS_TOKEN / RADAR_SIDECAR_CALLBACK_KEY (sidecar research)
 
 [build]
 command = "npm run build"
