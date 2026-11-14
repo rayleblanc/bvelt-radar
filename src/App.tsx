@@ -545,13 +545,11 @@ export default function App() {
       // 3. GET /prospects
       let prospectsRes = await fetch(`${apiUrl}/prospects${queryParam}`, {
         credentials: 'include',
-        headers: authHeaders
       }).catch(() => null);
 
       if (!prospectsRes || !prospectsRes.ok) {
         prospectsRes = await fetch(`${apiUrl}/api/prospects${queryParam}`, {
           credentials: 'include',
-          headers: authHeaders
         }).catch(() => null);
       }
       
