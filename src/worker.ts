@@ -4179,6 +4179,23 @@ async function handleDecision(
     // Execute Outbound Email Dispatch
     let dispatchOutcome: any = { success: true, provider: 'simulated', status: 'simulated', messageId: `sim_${id.substring(0, 8)}` };
     if (prospect.email && prospect.email.includes('@')) {
+      const manualEligibility = await getFounderOutreachEligibility(db, prospect);
+      if (!manualEligibility.allowed) {
+        return Response.json({ success: false, blocked: true, reason: manualEligibility.reason, id }, { status: 409, headers });
+      }
+      const manualSuppression = await checkSuppressedComposite(db, prospect.email, prospect.website, prospect.phone, prospect.name, prospect.city, prospect.tenant_id || "founder");
+      if (manualSuppression) {
+        return Response.json({ success: false, blocked: true, reason: "suppressed: " + manualSuppression.reason, id }, { status: 409, headers });
+      }
+      if (!isEmailValidatedForOutreach(prospect.signals_json || "{}")) {
+        return Response.json({ success: false, blocked: true, reason: "email_not_provider_verified", id }, { status: 409, headers });
+      }
+      const manualSequenceId = env.RESEND_API_KEY ? "resend_live" : env.BREVO_API_KEY ? "brevo_live" : "manual_simulated";
+      const manualIdempotencyKey = buildOutreachIdempotencyKey(prospect.tenant_id || "founder", prospect.id, manualSequenceId, manualEligibility.nextTouch);
+      const existingManual = await db.prepare("SELECT status FROM outreach_idempotency WHERE idempotency_key = ?").bind(manualIdempotencyKey).first() as any;
+      if (existingManual && ["reserved", "sent", "scheduled", "queued", "provider_unknown"].includes(String(existingManual.status || "").toLowerCase())) {
+        return Response.json({ success: false, blocked: true, reason: "already_processed_for_this_touch", id }, { status: 409, headers });
+      }
       const draftSubject = prospect.draft_subject || `Bvelt - Pregunta sobre llamadas de clientes (${prospect.name || 'su negocio'})`;
       const draftBody = prospect.draft_body || `Hola equipo de ${prospect.name},\n\n¿Qué ocurre cuando un cliente potencial llama a su negocio mientras están ocupados en obra y no pueden atender el teléfono?\n\nBvelt responde automáticamente por SMS en 15 segundos para no perder ningún trabajo: https://bvelt.app\n\nSaludos,\nEquipo Bvelt\n\nReply STOP to opt out`;
       const safeBody = typeof normalizeOutreachBody === 'function' ? normalizeOutreachBody(draftBody) : draftBody;
@@ -4197,6 +4214,16 @@ async function handleDecision(
         }, { status: 400, headers });
       }
 
+      const manualReservation = await db.prepare(`
+        INSERT INTO outreach_idempotency (idempotency_key, prospect_id, tenant_id, email, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, 'reserved', ?, ?)
+        ON CONFLICT(idempotency_key) DO UPDATE SET status = 'reserved', email = excluded.email, updated_at = excluded.updated_at
+        WHERE outreach_idempotency.status = 'failed'
+      `).bind(manualIdempotencyKey, prospect.id, prospect.tenant_id || "founder", prospect.email, timestamp, timestamp).run() as any;
+      if (!(Number(manualReservation?.meta?.changes || 0) > 0)) {
+        return Response.json({ success: false, blocked: true, reason: "outreach_reservation_conflict", id }, { status: 409, headers });
+      }
+
       dispatchOutcome = await dispatchEmail({
         to: prospect.email,
         recipientName: prospect.name,
@@ -4204,6 +4231,7 @@ async function handleDecision(
         body: typeof safeBody !== 'undefined' ? safeBody : draftBody,
         from: env.OUTBOUND_EMAIL_FROM,
         prospectId: prospect.id,
+        touchCount: manualEligibility.nextTouch,
         resendApiKey: env.RESEND_API_KEY,
         brevoApiKey: env.BREVO_API_KEY,
         senderName: env.SENDER_NAME
@@ -4234,6 +4262,10 @@ async function handleDecision(
             timestamp
           ).run();
         } catch (e) {}
+        try {
+          await db.prepare("UPDATE outreach_idempotency SET status = 'failed', updated_at = ? WHERE idempotency_key = ?")
+            .bind(timestamp, manualIdempotencyKey).run();
+        } catch (e) {}
 
         return Response.json({
           success: false,
@@ -4245,6 +4277,13 @@ async function handleDecision(
           }
         }, { status: 502, headers });
       }
+    }
+
+    if (prospect.email && prospect.email.includes('@')) {
+      try {
+        await db.prepare("UPDATE outreach_idempotency SET status = 'sent', provider_reference = ?, updated_at = ? WHERE idempotency_key = ?")
+          .bind(dispatchOutcome.messageId || null, timestamp, manualIdempotencyKey).run();
+      } catch (e) {}
     }
 
     // Update prospect with outcome sent and 21-day cooldown (max 21 days for normal outreach)
@@ -6649,7 +6688,7 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
   try { signalsMeta = JSON.parse(prospect.signals_json || "{}"); } catch {}
   const emailLocal = String(prospect.email).split("@")[0].toLowerCase();
   const isRiskyLocal = /^(contact|admin|webmaster|mail)$/.test(emailLocal);
-  if (signalsMeta.is_email_validated === false || (isRiskyLocal && signalsMeta.is_email_validated !== true)) {
+  if (!isEmailValidatedForOutreach(signalsMeta) || isRiskyLocal) {
     console.warn(`[Outreach] Skip ${prospect.id} — email not validated or risky local-part ${emailLocal}`);
     try {
       await env.RADAR_DB.prepare(
@@ -9482,6 +9521,7 @@ export function evaluateFounderOutreachEligibility(
 ): { allowed: boolean; reason: string; nextTouch: number } {
   const state = String(status || "").toLowerCase();
   if (["bounced", "unsubscribed", "complained", "suppressed", "replied", "blocked"].includes(state)) return { allowed: false, reason: "terminal_contact_state", nextTouch: 0 };
+  if (["queued", "scheduled", "provider_unknown", "provider_required", "hold", "held"].includes(state)) return { allowed: false, reason: "outreach_pending_or_held", nextTouch: 0 };
   if (lastReplyContent && String(lastReplyContent).trim()) return { allowed: false, reason: "reply_received", nextTouch: 0 };
   const touches = Math.max(0, Math.floor(Number(historicalTouchCount) || 0));
   if (touches >= 3) return { allowed: false, reason: "three_touch_cap_reached", nextTouch: 0 };
@@ -9505,15 +9545,17 @@ export async function getFounderOutreachEligibility(db: D1Database, prospect: an
   if (String(prospect.mode || "").toLowerCase() === "tenant") {
     return { allowed: true, reason: "tenant_policy", nextTouch: getOutreachTouch(prospect) };
   }
-  const [history, idempotency] = await Promise.all([
+  const [history, idempotency, pending] = await Promise.all([
     db.prepare("SELECT COUNT(DISTINCT message_id) AS touch_count, MAX(created_at) AS last_send_at FROM email_dispatch_logs WHERE prospect_id = ? AND message_id IS NOT NULL").bind(prospect.id).first(),
-    db.prepare("SELECT COUNT(DISTINCT idempotency_key) AS touch_count, MAX(updated_at) AS last_send_at FROM outreach_idempotency WHERE prospect_id = ? AND status IN ('queued','sent','scheduled','provider_unknown')").bind(prospect.id).first()
+    db.prepare("SELECT COUNT(DISTINCT idempotency_key) AS touch_count, MAX(updated_at) AS last_send_at FROM outreach_idempotency WHERE prospect_id = ? AND status IN ('queued','sent','scheduled','provider_unknown')").bind(prospect.id).first(),
+    db.prepare("SELECT status FROM outreach_idempotency WHERE prospect_id = ? AND status IN ('reserved','queued','scheduled','provider_unknown') ORDER BY updated_at DESC LIMIT 1").bind(prospect.id).first()
   ]) as any[];
+  if (pending) return { allowed: false, reason: "outreach_" + String(pending.status || "pending") + "_pending", nextTouch: 0 };
   const state = String(prospect.status || "").toLowerCase();
   const fallbackTouch = prospect.last_contact_at ? 1 : 0;
   const touches = Math.max(Number(history?.touch_count || 0), Number(idempotency?.touch_count || 0), fallbackTouch);
-  const sendTimes = [history?.last_send_at, idempotency?.last_send_at].filter(Boolean);
-  const lastSendAt = sendTimes.sort((a, b) => Date.parse(String(b)) - Date.parse(String(a)))[0] || prospect.last_contact_at || null;
+  const sendTimes = [history?.last_send_at, idempotency?.last_send_at, prospect.last_contact_at].filter(Boolean);
+  const lastSendAt = sendTimes.sort((a, b) => Date.parse(String(b)) - Date.parse(String(a)))[0] || null;
   return evaluateFounderOutreachEligibility(
     state,
     prospect.last_reply_content || null,
@@ -11011,6 +11053,14 @@ export function isVerifiedDeliverableEmail(
     && Number(qualityScore) >= 0.7
     && !isDisposable
     && !isCatchall;
+}
+
+export function isEmailValidatedForOutreach(signals: unknown): boolean {
+  let metadata: any = signals;
+  if (typeof metadata === "string") {
+    try { metadata = JSON.parse(metadata); } catch { return false; }
+  }
+  return !!metadata && typeof metadata === "object" && metadata.is_email_validated === true;
 }
 
 export async function verifyEmail(email: string, env: Env): Promise<EmailVerificationResult> {

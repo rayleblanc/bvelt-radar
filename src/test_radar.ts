@@ -1,6 +1,6 @@
 declare const process: any;
 
-import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, resolveTenantBuyerSegments, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey, notifyOnce, isVerifiedDeliverableEmail, evaluateFounderOutreachEligibility, buildTechnicalAuditSnapshot } from './worker';
+import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, resolveTenantBuyerSegments, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey, notifyOnce, isVerifiedDeliverableEmail, evaluateFounderOutreachEligibility, buildTechnicalAuditSnapshot, isEmailValidatedForOutreach } from './worker';
 import { DEFAULT_FOUNDER_MISSION, MissionConfig } from './worker';
 import { buildResendIdempotencyKey, buildBrandedEmailHtml, resolveBveltSender, inspectOutboundEmailAuth, normalizeOutreachBody } from './emailDispatcher';
 import { fetchPermitContractors } from './permitSources';
@@ -320,7 +320,7 @@ tests.push({
     assert(shouldSendFounderFollowUp("sent", fiveDaysAgo, null, 1, now), "Sent prospects may follow up after five days");
     assert(shouldSendFounderFollowUp("delivered", fiveDaysAgo, null, 2, now), "Delivered prospects remain eligible for controlled follow-up");
     assert(!shouldSendFounderFollowUp("delivered", fourDaysAgo, null, 1, now), "Follow-up must wait at least five days");
-    assert(!shouldSendFounderFollowUp("opened", fiveDaysAgo, "2026-11-13T12:00:00.000Z", 1, now), "A reply stops follow-ups");
+    assert(!shouldSendFounderFollowUp("opened", fiveDaysAgo, "Thanks, received.", 1, now), "A reply stops follow-ups");
     assert(!shouldSendFounderFollowUp("sent", fiveDaysAgo, null, 3, now), "No more than three total touches are allowed");
     assert(!shouldSendFounderFollowUp("bounced", fiveDaysAgo, null, 1, now), "Bounced prospects are never followed up");
     assert(resolveOutreachTouchCount(1, 5) === 5, "Historical provider messages must override missing legacy touch metadata");
@@ -335,6 +335,11 @@ tests.push({
     assert(!evaluateFounderOutreachEligibility("delivered", null, 1, fiveDaysAgo, fiveDaysAgo, "2026-11-20T12:00:00.000Z", now).allowed, "Existing cooldowns are respected");
     assert(!evaluateFounderOutreachEligibility("sent", null, 0, null, null, null, now).allowed, "Sent state without reliable send history must not resend");
     assert(!evaluateFounderOutreachEligibility("delivered", null, 1, "2026-09-01T12:00:00.000Z", "2026-09-01T12:00:00.000Z", null, now).allowed, "Expired follow-up window must not send");
+    assert(!evaluateFounderOutreachEligibility("queued", null, 0, null, null, null, now).allowed, "Queued outreach must not trigger another send");
+    assert(!evaluateFounderOutreachEligibility("provider_unknown", null, 1, fiveDaysAgo, fiveDaysAgo, null, now).allowed, "Unknown provider acceptance requires reconciliation");
+    assert(isEmailValidatedForOutreach({ is_email_validated: true }), "Only provider-verified email metadata may pass");
+    assert(!isEmailValidatedForOutreach({ is_email_validated: false }), "Explicitly unverified email must be blocked");
+    assert(!isEmailValidatedForOutreach({}), "Missing email verification metadata must fail closed");
   }
 });
 
