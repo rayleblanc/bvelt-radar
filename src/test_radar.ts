@@ -1164,6 +1164,14 @@ tests.push({
       FOUNDER_SERVICE_KEY: "test",
       TELEGRAM_BOT_TOKEN: "bot",
       TELEGRAM_CHAT_ID: "chat",
+      SENDER_POSTAL_ADDRESS: "123 Main Street, Suite 4, Austin, TX 78701, USA"
+    };
+
+    const envWithIncompleteAddress = {
+      RADAR_DB: {} as any,
+      FOUNDER_SERVICE_KEY: "test",
+      TELEGRAM_BOT_TOKEN: "bot",
+      TELEGRAM_CHAT_ID: "chat",
       SENDER_POSTAL_ADDRESS: "123 Main St"
     };
 
@@ -1175,9 +1183,11 @@ tests.push({
     };
 
     const withCard = formatProspectTelegramMessage(prospect, envWithAddress);
+    const incompleteCard = formatProspectTelegramMessage(prospect, envWithIncompleteAddress);
     const withoutCard = formatProspectTelegramMessage(prospect, envWithoutAddress);
 
-    assert(!withCard.includes("Falta dirección postal"), "Should not show warning if address exists");
+    assert(!withCard.includes("Falta dirección postal"), "Should not show warning for a complete address");
+    assert(incompleteCard.includes("Falta dirección postal: no enviar"), "An incomplete street-only address must be blocked");
     assert(withoutCard.includes("Falta dirección postal: no enviar"), "Should include visible warning if address is missing");
   }
 });
