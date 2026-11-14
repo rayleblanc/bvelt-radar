@@ -378,6 +378,22 @@ export const DEFAULT_FOUNDER_MISSION: MissionConfig = {
   max_daily_outreach: 12
 };
 
+const US_STATE_CODES = new Set([
+  "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA", "HI", "ID",
+  "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD", "MA", "MI", "MN", "MS",
+  "MO", "MT", "NE", "NV", "NH", "NJ", "NM", "NY", "NC", "ND", "OH", "OK",
+  "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV",
+  "WI", "WY", "DC"
+]);
+
+function extractUsStateCodes(cityLabels: string[]): string[] {
+  return Array.from(new Set(
+    cityLabels
+      .map((label) => String(label || "").split(",").pop()?.trim().toUpperCase() || "")
+      .filter((code) => US_STATE_CODES.has(code))
+  ));
+}
+
 // Hard daily execution limits (respect free-tier API ceilings)
 const LIMITS = {
   max_discover_per_day: 40,
