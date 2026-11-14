@@ -3,7 +3,7 @@ declare const process: any;
 import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, resolveTenantBuyerSegments } from './worker';
 import { DEFAULT_FOUNDER_MISSION, MissionConfig } from './worker';
 import { fetchPermitContractors } from './permitSources';
-import { learningCounterDelta } from './learningIntegrity';
+import { learningCounterDelta, recordScopedLearningEvent } from './learningIntegrity';
 
 console.log("=========================================");
 console.log("RUNNING BVELT RADAR CUSTOM MISSION TESTS");
@@ -49,6 +49,58 @@ tests.push({
 
     const won = learningCounterDelta("won");
     assert(won.won_count === 1 && won.sent_count === 0, "Only an explicit won outcome increments wins");
+  }
+});
+
+tests.push({
+  name: "Learning Integrity: idempotent retries never increment scoped aggregates twice",
+  run: async () => {
+    const insertedKeys = new Set<string>();
+    const aggregates = new Map<string, number>();
+    const mockDb: any = {
+      prepare: (sql: string) => ({
+        bind: (...args: any[]) => ({ sql, args })
+      }),
+      batch: async (statements: any[]) => {
+        const event = statements[0];
+        const idempotencyKey = String(event.args[11]);
+        const inserted = !insertedKeys.has(idempotencyKey);
+        if (inserted) insertedKeys.add(idempotencyKey);
+        let previousChanges = inserted ? 1 : 0;
+        const results = [{ meta: { changes: previousChanges } }];
+
+        for (const statement of statements.slice(1)) {
+          const guarded = /WHERE changes\\(\\) = 1/i.test(statement.sql);
+          const applied = guarded ? previousChanges === 1 : true;
+          const key = String(statement.args[2]);
+          if (applied) aggregates.set(key, (aggregates.get(key) || 0) + Number(statement.args[15] || 0));
+          previousChanges = applied ? 1 : 0;
+          results.push({ meta: { changes: previousChanges } });
+        }
+        return results;
+      }
+    };
+
+    const input = {
+      mode: "tenant" as const,
+      tenantId: "tenant_alpha",
+      prospectId: "prospect_123",
+      eventType: "won",
+      city: "Toronto, ON",
+      trade: "plumbing",
+      occurredAt: "2026-11-13T12:00:00.000Z",
+      idempotencyKey: "tenant-outcome:prospect_123:won"
+    };
+
+    const first = await recordScopedLearningEvent(mockDb, input);
+    const afterFirst = Array.from(aggregates.values()).reduce((sum, value) => sum + value, 0);
+    const retry = await recordScopedLearningEvent(mockDb, input);
+    const afterRetry = Array.from(aggregates.values()).reduce((sum, value) => sum + value, 0);
+
+    assert(first, "First event must be recorded");
+    assert(!retry, "Duplicate event must report no new insert");
+    assert(afterFirst === 3, "First event must increment city/trade/pair keys once");
+    assert(afterRetry === afterFirst, "Duplicate retry must not increment any aggregate");
   }
 });
 
