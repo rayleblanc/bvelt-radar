@@ -1,9 +1,11 @@
 declare const process: any;
 
-import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, resolveTenantBuyerSegments } from './worker';
+import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, resolveTenantBuyerSegments, tenantBuyerNameFits, isNonBusinessEntity } from './worker';
 import { DEFAULT_FOUNDER_MISSION, MissionConfig } from './worker';
 import { fetchPermitContractors } from './permitSources';
-import { learningCounterDelta } from './learningIntegrity';
+import { pickTargets } from './geoFrontier';
+import { isOffIcpName } from './emailSanitizer';
+import { learningCounterDelta, readScopedLearningStats, recordScopedLearningEvent } from './learningIntegrity';
 
 console.log("=========================================");
 console.log("RUNNING BVELT RADAR CUSTOM MISSION TESTS");
@@ -49,6 +51,12 @@ tests.push({
 
     const won = learningCounterDelta("won");
     assert(won.won_count === 1 && won.sent_count === 0, "Only an explicit won outcome increments wins");
+
+    const contacted = learningCounterDelta("contacted");
+    assert(contacted.contacted_count === 1 && contacted.sent_count === 0, "Manual Tenant contact must be tracked separately from Founder sends");
+
+    const lost = learningCounterDelta("lost");
+    assert(lost.lost_count === 1 && lost.won_count === 0, "Lost outcomes must remain distinct from won outcomes");
   }
 });
 
@@ -61,6 +69,103 @@ tests.push({
     assert(resolveTenantBuyerSegments("specialized unknown service").length === 0, "Unknown trade must fail closed instead of defaulting to property management");
     const aiSegments = resolveTenantBuyerSegments("unknown", ["medical clinics", "property groups"]);
     assert(aiSegments.length === 2 && aiSegments[0] === "medical clinics", "Validated AI buyer segments must take precedence");
+  }
+});
+
+tests.push({
+  name: "Learning Integrity: idempotent retries and unique contact denominators",
+  run: async () => {
+    const events = new Map<string, any>();
+    let aggregateChanges = 0;
+    const mockDb: any = {
+      prepare: (sql: string) => ({
+        bind: (...args: any[]) => ({
+          sql,
+          args,
+          first: async () => {
+            if (!/FROM learning_events WHERE idempotency_key/i.test(sql)) return null;
+            return events.get(String(args[0])) || null;
+          },
+          all: async () => {
+            if (!sql.includes("COUNT(DISTINCT prospect_id)")) throw new Error("Learning rates must use unique prospects, not event totals");
+            assert(sql.includes("'lost'") && sql.includes("'booked'") && sql.includes("'won'"), "Losses, bookings and sales must be in the conversion cohort");
+            assert(!sql.includes("'qualified'"), "Pre-contact qualification must not inflate the contacted denominator");
+            return { results: [{ key: "trade:plumbing", contacted_count: 4, won_count: 1 }] };
+          }
+        })
+      }),
+      batch: async (statements: any[]) => {
+        const args = statements[0].args;
+        const key = String(args[11]);
+        const existed = events.has(key);
+        if (!existed) {
+          events.set(key, {
+            prospect_id: args[1],
+            mode: args[2],
+            tenant_id: args[3],
+            event_type: args[4],
+            city: args[5],
+            trade: args[6],
+            variant_id: args[7],
+            angle: args[8],
+            value_usd: args[9]
+          });
+        }
+        const results = [{ meta: { changes: existed ? 0 : 1 } }];
+        for (const statement of statements.slice(1)) {
+          const applied = !existed && statement.sql.includes("WHERE EXISTS (SELECT 1 FROM learning_events WHERE id = ?)");
+          if (applied) aggregateChanges += 1;
+          results.push({ meta: { changes: applied ? 1 : 0 } });
+        }
+        return results;
+      }
+    };
+
+    const input = {
+      mode: "tenant" as const,
+      tenantId: "tenant_alpha",
+      prospectId: "prospect_123",
+      eventType: "won",
+      city: "Toronto, ON",
+      trade: "plumbing",
+      variantId: "variant_a",
+      angle: "contact_gap",
+      valueUsd: 250,
+      occurredAt: "2026-11-13T12:00:00.000Z",
+      idempotencyKey: "tenant-outcome:prospect_123:won"
+    };
+
+    const first = await recordScopedLearningEvent(mockDb, input);
+    const retry = await recordScopedLearningEvent(mockDb, input);
+    const conflict = await recordScopedLearningEvent(mockDb, { ...input, valueUsd: 500 });
+    assert(first, "First event must be recorded");
+    assert(retry, "An exact retry must be acknowledged");
+    assert(!conflict, "A conflicting reuse of an idempotency key must be rejected");
+    assert(aggregateChanges === 5, "City, trade, pair, variant and angle aggregates must increment exactly once");
+
+    const rates = await readScopedLearningStats(mockDb, "tenant", "tenant_alpha");
+    assert(Math.abs(rates["trade:plumbing"] - (2 / 6)) < 0.0001, "Win rate must use four unique contacted prospects, including lost/booked outcomes");
+  }
+});
+
+tests.push({
+  name: "Founder uses open market priorities without fixed cities or country allowlists",
+  run: async () => {
+    const targets = await getPriorityTargets(1, {} as any, "founder", null);
+    assert(targets.activeCities.length > 0, "Founder should rotate through the available gazetteer");
+    assert(targets.activeTrades.length > 0, "Founder should seed broad Bvelt-compatible segments");
+    assert(targets.missionConfig.geographies.length === 0, "Founder must not hardcode city lists");
+    assert(targets.missionConfig.countries.length === 0, "Priority countries must not become a country allowlist");
+    assert(DEFAULT_FOUNDER_MISSION.niches.includes("home_services"), "Founder seeds broad market-universe segments");
+    assert(DEFAULT_FOUNDER_MISSION.geographies.length === 0, "Default Founder mission must not pin cities");
+
+    const picks = await pickTargets({} as any, {
+      tenantId: "founder",
+      trades: [],
+      count: 5,
+      countries: []
+    });
+    assert(picks.length === 0, "GeoFrontier must not invent a trade when none is supplied");
   }
 });
 
@@ -1197,7 +1302,7 @@ tests.push({
       },
       {
         id: "p_2",
-        tenant_id: "t_tenant123",
+        tenant_id: "bvelt_tenant123",
         name: "Lone Star Plumbing",
         city: "Dallas, TX",
         trade: "plumbing",
@@ -1234,7 +1339,12 @@ tests.push({
         TELEGRAM_CHAT_ID: "",
         RADAR_DB: {
           prepare: (sql: string) => ({
-            all: async () => ({ results: mockProspects })
+            run: async () => ({ success: true, meta: { changes: 1 } }),
+            first: async () => null,
+            bind: (...args: any[]) => ({
+              all: async () => ({ results: mockProspects }),
+              run: async () => ({ success: true, meta: { changes: 1 } })
+            })
           })
         }
       };
@@ -1278,8 +1388,8 @@ tests.push({
 
       try {
         const tenantEnv: any = {
-          BVELT_INGEST_URL: "https://bvelt.app/api/radar/observations",
-          BVELT_INGEST_KEY: "test_tenant_key_456",
+          BVELT_TENANT_INGEST_URL: "https://bvelt.app/api/radar/observations",
+          BVELT_TENANT_INGEST_KEY: "test_tenant_key_456",
           RADAR_DB: {
             prepare: (sql: string) => ({
               bind: (...args: any[]) => ({
@@ -1287,7 +1397,7 @@ tests.push({
                   results: [
                     {
                       id: "p_tenant_1",
-                      tenant_id: "t_tenant123",
+                      tenant_id: "bvelt_tenant123",
                       name: "Lone Star Plumbing",
                       city: "Dallas, TX",
                       trade: "plumbing",
@@ -1303,16 +1413,17 @@ tests.push({
                   ]
                 })
               })
-            })
+            }),
+            batch: async (statements: any[]) => statements.map(() => ({ meta: { changes: 1 } }))
           }
         };
 
-        const tenantRes = await sendTenantObservationsToBvelt(tenantEnv, "t_tenant123");
+        const tenantRes = await sendTenantObservationsToBvelt(tenantEnv, "bvelt_tenant123");
         assert(tenantRes.ok === true, "Tenant observation push must succeed");
         assert(tenantRes.sent_count === 1, "Should send 1 tenant prospect");
         assert(Boolean(tenantPostCalled), "Fetch must be invoked for tenant push");
-        assert(tenantHeaderTenantId === "t_tenant123", "X-Bvelt-Tenant-Id header must match tenant ID");
-        assert(tenantPostBody.tenant_id === "t_tenant123", "Payload tenant_id must be t_tenant123");
+        assert(tenantHeaderTenantId === "bvelt_tenant123", "X-Bvelt-Tenant-Id header must match tenant ID");
+        assert(tenantPostBody.tenant_id === "bvelt_tenant123", "Payload tenant_id must be t_tenant123");
         assert(tenantPostBody.items[0].name === "Lone Star Plumbing", "Item should be Lone Star Plumbing");
       } finally {
         globalThis.fetch = originalFetch2;
@@ -1415,7 +1526,7 @@ tests.push({
                 } else if (sqlLower.includes("update sidecar_dispatches set status = 'completed'")) {
                   const d = dispatchesStore.find(x => x.run_id === args[2] && x.tenant_id === args[3]);
                   if (d) { d.status = "completed"; d.completed_at = args[0]; d.updated_at = args[1]; }
-                } else if (sqlLower.includes("insert into source_evidence")) {
+                } else if (sqlLower.includes("insert into source_evidence") || sqlLower.includes("insert or ignore into source_evidence")) {
                   evidenceStore.push({
                     id: args[0],
                     run_id: args[1],
@@ -1454,9 +1565,9 @@ tests.push({
                 } else if (sqlLower.includes("select 1 from research_run_candidates")) {
                   const c = candidatesStore.find(x => x.run_id === args[0] && x.mode === args[1] && x.tenant_id === args[2] && x.prospect_id === args[3]);
                   return c ? { 1: 1 } : null;
-                } else if (sqlLower.includes("select id, signals_json from prospects")) {
+                } else if (sqlLower.includes("select id, signals_json, website from prospects") || sqlLower.includes("select id, signals_json from prospects")) {
                   const p = prospectsStore.find(x => x.id === args[0] && x.mode === args[1] && (x.tenant_id || "founder") === args[2]);
-                  return p ? { id: p.id, signals_json: p.signals_json } : null;
+                  return p ? { id: p.id, signals_json: p.signals_json, website: p.website } : null;
                 } else if (sqlLower.includes("select id from source_evidence")) {
                   const ev = evidenceStore.find(x => x.prospect_id === args[0] && x.source_id === args[1] && x.evidence_type === args[2] && x.content_hash === args[3]);
                   return ev ? { id: ev.id } : null;
@@ -1538,7 +1649,7 @@ tests.push({
             source_url: "https://acmeplumbing.com",
             evidence_type: "business_website_profile",
             evidence: { contact_form_observed: true, page_title: "Acme Plumbing Services" },
-            content_hash: "hash_001",
+            content_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             extractor_version: "bvelt-scrapling-1.0.0",
             confidence: 0.78,
             observed_at: new Date().toISOString()
@@ -1605,7 +1716,7 @@ tests.push({
             source_url: "https://acmeplumbing.com",
             evidence_type: "business_website_profile",
             evidence: { contact_form_observed: true },
-            content_hash: "hash_001",
+            content_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             extractor_version: "bvelt-scrapling-1.0.0"
           }
         ]
@@ -1836,10 +1947,11 @@ tests.push({
     const crossOutcomeReq = new Request("https://radar.bvelt.app/api/prospects/outcome", {
       method: "POST",
       headers: {
-        "Authorization": "Bearer secret_founder_svc_key",
+        "Authorization": "Bearer secret_radar_svc_key",
+        "X-Tenant-Id": "tenant_gamma",
         "Content-Type": "application/json"
       },
-      body: JSON.stringify({ prospect_id: "p_target_01", tenant_id: "tenant_gamma", outcome: "won" })
+      body: JSON.stringify({ prospect_id: "p_target_01", tenant_id: "tenant_alpha", outcome: "won" })
     });
     const resCrossOutcome = await worker.fetch(crossOutcomeReq, mockEnv, {} as any);
     assert(resCrossOutcome.status === 403, "Outcome submission with mismatched prospect tenant must return 403");
@@ -1851,16 +1963,96 @@ tests.push({
   }
 });
 
+tests.push({
+  name: "Tenant profile config requires real industry and city and never starts discovery",
+  run: async () => {
+    const writes: Array<{ sql: string; args: any[] }> = [];
+    const env: any = {
+      RADAR_SERVICE_KEY: "radar-service-secret",
+      RADAR_DB: {
+        prepare: (sql: string) => ({
+          bind: (...args: any[]) => ({
+            run: async () => {
+              writes.push({ sql, args });
+              return { success: true, meta: { changes: 1 } };
+            },
+            first: async () => null,
+            all: async () => ({ results: [] })
+          })
+        })
+      }
+    };
+    const headers = {
+      "Authorization": "Bearer radar-service-secret",
+      "X-Tenant-Id": "tenant_alpha",
+      "Content-Type": "application/json"
+    };
+    const missingCity = await worker.fetch(new Request("https://radar.test/api/tenants/config", {
+      method: "POST", headers, body: JSON.stringify({
+        tenant_id: "tenant_alpha", industry: "plumbing", niche: "plumbing"
+      })
+    }), env, {} as any);
+    assert(missingCity.status === 409, "Tenant profile without a city must return 409");
+    const missingCityBody = await missingCity.json() as any;
+    assert(missingCityBody.error === "tenant_profile_incomplete" && missingCityBody.missing_fields.includes("cities"), "Missing city must be explicit");
+
+    const missingTrade = await worker.fetch(new Request("https://radar.test/api/tenants/config", {
+      method: "POST", headers, body: JSON.stringify({
+        tenant_id: "tenant_alpha", cities: ["Austin, TX"]
+      })
+    }), env, {} as any);
+    assert(missingTrade.status === 409, "Tenant profile without industry/niche must return 409");
+
+    const founderScope = await worker.fetch(new Request("https://radar.test/api/tenants/config", {
+      method: "POST", headers, body: JSON.stringify({
+        tenant_id: "founder", industry: "plumbing", niche: "plumbing", cities: ["Austin, TX"]
+      })
+    }), env, {} as any);
+    assert(founderScope.status === 400, "Tenant config must never write into Founder scope");
+
+    const valid = await worker.fetch(new Request("https://radar.test/api/tenants/config", {
+      method: "POST", headers, body: JSON.stringify({
+        tenant_id: "tenant_alpha",
+        tenant_name: "Local Plumbing Co",
+        industry: "plumbing",
+        niche: "plumbing",
+        subniches: ["property management"],
+        services: ["plumbing"],
+        service_areas: ["Austin, TX"],
+        cities: ["Austin, TX"],
+        countries: ["US"],
+        regions: ["TX"],
+        languages: ["en"],
+        icp_description: "Commercial property owners needing plumbing services",
+        icp_keywords: ["commercial property owners", "facility managers"],
+        minimum_score: 55,
+        daily_outreach_limit: 12,
+        allowed_markets: ["property management"],
+        campaign_goal: "Book qualified service jobs",
+        messaging_angle: "fast response"
+      })
+    }), env, {} as any);
+    assert(valid.status === 200, "Complete tenant profile must save");
+    const result = await valid.json() as any;
+    assert(result.success === true && result.run_id === null, "Profile save must not start discovery");
+    assert(writes.length === 1 && writes[0].sql.includes("INSERT INTO tenant_config"), "Only tenant profile persistence may run");
+  }
+});
+
 // Test 42: Tenant Auto-Prospecting & Bootstrap (No HVAC defaults, requires real data)
 tests.push({
   name: "Tenant Auto-Prospecting & Bootstrap: rejects missing trade/city without defaulting to HVAC",
   run: async () => {
     const { bootstrapBveltTenant } = await import('./worker');
+    const tenantWrites: Array<{ sql: string; args: any[] }> = [];
     const mockEnv: any = {
       RADAR_DB: {
-        prepare: () => ({
-          bind: () => ({
-            run: async () => ({ success: true }),
+        prepare: (sql: string) => ({
+          bind: (...args: any[]) => ({
+            run: async () => {
+              tenantWrites.push({ sql, args });
+              return { success: true, meta: { changes: 1 } };
+            },
             first: async () => null,
             all: async () => ({ results: [] })
           })
@@ -1889,8 +2081,31 @@ tests.push({
     assert(missingCityRes.status === "pending_configuration", "Status must be pending_configuration");
     assert(missingCityRes.missing_fields?.includes("city") === true, "Must flag missing 'city'");
 
-    // 3. Valid trade and city: sets up configuration and activates
+    // 3. Unknown trade without ICP: preserve the business profile, but do not invent buyers.
+    const unknownTradeRes = await bootstrapBveltTenant(mockEnv, {
+      tenant_id: "client_unknown_trade",
+      trade: "specialty glass repair",
+      city: "Dallas, TX",
+      skip_fast_discovery: true
+    });
+    assert(unknownTradeRes.success === true, "An unmapped industry must remain eligible and its profile must be saved");
+    assert(unknownTradeRes.status === "pending_configuration", "Without buyer ICP signals, discovery must remain pending");
+    assert(unknownTradeRes.missing_fields?.includes("target_niches_or_icp_keywords") === true, "Missing buyer ICP inputs must be reported");
+
     const mockCtx = { waitUntil: (_p: any) => {} } as any;
+
+    // 4. Unknown trade with explicit ICP keywords: allow the market without a closed trade map.
+    const unknownWithIcpRes = await bootstrapBveltTenant(mockEnv, {
+      tenant_id: "client_unknown_with_icp",
+      trade: "specialty glass repair",
+      city: "Dallas, TX",
+      icp_keywords: ["commercial property owners", "facility managers"],
+      skip_fast_discovery: true
+    }, mockCtx);
+    assert(unknownWithIcpRes.success === true, "Explicit ICP signals must keep an unmapped industry eligible");
+    assert(unknownWithIcpRes.niches.includes("commercial property owners"), "ICP keywords must be usable as buyer segments");
+
+    // 5. Valid trade and city: sets up configuration and activates
     const validRes = await bootstrapBveltTenant(mockEnv, {
       tenant_id: "client_plumbing_pro",
       tenant_name: "Pro Drain Care",
@@ -1903,6 +2118,51 @@ tests.push({
     assert(validRes.city === "Dallas, TX", "City must match resolved city");
     assert(validRes.niches.length > 0, "Niches must be populated from trade map");
     assert(validRes.niches.includes("property management"), "Plumbing must target property management buyers");
+
+    const tenantInsert = tenantWrites.find(write => write.sql.includes("INSERT INTO tenant_config") && write.args[0] === "client_plumbing_pro");
+    assert(!!tenantInsert, "Bootstrap must persist the known tenant configuration");
+    assert(JSON.stringify(JSON.parse(tenantInsert!.args[7])) === JSON.stringify(["US"]), "US city must infer only US, not default US+CA");
+    assert(JSON.parse(tenantInsert!.args[10]).length === 0, "Languages must remain unset unless supplied");
+
+    // Explicit international country and language must be preserved.
+    const internationalRes = await bootstrapBveltTenant(mockEnv, {
+      tenant_id: "client_london",
+      trade: "plumbing",
+      city: "London, UK",
+      country_code: "GB",
+      language: "en",
+      skip_fast_discovery: true
+    }, mockCtx);
+    assert(internationalRes.success === true, "Explicit international market configuration must be accepted");
+    const internationalInsert = tenantWrites.filter(write => write.sql.includes("INSERT INTO tenant_config")).slice(-1)[0];
+    assert(JSON.stringify(JSON.parse(internationalInsert.args[7])) === JSON.stringify(["GB"]), "International country code must be preserved without US/CA defaults");
+    assert(JSON.stringify(JSON.parse(internationalInsert.args[10])) === JSON.stringify(["en"]), "Explicit language must be preserved");
+  }
+});
+
+tests.push({
+  name: "Tenant buyer matching stays open outside mapped property segments",
+  run: () => {
+    assert(tenantBuyerNameFits("Riverside School District", "education buyers"), "Education buyers must remain eligible for Tenant ICP");
+    assert(tenantBuyerNameFits("Northside Auto Repair", "automotive fleet buyers"), "Automotive buyers must remain eligible for Tenant ICP");
+    assert(tenantBuyerNameFits("Local Law Firm", "legal services buyers"), "Legal buyers must remain eligible for Tenant ICP");
+    assert(tenantBuyerNameFits("Downtown Property Management", "commercial property owners"), "Property buyer segment must match property businesses");
+    assert(tenantBuyerNameFits("Harborview Hotel", "property management") === false, "Property-specific ICP must reject unrelated hotel names");
+    assert(isNonBusinessEntity("Riverside University", "https://riverside.edu", "tenant") === false, "Education domains must not be globally rejected");
+    assert(isNonBusinessEntity("Riverside University", "https://riverside.edu", "founder") === false, "Education remains a compatible Founder segment");
+  }
+});
+
+tests.push({
+  name: "ICP policy follows market-universe and Tenant buyer scope",
+  run: () => {
+    assert(isOffIcpName("Gentlemen's Barber & Shave Parlor") === true, "Founder must exclude hair/nail salon category");
+    assert(isOffIcpName("Northside Auto Repair") === false, "Automotive businesses remain Founder-eligible");
+    assert(isOffIcpName("Downtown Dental Clinic") === false, "Healthcare businesses remain Founder-eligible");
+    assert(isOffIcpName("Harborview Hotel") === false, "Hospitality businesses remain Founder-eligible");
+    assert(isOffIcpName("Anytime Fitness", true) === false, "Tenant ICP may target gyms when configured");
+    assert(isOffIcpName("Downtown Grocery Market", true) === false, "Tenant ICP may target grocery buyers when configured");
+    assert(isOffIcpName("St Mary's Church", true) === true, "Non-business institutions remain excluded");
   }
 });
 
@@ -2002,6 +2262,7 @@ tests.push({
         id: "p_sync_01",
         mode: "founder",
         tenant_id: "founder",
+        website: "https://testbusiness.com",
         signals_json: JSON.stringify({ existing_fact: true })
       }
     ];
@@ -2023,7 +2284,7 @@ tests.push({
           },
           all: async () => ({ results: [] }),
           run: async () => {
-            if (sql.includes("INSERT INTO source_evidence")) {
+            if (sql.includes("INSERT INTO source_evidence") || sql.includes("INSERT OR IGNORE INTO source_evidence")) {
               evidenceStore.push({ id: args[0], run_id: args[1], prospect_id: args[4], content_hash: args[9] });
             }
             if (sql.includes("UPDATE sidecar_dispatches")) {
@@ -2112,7 +2373,7 @@ tests.push({
             source_id: "scrapling_test",
             source_url: "https://testbusiness.com",
             evidence_type: "business_profile",
-            content_hash: "hash_sync_123",
+            content_hash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             evidence: {
               page_title: "Test Business Homepage",
               public_business_phones: ["+15551234567"]
@@ -2165,6 +2426,71 @@ tests.push({
     });
     const founderAuth = resolveTenantAuthContext(founderRequest, env, "founder-secret", "");
     assert(founderAuth.authorized && founderAuth.canAccessTenant("tenant_beta"), "Founder credential retains administrative access");
+  }
+});
+
+tests.push({
+  name: "Tenant ROI: requires authentication and enforces exact tenant scope",
+  run: async () => {
+    const env: any = {
+      FOUNDER_SERVICE_KEY: "founder-secret",
+      RADAR_SERVICE_KEY: "radar-service-secret",
+      RADAR_DB: {
+        prepare: (sql: string) => ({
+          bind: (...args: any[]) => ({
+            first: async () => ({
+              total: 8,
+              pipeline: 2,
+              outreach: 1,
+              conversion_denominator: 5,
+              contacted: 4,
+              replied: 2,
+              booked: 1,
+              won: 1,
+              lost: 1,
+              won_value_usd_total: 250,
+              pipeline_ev_raw: 900,
+              avg_score: 70
+            })
+          })
+        })
+      }
+    };
+
+    const unauthenticated = await worker.fetch(
+      new Request("https://radar.test/api/tenants/roi?tenant_id=tenant_alpha"),
+      env,
+      {} as any
+    );
+    assert(unauthenticated.status === 401, "ROI must reject unauthenticated requests");
+
+    const crossTenantRequest = new Request("https://radar.test/api/tenants/roi?tenant_id=tenant_beta", {
+      headers: {
+        "Authorization": "Bearer radar-service-secret",
+        "X-Tenant-Id": "tenant_alpha"
+      }
+    });
+    const crossTenantAuth = resolveTenantAuthContext(crossTenantRequest, env, "founder-secret", "");
+    assert(crossTenantAuth.authorized, "Radar service fixture must authenticate with its explicit tenant header");
+    assert(!crossTenantAuth.canAccessTenant("tenant_beta"), "Radar service must not access a different tenant");
+    const crossTenant = await worker.fetch(crossTenantRequest, env, {} as any);
+    assert(crossTenant.status === 403, `Tenant service credentials must not read another tenant's ROI (received ${crossTenant.status})`);
+
+    const scoped = await worker.fetch(
+      new Request("https://radar.test/api/tenants/roi?tenant_id=tenant_alpha", {
+        headers: {
+          "Authorization": "Bearer radar-service-secret",
+          "X-Tenant-Id": "tenant_alpha"
+        }
+      }),
+      env,
+      {} as any
+    );
+    assert(scoped.status === 200, "A tenant-scoped service credential must read its own ROI");
+    const body = await scoped.json() as any;
+    assert(body.conversion_denominator === 5, "ROI must expose the full contacted denominator");
+    assert(body.booked === 1 && body.won === 1 && body.lost === 1, "Bookings, wins and losses must remain distinct funnel stages");
+    assert(body.reply_rate_pct === 40 && body.win_rate_pct === 20, "Conversion rates must use the unique contacted denominator");
   }
 });
 
