@@ -2015,6 +2015,8 @@ tests.push({
     assert(unknownTradeRes.status === "pending_configuration", "Without buyer ICP signals, discovery must remain pending");
     assert(unknownTradeRes.missing_fields?.includes("target_niches_or_icp_keywords") === true, "Missing buyer ICP inputs must be reported");
 
+    const mockCtx = { waitUntil: (_p: any) => {} } as any;
+
     // 4. Unknown trade with explicit ICP keywords: allow the market without a closed trade map.
     const unknownWithIcpRes = await bootstrapBveltTenant(mockEnv, {
       tenant_id: "client_unknown_with_icp",
@@ -2027,7 +2029,6 @@ tests.push({
     assert(unknownWithIcpRes.niches.includes("commercial property owners"), "ICP keywords must be usable as buyer segments");
 
     // 5. Valid trade and city: sets up configuration and activates
-    const mockCtx = { waitUntil: (_p: any) => {} } as any;
     const validRes = await bootstrapBveltTenant(mockEnv, {
       tenant_id: "client_plumbing_pro",
       tenant_name: "Pro Drain Care",
