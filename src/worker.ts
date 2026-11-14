@@ -7151,7 +7151,7 @@ export async function handleProspectEvent(
     SET status = ?,
         outcome = ?,
         response_type = ?,
-        last_reply_content = ?,
+        last_reply_content = COALESCE(?, last_reply_content),
         last_reply_at = COALESCE(?, last_reply_at),
         cooldown_until = ?,
         updated_at = ?
