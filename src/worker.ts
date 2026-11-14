@@ -10106,6 +10106,8 @@ export async function sendTenantObservationsToBvelt(
   skipped?: boolean;
   reason?: string;
   sent_count?: number;
+  history_count?: number;
+  history_error?: boolean;
   tenant_id: string;
 }> {
   if (!tenantId || !tenantId.startsWith("bvelt_")) {
@@ -10218,10 +10220,12 @@ export async function sendTenantObservationsToBvelt(
           observedAt
         );
       }));
+      let historyCount = 0;
       for (let offset = 0; offset < historyStatements.length; offset += 50) {
-        await env.RADAR_DB.batch(historyStatements.slice(offset, offset + 50));
+        const batchResult = await env.RADAR_DB.batch(historyStatements.slice(offset, offset + 50));
+        historyCount += (batchResult || []).reduce((sum: number, result: any) => sum + Number(result?.meta?.changes || 0), 0);
       }
-      return { ok: true, sent_count: items.length, history_count: historyStatements.length, tenant_id: tenantId };
+      return { ok: true, sent_count: items.length, history_count: historyCount, tenant_id: tenantId };
     } catch (historyError: any) {
       console.warn("[Tenant Observation History] Append failed:", historyError);
       return { ok: true, sent_count: items.length, history_count: 0, history_error: true, tenant_id: tenantId };
