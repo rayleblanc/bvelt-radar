@@ -1963,6 +1963,82 @@ tests.push({
   }
 });
 
+tests.push({
+  name: "Tenant profile config requires real industry and city and never starts discovery",
+  run: async () => {
+    const writes: Array<{ sql: string; args: any[] }> = [];
+    const env: any = {
+      RADAR_SERVICE_KEY: "radar-service-secret",
+      RADAR_DB: {
+        prepare: (sql: string) => ({
+          bind: (...args: any[]) => ({
+            run: async () => {
+              writes.push({ sql, args });
+              return { success: true, meta: { changes: 1 } };
+            },
+            first: async () => null,
+            all: async () => ({ results: [] })
+          })
+        })
+      }
+    };
+    const headers = {
+      "Authorization": "Bearer radar-service-secret",
+      "X-Tenant-Id": "tenant_alpha",
+      "Content-Type": "application/json"
+    };
+    const missingCity = await worker.fetch(new Request("https://radar.test/api/tenants/config", {
+      method: "POST", headers, body: JSON.stringify({
+        tenant_id: "tenant_alpha", industry: "plumbing", niche: "plumbing"
+      })
+    }), env, {} as any);
+    assert(missingCity.status === 409, "Tenant profile without a city must return 409");
+    const missingCityBody = await missingCity.json() as any;
+    assert(missingCityBody.error === "tenant_profile_incomplete" && missingCityBody.missing_fields.includes("cities"), "Missing city must be explicit");
+
+    const missingTrade = await worker.fetch(new Request("https://radar.test/api/tenants/config", {
+      method: "POST", headers, body: JSON.stringify({
+        tenant_id: "tenant_alpha", cities: ["Austin, TX"]
+      })
+    }), env, {} as any);
+    assert(missingTrade.status === 409, "Tenant profile without industry/niche must return 409");
+
+    const founderScope = await worker.fetch(new Request("https://radar.test/api/tenants/config", {
+      method: "POST", headers, body: JSON.stringify({
+        tenant_id: "founder", industry: "plumbing", niche: "plumbing", cities: ["Austin, TX"]
+      })
+    }), env, {} as any);
+    assert(founderScope.status === 400, "Tenant config must never write into Founder scope");
+
+    const valid = await worker.fetch(new Request("https://radar.test/api/tenants/config", {
+      method: "POST", headers, body: JSON.stringify({
+        tenant_id: "tenant_alpha",
+        tenant_name: "Local Plumbing Co",
+        industry: "plumbing",
+        niche: "plumbing",
+        subniches: ["property management"],
+        services: ["plumbing"],
+        service_areas: ["Austin, TX"],
+        cities: ["Austin, TX"],
+        countries: ["US"],
+        regions: ["TX"],
+        languages: ["en"],
+        icp_description: "Commercial property owners needing plumbing services",
+        icp_keywords: ["commercial property owners", "facility managers"],
+        minimum_score: 55,
+        daily_outreach_limit: 12,
+        allowed_markets: ["property management"],
+        campaign_goal: "Book qualified service jobs",
+        messaging_angle: "fast response"
+      })
+    }), env, {} as any);
+    assert(valid.status === 200, "Complete tenant profile must save");
+    const result = await valid.json() as any;
+    assert(result.success === true && result.run_id === null, "Profile save must not start discovery");
+    assert(writes.length === 1 && writes[0].sql.includes("INSERT INTO tenant_config"), "Only tenant profile persistence may run");
+  }
+});
+
 // Test 42: Tenant Auto-Prospecting & Bootstrap (No HVAC defaults, requires real data)
 tests.push({
   name: "Tenant Auto-Prospecting & Bootstrap: rejects missing trade/city without defaulting to HVAC",
