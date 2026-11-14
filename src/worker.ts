@@ -10182,7 +10182,49 @@ export async function sendTenantObservationsToBvelt(
     if (!res.ok) {
       return { ok: false, reason: `http_${res.status}`, tenant_id: tenantId };
     }
-    return { ok: true, sent_count: items.length, tenant_id: tenantId };
+
+    // Append a private, deduplicated snapshot only when the observed state changes.
+    // Contact details remain in the current prospect record and are not duplicated
+    // into the longitudinal history payload.
+    try {
+      const observedAt = String(payload.timestamp);
+      const historyStatements = await Promise.all(items.map(async (item) => {
+        const snapshot = {
+          prospect_id: item.prospect_id,
+          name: item.name,
+          city: item.city,
+          trade: item.trade,
+          website: item.website,
+          score: item.score,
+          status: item.status,
+          outcome: item.outcome,
+          angle: item.angle,
+          created_at: item.created_at
+        };
+        const canonical = JSON.stringify(snapshot);
+        const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonical));
+        const snapshotHash = Array.from(new Uint8Array(digest)).map(value => value.toString(16).padStart(2, "0")).join("");
+        return env.RADAR_DB.prepare(`
+          INSERT OR IGNORE INTO tenant_observation_events
+            (event_id, tenant_id, prospect_id, event_type, snapshot_hash, snapshot_json, observed_at)
+          VALUES (?, ?, ?, 'snapshot_observed', ?, ?, ?)
+        `).bind(
+          crypto.randomUUID(),
+          tenantId,
+          item.prospect_id,
+          snapshotHash,
+          canonical,
+          observedAt
+        );
+      }));
+      for (let offset = 0; offset < historyStatements.length; offset += 50) {
+        await env.RADAR_DB.batch(historyStatements.slice(offset, offset + 50));
+      }
+      return { ok: true, sent_count: items.length, history_count: historyStatements.length, tenant_id: tenantId };
+    } catch (historyError: any) {
+      console.warn("[Tenant Observation History] Append failed:", historyError);
+      return { ok: true, sent_count: items.length, history_count: 0, history_error: true, tenant_id: tenantId };
+    }
   } catch (err: any) {
     return { ok: false, reason: err?.message || String(err), tenant_id: tenantId };
   }
