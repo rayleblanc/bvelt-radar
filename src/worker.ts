@@ -4351,15 +4351,15 @@ async function handleDecision(
     }
 
     // Update prospect only after the provider confirms a real dispatch.
-    const cooldown21d = new Date(Date.now() + 21 * 24 * 60 * 60 * 1000).toISOString();
+    const cooldown5d = new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString();
     try {
       await db.prepare(
         "UPDATE prospects SET status = 'sent', outcome = 'sent', last_contact_at = ?, cooldown_until = ?, dispatch_provider = ?, dispatch_message_id = ?, dispatch_status = ?, updated_at = ? WHERE id = ?"
-      ).bind(timestamp, cooldown21d, dispatchOutcome.provider, dispatchOutcome.messageId || null, dispatchOutcome.status, timestamp, id).run();
+      ).bind(timestamp, cooldown5d, dispatchOutcome.provider, dispatchOutcome.messageId || null, dispatchOutcome.status, timestamp, id).run();
     } catch (e) {
       await db.prepare(
         "UPDATE prospects SET status = 'sent', outcome = 'sent', last_contact_at = ?, cooldown_until = ?, updated_at = ? WHERE id = ?"
-      ).bind(timestamp, cooldown21d, timestamp, id).run();
+      ).bind(timestamp, cooldown5d, timestamp, id).run();
     }
 
     try {
@@ -4388,16 +4388,16 @@ async function handleDecision(
         .bind(timestamp, id).run();
     } catch (e) {}
 
-    // Auto-suppress email and domain for 21-day cooldown window
+    // Auto-suppress email and domain for 5-day follow-up cooldown window
     if (prospect.email) {
       await db.prepare("INSERT OR REPLACE INTO suppression (key, reason, created_at) VALUES (?, ?, ?)")
-        .bind(prospect.email.toLowerCase(), `Contacted on ${timestamp} (cooldown until ${cooldown21d})`, timestamp).run();
+        .bind(prospect.email.toLowerCase(), `Contacted on ${timestamp} (cooldown until ${cooldown5d})`, timestamp).run();
     }
     if (prospect.website) {
       const domain = getDomain(prospect.website);
       if (domain) {
         await db.prepare("INSERT OR REPLACE INTO suppression (key, reason, created_at) VALUES (?, ?, ?)")
-          .bind(domain.toLowerCase(), `Contacted on ${timestamp} (cooldown until ${cooldown21d})`, timestamp).run();
+          .bind(domain.toLowerCase(), `Contacted on ${timestamp} (cooldown until ${cooldown5d})`, timestamp).run();
       }
     }
 
