@@ -468,16 +468,7 @@ export default function App() {
       m.cumulativeEv = runningCumulative;
     });
 
-    if (runningCumulative === 0) {
-      const totalCurrentEv = items.reduce((sum, i) => sum + i.ev, 0) || 18500;
-      let base = Math.round(totalCurrentEv * 0.35);
-      const step = Math.round((totalCurrentEv - base) / 5);
-      months.forEach((m, idx) => {
-        const val = base + (step * idx);
-        m.cumulativeEv = val;
-        m.ev = idx === 0 ? base : step;
-      });
-    }
+    // No synthetic baseline: an empty evidence set must display zero, not fabricated pipeline value.
 
     return months;
   }, [opportunities, prospects]);
