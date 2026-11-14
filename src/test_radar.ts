@@ -87,6 +87,7 @@ tests.push({
           all: async () => {
             if (!sql.includes("COUNT(DISTINCT prospect_id)")) throw new Error("Learning rates must use unique prospects, not event totals");
             assert(sql.includes("'lost'") && sql.includes("'booked'") && sql.includes("'won'"), "Losses, bookings and sales must be in the conversion cohort");
+            assert(!sql.includes("'qualified'"), "Pre-contact qualification must not inflate the contacted denominator");
             return { results: [{ key: "trade:plumbing", contacted_count: 4, won_count: 1 }] };
           }
         })
