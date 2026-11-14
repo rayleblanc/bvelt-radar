@@ -4873,7 +4873,7 @@ export function tenantBuyerNameFits(name: string, nicheOrTrade: string): boolean
   const n = name.toLowerCase();
   const niche = (nicheOrTrade || "").toLowerCase();
 
-  const propertyNiche = /property|management|manager|hoa|condo|apartment|realty|real estate|facility|building management|community management|office park|industrial park|warehouse/.test(niche);
+  const propertyNiche = /property|real estate|hoa|condo|apartment|realty|facility|building management|community management|office park|industrial park|warehouse/.test(niche);
   const hotelNiche = /hotel|hospitality|lodging|extended stay|senior living|assisted living|nursing home/.test(niche);
 
   if (propertyNiche) {
