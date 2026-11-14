@@ -106,8 +106,6 @@ export async function recordScopedLearningEvent(
     if (input.variantId) keys.add(`variant:${input.variantId}`);
     if (input.angle) keys.add(`angle:${input.angle}`);
 
-    // Prefer EXISTS(event id) over changes(): D1 batch change-count semantics vary,
-    // and an extra unused bind previously broke aggregate statements.
     const statements = [
       db
         .prepare(
@@ -136,6 +134,9 @@ export async function recordScopedLearningEvent(
         ),
     ];
 
+    // D1 executes batch statements sequentially. WHERE changes() = 1 gates each
+    // aggregate on the immediately preceding successful insert/update so exact
+    // INSERT OR IGNORE retries (changes=0) do not double-count.
     for (const key of keys) {
       statements.push(
         db
@@ -148,7 +149,7 @@ export async function recordScopedLearningEvent(
         unknown_count, total_events, updated_at
       )
       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-      WHERE EXISTS (SELECT 1 FROM learning_events WHERE id = ?)
+      WHERE changes() = 1
       ON CONFLICT(mode, tenant_id, key) DO UPDATE SET
         sent_count = sent_count + excluded.sent_count,
         delivered_count = delivered_count + excluded.delivered_count,
@@ -183,8 +184,7 @@ export async function recordScopedLearningEvent(
             delta.contacted_count,
             delta.unknown_count,
             delta.event_count,
-            occurredAt,
-            eventId
+            occurredAt
           )
       );
     }
