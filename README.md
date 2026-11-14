@@ -63,7 +63,7 @@ FOUNDING_LANGUAGES = "en"
 FOUNDING_MIN_SCORE = "50"
 ```
 
-Los valores son ejemplos, no defaults. Puedes configurar ciudades explícitas de cualquier mercado. La rotación automática por país depende del catálogo geográfico disponible; si no hay ciudades o nichos configurados, Founder no encola trabajos.
+Los valores son ejemplos, no defaults. Puedes configurar ciudades explícitas de cualquier mercado. El catálogo actual de rotación automática cubre US/CA; para otros países configura ciudades explícitas. No existe fallback silencioso a US/CA. Si no hay ciudades y nichos configurados, Founder no encola trabajos.
 
 ### 4. Configurar el Webhook de Telegram (Botones Interactivos)
 Para que los botones `[✅ Mark Sent]`, `[❌ Discard]` y `[🚫 Suppress]` funcionen directamente desde Telegram:
