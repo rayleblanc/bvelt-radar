@@ -1008,6 +1008,8 @@ export default {
           recipientName: "Bvelt Founder Test",
           subject: "Bvelt email delivery check",
           body: `Hello,\n\nYou requested an email delivery check from Bvelt Radar. This message confirms that the configured sender can submit email to this mailbox.\n\nNo action is required.\n\nSent at: ${new Date().toISOString()}`,
+          includeSiteLink: false,
+          plainTextOnly: true,
           from: env.OUTBOUND_EMAIL_FROM,
           resendApiKey: env.RESEND_API_KEY,
           brevoApiKey: env.BREVO_API_KEY,
