@@ -696,10 +696,21 @@ export default function App() {
     return () => window.removeEventListener('beforeinstallprompt', handleInstallPrompt);
   }, [apiUrl]);
 
-  // Refetch telemetry on mode or tenant change
+  // Refetch telemetry on mode or tenant change, and periodically while the dashboard is visible.
   useEffect(() => {
     fetchTelemetry();
-  }, [currentMode, selectedTenantId]);
+    const refreshVisible = () => {
+      if (document.visibilityState === 'visible') fetchTelemetry();
+    };
+    const interval = window.setInterval(refreshVisible, 60000);
+    document.addEventListener('visibilitychange', refreshVisible);
+    window.addEventListener('focus', refreshVisible);
+    return () => {
+      window.clearInterval(interval);
+      document.removeEventListener('visibilitychange', refreshVisible);
+      window.removeEventListener('focus', refreshVisible);
+    };
+  }, [apiUrl, currentMode, selectedTenantId]);
 
   // Handle manual API config updates
   const saveApiSettings = (urlVal: string) => {
@@ -775,11 +786,8 @@ const submitDecision = async (prospectId: string, action: string) => {
         return;
       }
 
-      // Success: update local opportunities and prospects state immediately so closed/dispatched items leave open list
-      setOpportunities(prev => prev.filter(o => o.prospect_id !== prospectId));
-      setProspects(prev => prev.map(p => p.id === prospectId ? { ...p, status: action === 'sent' ? 'sent' : (action === 'discard' ? 'discarded' : p.status) } : p));
-
-      fetchTelemetry();
+      // Reload authoritative server state so counters and lifecycle statuses stay aligned.
+      await fetchTelemetry();
       if (inspectedProspect && inspectedProspect.id === prospectId) {
         setInspectedProspect(null);
       }
