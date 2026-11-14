@@ -157,7 +157,11 @@ export function normalizeOutreachBody(body: string, includeSiteLink = true): str
   b = b.replace(/https?:\/\/bvelt\.app\/demo\?[^\s)\]>"]+/gi, BVELT_SITE);
   b = b.replace(/https?:\/\/bvelt\.app\/demo\b/gi, BVELT_SITE);
   b = b.replace(/https?:\/\/[a-z0-9.-]*workers\.dev\/demo[^\s)\]>"]*/gi, BVELT_SITE);
-  if (includeSiteLink && !/bvelt\.app/i.test(b)) {
+  if (!includeSiteLink) {
+    b = b.replace(/https?:\/\/[^\s)\]>"]+/gi, "");
+    b = b.replace(/(?:→|👉)\s*/g, "");
+    b = b.replace(/[ \t]{2,}/g, " ").replace(/\n[ \t]*\n[ \t]*\n+/g, "\n\n");
+  } else if (!/bvelt\.app/i.test(b)) {
     b = `${b}\n\n${BVELT_SITE}`;
   }
   return b.trim();

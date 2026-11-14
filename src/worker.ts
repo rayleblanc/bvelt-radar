@@ -4198,15 +4198,15 @@ async function handleDecision(
         return Response.json({ success: false, blocked: true, reason: "already_processed_for_this_touch", id }, { status: 409, headers });
       }
       const draftSubject = prospect.draft_subject || `Bvelt - Pregunta sobre llamadas de clientes (${prospect.name || 'su negocio'})`;
-      const draftBody = prospect.draft_body || `Hola equipo de ${prospect.name},\n\n¿Qué ocurre cuando un cliente potencial llama a su negocio mientras están ocupados en obra y no pueden atender el teléfono?\n\nBvelt responde automáticamente por SMS en 15 segundos para no perder ningún trabajo: https://bvelt.app\n\nSaludos,\nEquipo Bvelt\n\nReply STOP to opt out`;
+      const draftBody = prospect.draft_body || `Hola equipo de ${prospect.name},\n\nSoy Rainer, fundador de Bvelt. Ayudo a negocios de servicios a dar seguimiento a llamadas no atendidas y presupuestos pendientes.\n\n¿Tienen hoy un proceso para contactar a esas personas después? Si le sirve, puedo enviarle un ejemplo breve.`;
       const safeBody = typeof normalizeOutreachBody === 'function' ? normalizeOutreachBody(draftBody) : draftBody;
 
       // Compliance Hard Gate: missing sender postal address MUST block outbound dispatch
-      if ((env.RESEND_API_KEY || env.BREVO_API_KEY) && !env.SENDER_POSTAL_ADDRESS?.trim()) {
+      if ((env.RESEND_API_KEY || env.BREVO_API_KEY) && !isCompletePostalAddress(env.SENDER_POSTAL_ADDRESS)) {
         await notifyOnce(
           env,
           "missing_sender_postal_address",
-          "⚠️ <b>Outreach en HOLD:</b> Falta <code>SENDER_POSTAL_ADDRESS</code> en las variables de Cloudflare. Se requiere dirección postal física para envíos conformes a CAN-SPAM."
+          "⚠️ <b>Outreach en HOLD:</b> <code>SENDER_POSTAL_ADDRESS</code> debe contener una dirección postal física completa (calle/número, ciudad, región y país)."
         );
         return Response.json({
           success: false,
@@ -4233,6 +4233,8 @@ async function handleDecision(
         from: env.OUTBOUND_EMAIL_FROM,
         prospectId: prospect.id,
         touchCount: manualEligibility.nextTouch,
+        includeSiteLink: manualEligibility.nextTouch > 1,
+        plainTextOnly: true,
         resendApiKey: env.RESEND_API_KEY,
         brevoApiKey: env.BREVO_API_KEY,
         senderName: env.SENDER_NAME
@@ -9616,8 +9618,8 @@ async function generateAICopy(
       : `${prospect.signal_event} for ${prospect.signal_area} - quick question for ${prospect.name}`;
 
     const bodyBase = isSpanish
-      ? `Hola equipo de ${prospect.name}, vi la ${prospect.signal_event} para ${prospect.signal_area}. Días como hoy suelen traer un aluvión de llamadas, y cada llamada que va al buzón de voz es un trabajo que puede irse a otra parte. Soy Rainer y creé Bvelt, una aplicación sencilla que ayuda a pequeñas empresas de servicios a dar seguimiento a llamadas perdidas y presupuestos antiguos. Preparé una breve demo para ${prospect.name} aquí: ${demoLink}. ¿Vale la pena echarle un vistazo?`
-      : `Hi ${prospect.name} team, I saw the ${prospect.signal_event} for ${prospect.signal_area}. Days like this usually bring a rush of calls, and every call that goes to voicemail is a job that may go to someone else. I'm Rainer, and I built Bvelt, a simple app that helps small service businesses follow up on missed calls and old estimates. I made a short demo for ${prospect.name} here: ${demoLink}. Worth a look?`;
+      ? `Hola equipo de ${prospect.name}, vi el aviso de ${prospect.signal_event} para ${prospect.signal_area}. Soy Rainer, fundador de Bvelt. Ayudo a negocios de servicios a dar seguimiento a llamadas no atendidas y presupuestos pendientes. ¿Tienen un proceso para contactar a quienes no logran comunicarse durante una interrupción? Si le sirve, puedo enviarle un ejemplo breve.`
+      : `Hi ${prospect.name} team, I saw the ${prospect.signal_event} notice for ${prospect.signal_area}. I'm Rainer, founder of Bvelt. I work on follow-up for service businesses when calls go unanswered or estimates remain pending. Do you have a process for reaching people who could not get through during an interruption? I can send a short example if useful.`;
 
     const footer = buildLegalFooter(env);
     const fullBody = footer ? `${bodyBase}\n\n${footer}` : bodyBase;
@@ -9635,39 +9637,15 @@ async function generateAICopy(
 
   if (tenantInfo) {
     if (isSpanish) {
-      angleFocus = `ACTÚA COMO: Representante de ${tenantInfo.tenant_name}. Somos expertos en ${tenantInfo.industry}.
-      ENFOQUE: Ofrecemos servicios de ${tenantInfo.niche} para ${prospect.trade}.
-      VALOR: Garantizamos respuesta en menos de 60 segundos 24/7 mediante nuestra plataforma Bvelt. Sabemos que en ${prospect.city} la velocidad es lo que cierra contratos.`;
+      angleFocus = `Representa a ${tenantInfo.tenant_name} con un tono profesional. Describe únicamente los servicios y datos proporcionados en su configuración. No prometas SLA, resultados ni garantías que no estén expresamente verificados.`;
     } else {
-      angleFocus = `ACT AS: Representative of ${tenantInfo.tenant_name}. We are experts in ${tenantInfo.industry}.
-      FOCUS: Offering ${tenantInfo.niche} services for ${prospect.trade}.
-      VALUE: We guarantee response in under 60 seconds 24/7 via our Bvelt platform. We know that in ${prospect.city}, speed is what closes contracts.`;
+      angleFocus = `Represent ${tenantInfo.tenant_name} professionally. Describe only services and facts supplied in its configuration. Do not promise SLAs, results, or guarantees unless explicitly verified.`;
     }
   } else {
-    // Founder mode: High-converting Technical Audit Hook (mobile load speed + missed calls leak + SMS text-back)
-    let signals: any = {};
-    try {
-      signals = typeof prospect.signals_json === "string" ? JSON.parse(prospect.signals_json || "{}") : (prospect.signals_json || prospect.signals || {});
-    } catch { signals = {}; }
-
-    const techAudit = signals.technical_audits || {};
-    const fcpSeconds = techAudit.fcp_seconds || (prospect.pagespeed_score ? (prospect.pagespeed_score < 50 ? 3.8 : 2.1) : null);
-    const latencyStr = fcpSeconds ? `${fcpSeconds}s` : "más de 3 segundos";
-    const latencyStrEn = fcpSeconds ? `${fcpSeconds}s` : "over 3 seconds";
-
-    if (isSpanish) {
-      angleFocus = `GANCHO PRINCIPAL: AUDITORÍA TÉCNICA GRATUITA (Llamadas perdidas y velocidad web móvil).
-      - Hallazgo técnico: La carga de su web en móviles toma ${latencyStr} y cuando los operarios están en obra o conduciendo, las llamadas entrantes van al buzón de voz sin un SMS de respuesta en menos de 60 segundos.
-      - Dolor de negocio: En ${prospect.city}, el 80% de propietarios que llaman por ${prospect.trade || 'servicios de contratista'} y dan con un buzón de voz cuelgan y llaman al siguiente contratista en Google.
-      - Solución: Bvelt añade respuesta instantánea por SMS en menos de 60 segundos ante llamadas perdidas y reactiva presupuestos pendientes.
-      - Demo interactiva: Invita respetuosamente a ver la demo interactiva de 60 segundos (${demoLink}) para ver cómo recupera clientes automáticamente.`;
-    } else {
-      angleFocus = `PRIMARY HOOK: FREE TECHNICAL AUDIT (Missed Calls & Mobile Web Speed).
-      - Technical finding: Mobile site load takes ~${latencyStrEn} and when crews are busy on-site or driving, incoming phone calls hit voicemail with no instant 60-second SMS text-back.
-      - Business pain: In ${prospect.city}, homeowners calling for ${prospect.trade || 'contractor work'} who hit voicemail hang up and tap the next contractor on Google.
-      - Solution: Bvelt adds instant SMS text-back in under 60 seconds to lock in missed calls and reactivate old estimates.
-      - Interactive Demo: Soft invite to check out the 60-second interactive preview (${demoLink}) to see how it recovers jobs automatically.`;
-    }
+    // Founder mode: evidence-first copy. No prospect-specific facts are supplied unless independently verified.
+    angleFocus = isSpanish
+      ? "No hay hallazgos específicos verificados sobre este negocio. No afirmes que su web es lenta, que pierde llamadas, que tiene presupuestos abandonados ni que pierde ingresos. Pregunta de forma natural cómo hacen seguimiento cuando no pueden atender una llamada o queda un presupuesto pendiente."
+      : "No verified prospect-specific findings are available. Do not claim their website is slow, that they miss calls, have stale estimates, or lose revenue. Ask naturally how they follow up when they cannot answer a call or an estimate is left pending.";
   }
 
   const prompt = isSpanish ? `
@@ -9684,11 +9662,11 @@ async function generateAICopy(
 
     REGLAS:
     1. Idioma: Español técnico y profesional.
-    2. Longitud: 85 a 105 palabras.
+    2. Longitud: 45 a 65 palabras en el primer contacto; 35 a 55 en seguimiento.
     3. Tono: Respetuoso, directo, mentalidad de emprendedor de guerrilla.
-    4. Exactamente UNA oración sobre el valor tecnológico: "${tenantInfo ? `Usamos Bvelt para garantizar que nunca pierdas una oportunidad con nosotros por falta de respuesta.` : "Bvelt reactiva automáticamente prospectos perdidos y recupera trabajos para contratistas mediante SMS automatizados rápidos."}"
-    5. Soft CTA: "Si quiere ver cómo funciona en 2 minutos → ${demoLink}".
-    6. SIN FIRMA NI PIE DE PÁGINA (el sistema añade el legal).
+    4. Explica el valor sin prometer resultados: "${tenantInfo ? `Bvelt ayuda a dar seguimiento a solicitudes y clientes.` : "Bvelt ayuda a negocios de servicios a dar seguimiento por SMS a llamadas no atendidas y presupuestos pendientes."}"
+    5. Primer contacto: pregunta si quiere recibir un ejemplo breve; no incluyas enlaces. Seguimiento: puedes incluir un único enlace simple a ${demoLink}.
+    6. No inventes hechos, porcentajes, velocidad web, llamadas perdidas ni pérdidas de ingresos. No uses "auditoría gratis", "garantizado", "instantáneo" ni promesas de 60 segundos sin evidencia explícita. Sin emojis ni signos de exclamación. SIN FIRMA NI PIE DE PÁGINA (el sistema añade el legal).
     7. ${!tenantInfo && founderLine ? `FRASE FUNDADOR (úsala una vez, natural, no inventes otra biografía): "${founderLine}"` : "No inventes historia personal del fundador."}
     8. ${isFollowUp ? "Esto es SEGUIMIENTO toque #" + outreachTouch + " sin respuesta. Más corto, otro ángulo, sin culpar. Asunto sin Re: falso." : "Primer correo en frío."}
     9. Formato JSON: {"subject": "...", "body": "..."}
@@ -9705,11 +9683,11 @@ async function generateAICopy(
     ${angleFocus}
 
     RULES:
-    1. Length: ${isFollowUp ? "55 to 80" : "85 to 105"} words. Contractor-friendly and punchy.
+    1. Length: ${isFollowUp ? "35 to 55" : "45 to 65"} words. Contractor-friendly and concise.
     2. Tone: Respectful, direct, guerrilla entrepreneur mindset. Never beg. Never play for pity.
-    3. Exactly ONE sentence on tech value: "${tenantInfo ? `We use Bvelt to ensure you never miss an opportunity with us due to response lag.` : "Bvelt automatically re-engages missed leads and recovers lost jobs for contractors via fast, automated SMS."}"
-    4. Soft Call-to-Action: "If you'd like to see how it works in 2 minutes → ${demoLink}".
-    5. NO SIGNATURE OR FOOTER (system adds legal footer).
+    3. Explain value without promising outcomes: "${tenantInfo ? `Bvelt helps manage follow-up with enquiries and customers.` : "Bvelt helps service businesses follow up by SMS with missed calls and pending estimates."}"
+    4. First touch: ask whether a short example would be useful; include no URL. Follow-up: one plain-text link to ${demoLink} is allowed.
+    5. Never invent facts, percentages, site-speed measurements, missed calls, or lost revenue. Do not use "free audit", "guaranteed", "instant", or 60-second promises without explicit evidence. No emoji, hype, or exclamation marks. NO SIGNATURE OR FOOTER (system adds legal footer).
     6. ${!tenantInfo && founderLine ? `FOUNDER LINE (use once, natural English, do not invent a different bio): "${founderLine}"` : "Do not invent a personal founder story."}
     7. ${isFollowUp ? "This is FOLLOW-UP touch #" + outreachTouch + " after no reply. Different angle from a first cold email. Shorter. Do not guilt-trip. Subject must NOT start with Re: unless truly a thread. Mention you are checking in once, then offer the demo link again." : "This is the FIRST outreach email."}
     8. JSON format: {"subject": "...", "body": "..."}
@@ -10052,10 +10030,11 @@ export function buildAttackKit(p: any): {
 /**
  * Psychological Cold Outreach Templates by Angle
  */
+
 function getTradePsychologyFallback(
-  name: string, 
-  trade: string, 
-  city: string, 
+  name: string,
+  trade: string,
+  city: string,
   bveltAngle: string,
   language: string = "en",
   phone?: string | null,
@@ -10065,90 +10044,46 @@ function getTradePsychologyFallback(
   env?: Env,
   signalsInput?: any
 ): { subject: string; body: string } {
-  const cTrade = String(trade || 'service').replace(/_/g, ' ');
+  const cTrade = String(trade || "service").replace(/_/g, " ");
   const isSpanish = language.toLowerCase().startsWith("es");
-  const ctaLink = "https://bvelt.app/";
+  let signals: any = {};
+  try { signals = typeof signalsInput === "string" ? JSON.parse(signalsInput) : (signalsInput || {}); } catch {}
+
+  let subject = isSpanish
+    ? `Una pregunta sobre seguimiento de clientes en ${name}`
+    : `A question about customer follow-up at ${name}`;
+  let bodyBase = isSpanish
+    ? `Hola equipo de ${name},\n\nSoy Rainer, fundador de Bvelt. Ayudo a negocios de servicios como ${cTrade} a dar seguimiento a llamadas no atendidas y presupuestos pendientes.\n\n¿Tienen hoy un proceso para contactar a esas personas después? Si le sirve, puedo enviarle un ejemplo breve.`
+    : `Hi ${name} team,\n\nI'm Rainer, founder of Bvelt. I work on a tool that helps service businesses like yours follow up on calls they could not answer and estimates that are still pending.\n\nDo you have a process for reaching those people afterward? If useful, I can send a short example.`;
 
   if (signalEvent && signalArea) {
-    const subject = isSpanish
-      ? `${signalEvent} para ${signalArea} - consulta para ${name}`
-      : `${signalEvent} for ${signalArea} - quick question for ${name}`;
-
-    const bodyBase = isSpanish
-      ? `Hola equipo de ${name}, vi la ${signalEvent} para ${signalArea}. Días como hoy suelen traer un aluvión de llamadas, y cada llamada que va al buzón de voz es un trabajo que puede irse a otra parte. Soy Rainer y creé Bvelt, una aplicación sencilla que ayuda a pequeñas empresas de servicios a dar seguimiento a llamadas perdidas y presupuestos antiguos. Preparé una breve demo para ${name} aquí: ${ctaLink}. ¿Vale la pena echarle un vistazo?`
-      : `Hi ${name} team, I saw the ${signalEvent} for ${signalArea}. Days like this usually bring a rush of calls, and every call that goes to voicemail is a job that may go to someone else. I'm Rainer, and I built Bvelt, a simple app that helps small service businesses follow up on missed calls and old estimates. I made a short demo for ${name} here: ${ctaLink}. Worth a look?`;
-
-    const footer = env ? buildLegalFooter(env) : "";
-    const fullBody = footer ? `${bodyBase}\n\n${footer}` : bodyBase;
-
-    return { subject, body: fullBody };
+    subject = isSpanish
+      ? `Consulta para ${name} sobre ${signalEvent}`
+      : `A question for ${name} about ${signalEvent}`;
+    bodyBase = isSpanish
+      ? `Hola equipo de ${name}, vi el aviso de ${signalEvent} relacionado con ${signalArea}. Soy Rainer, fundador de Bvelt. Ayudo a negocios de servicios a dar seguimiento a llamadas no atendidas y presupuestos pendientes. ¿Tienen un proceso para contactar a quienes no logran comunicarse durante una interrupción? Si le sirve, puedo enviarle un ejemplo breve.`
+      : `Hi ${name} team, I saw the ${signalEvent} notice for ${signalArea}. I'm Rainer, founder of Bvelt. I work on follow-up for service businesses when calls go unanswered or estimates remain pending. Do you have a process for reaching people who could not get through during an interruption? I can send a short example if useful.`;
+  } else if (signals.no_own_website) {
+    subject = isSpanish
+      ? `Una pregunta sobre cómo recibe consultas ${name}`
+      : `A question about how ${name} receives enquiries`;
+    bodyBase = isSpanish
+      ? `Hola equipo de ${name}, no encontré un sitio web propio de ${name} en la revisión pública que hice. ¿Cómo registran y retoman las consultas cuando una llamada no se puede atender? Estoy creando Bvelt para ayudar con ese seguimiento por SMS y con presupuestos pendientes. Si le sirve, puedo enviarle un ejemplo breve.`
+      : `Hi ${name} team, I could not find a dedicated website for ${name} in the public information I checked. How do you capture and follow up on enquiries when a call cannot be answered? I'm building Bvelt to help with SMS follow-up and pending estimates. I can send a short example if useful.`;
   }
 
-  let signals: any = {};
-  try {
-    signals = typeof signalsInput === "string" ? JSON.parse(signalsInput) : (signalsInput || {});
-  } catch { signals = {}; }
+  const footer = env ? buildLegalFooter(env) : "";
+  return { subject, body: footer ? `${bodyBase}\n\n${footer}` : bodyBase };
+}
 
-  if (signals.no_own_website) {
-    const subject = isSpanish
-      ? `${name} en ${city}: sin web propia, las llamadas se pierden`
-      : `${name} in ${city}: no website of your own — calls go dark`;
-    const bodyBase = isSpanish
-      ? `Hola equipo de ${name},\n\nVi que ${name} opera ${cTrade} en ${city} sin un sitio web propio (o solo con redes). Cuando un cliente llama y nadie contesta, no hay forma de capturar ese lead por SMS o formulario.\n\nCreé Bvelt para eso: responde automáticamente por SMS a llamadas perdidas en menos de 60 segundos y reactiva presupuestos antiguos.\n\nDemo corta: ${ctaLink}\n\n¿Tiene sentido echarle un vistazo?`
-      : `Hi ${name} team,\n\nI noticed ${name} runs ${cTrade} in ${city} without a real website of your own (or only social links). When a homeowner calls and nobody picks up, there is no SMS or form to catch that job.\n\nI built Bvelt for exactly that: automatic SMS on missed calls in under 60 seconds, plus follow-up on old estimates.\n\nShort demo: ${ctaLink}\n\nWorth a look?`;
-    const footer = env ? buildLegalFooter(env) : "";
-    const fullBody = footer ? `${bodyBase}\n\n${footer}` : bodyBase;
-    return { subject, body: fullBody };
-  }
-
-  const techAudit = signals.technical_audits || {};
-  const fcpSeconds = techAudit.fcp_seconds || (techAudit.is_slow_mobile ? 3.6 : null);
-  const latencyStr = fcpSeconds ? `${fcpSeconds}s` : "más de 3 segundos";
-  const latencyStrEn = fcpSeconds ? `${fcpSeconds}s` : "over 3 seconds";
-
-  if (isSpanish) {
-    const subject = fcpSeconds 
-      ? `Auditoría técnica para ${name}: llamadas perdidas y velocidad web (${latencyStr}) en ${city}`
-      : `Auditoría técnica para ${name}: llamadas perdidas y respuesta móvil en ${city}`;
-
-    const body = `Hola equipo de ${name},
-
-Hice una revisión técnica rápida de su presencia online en ${city} y noté dos detalles clave:
-1. La carga de su sitio en celulares toma ${latencyStr}, lo que hace que clientes con urgencias cuelguen antes de ver su número.
-2. Si un cliente llama mientras sus técnicos están en una obra o conduciendo, la llamada va al buzón de voz sin un SMS de respuesta inmediata.
-
-En trabajos de ${cTrade}, la gran mayoría de propietarios que van al buzón cuelgan y llaman al siguiente contratista en Google.
-
-Creé Bvelt para solucionar esto: envía un SMS automático en menos de 60 segundos ante llamadas no atendidas y reactiva presupuestos pendientes.
-
-Les preparé una demo interactiva de 60 segundos para ${name} aquí:
-👉 ${ctaLink}
-
-¿Vale la pena echarle un vistazo de 1 minuto?`;
-
-    return { subject, body };
-  }
-
-  const subject = fcpSeconds
-    ? `Technical audit for ${name}: missed calls & mobile speed (${latencyStrEn}) in ${city}`
-    : `Technical audit for ${name}: missed call recovery in ${city}`;
-
-  const body = `Hi ${name} team,
-
-I ran a quick technical check on your site in ${city}. Two things stood out:
-1. Mobile visitors wait around ${latencyStrEn} for pages to load on a cell phone.
-2. If a customer calls while your crews are on-site or driving, the call goes to voicemail with no instant text-back.
-
-In ${cTrade}, most homeowners who hit voicemail simply tap the next contractor on Google.
-
-I built Bvelt, an automated tool that instantly texts back missed calls in under 60 seconds and follows up on old estimates so you don't leak jobs.
-
-I set up an interactive 60-second preview for ${name} here:
-👉 ${ctaLink}
-
-Worth a quick look, or should I leave you alone?`;
-
-  return { subject, body };
+export function isCompletePostalAddress(value: string | null | undefined): boolean {
+  const normalized = String(value || "").replace(/\s+/g, " ").trim();
+  if (normalized.length < 20) return false;
+  const parts = normalized.split(/[,;\n]/).map(part => part.trim()).filter(Boolean);
+  if (parts.length < 3 || parts.some(part => part.length < 2)) return false;
+  const street = parts[0];
+  return (/[A-Za-zÀ-ÿ]/.test(street) && /\d/.test(street))
+    || /\b(?:p\.?\s*o\.?\s*box|post office box)\b/i.test(street);
 }
 
 export function buildLegalFooter(env: Env): string {
@@ -10272,7 +10207,7 @@ export async function collectRadarDigest(env: Env): Promise<RadarDigest> {
   if (outPaused) blockers.push("RADAR_OUTREACH_PAUSE está activo (no se envía)");
   if (cb.active) blockers.push(`Circuit breaker abierto: ${cb.reason || "sin motivo"} (requiere reset manual)`);
   if (!hasProvider) blockers.push("Sin proveedor de email (RESEND_API_KEY / BREVO_API_KEY / Hunter)");
-  if (autoOn && !has(env.SENDER_POSTAL_ADDRESS)) blockers.push("Falta SENDER_POSTAL_ADDRESS: bloquea todo envío automático");
+  if (autoOn && !isCompletePostalAddress(env.SENDER_POSTAL_ADDRESS)) blockers.push("SENDER_POSTAL_ADDRESS ausente o incompleta: bloquea todo envío automático");
   if (gov && gov.status && gov.status !== "active") blockers.push(`Sender governor en estado "${gov.status}"`);
   if (!has(env.FOUNDING_CITIES)) blockers.push("FOUNDING_CITIES vacío (OK: rotación geoData/geoFrontier activa — no hace falta lista manual)");
 
@@ -10769,7 +10704,7 @@ export function formatProspectTelegramMessage(prospect: any, env?: Env): string 
   const angle = prospect.bvelt_angle ? prospect.bvelt_angle.replace(/_/g, " ") : "Missed lead & call recovery";
 
   let warning = "";
-  if (env && !env.SENDER_POSTAL_ADDRESS) {
+  if (env && !isCompletePostalAddress(env.SENDER_POSTAL_ADDRESS)) {
     warning += `⚠ <b>Falta dirección postal: no enviar</b>\n\n`;
   }
   let emailVerified = false;
@@ -11346,14 +11281,14 @@ export async function sendOrQueueOutreach(prospect: any, runId: string, env: Env
   }
 
   // 4. Compliance Hard Gate: missing sender postal address MUST block auto-outreach
-  if (!env.SENDER_POSTAL_ADDRESS || !env.SENDER_POSTAL_ADDRESS.trim()) {
+  if (!isCompletePostalAddress(env.SENDER_POSTAL_ADDRESS)) {
     console.warn(`[Compliance Gate] Prospect ${prospect.id} blocked: missing_sender_postal_address`);
     await env.RADAR_DB.prepare("UPDATE prospects SET status = 'held', outcome = 'missing_sender_postal_address', updated_at = ? WHERE id = ?")
       .bind(new Date().toISOString(), prospect.id).run();
     await notifyOnce(
       env,
       "missing_sender_postal_address",
-      "⚠️ <b>Outreach en HOLD:</b> Falta <code>SENDER_POSTAL_ADDRESS</code> en las variables de Cloudflare. Se requiere dirección postal física para envíos conformes a CAN-SPAM."
+      "⚠️ <b>Outreach en HOLD:</b> <code>SENDER_POSTAL_ADDRESS</code> debe contener una dirección postal física completa (calle/número, ciudad, región y país)."
     );
     return { success: false, reason: "missing_sender_postal_address" };
   }
@@ -11514,6 +11449,8 @@ export async function sendOrQueueOutreach(prospect: any, runId: string, env: Env
       from: env.OUTBOUND_EMAIL_FROM,
       prospectId: prospect.id,
       touchCount: nextTouch,
+      includeSiteLink: nextTouch > 1,
+      plainTextOnly: true,
       resendApiKey: env.RESEND_API_KEY,
       brevoApiKey: env.BREVO_API_KEY,
       senderName: env.SENDER_NAME
