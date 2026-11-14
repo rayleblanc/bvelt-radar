@@ -413,7 +413,7 @@ export function expandFounderDiscoveryNiches(niches: string[]): string[] {
   for (const raw of niches || []) {
     const label = String(raw || "").trim();
     if (!label) continue;
-    const key = label.toLowerCase().replace(/[\\s-]+/g, "_");
+    const key = label.toLowerCase().replace(/[\s-]+/g, "_");
     const mapped = FOUNDER_SEGMENT_DISCOVERY_MAP[key];
     for (const value of (mapped !== undefined ? mapped : [label])) {
       const clean = String(value || "").trim();
@@ -11977,7 +11977,7 @@ export function checkTradeCoherence(
   // downstream AI/ICP checks still reject irrelevant or prohibited businesses.
   const hasContactEvidence = Boolean(
     (website && website.trim()) ||
-    /"(?:phone|email)"\\s*:\\s*"[^"]+"/i.test(tags || "")
+    /"(?:phone|email)"\s*:\s*"[^"]+"/i.test(tags || "")
   );
   if (mode !== "tenant" && normDeclared && hasContactEvidence) {
     return {
