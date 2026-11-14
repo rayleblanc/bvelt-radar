@@ -19,6 +19,7 @@ import { sanitizeEmail, sanitizeProspectEmail, isOffIcpName, hasMxRecords } from
 import { dispatchScraplingResearch } from './research/githubActions';
 import { recordScopedLearningEvent, readScopedLearningStats } from './learningIntegrity';
 import { fetchPermitContractors as fetchMunicipalPermitContractors } from './permitSources';
+import marketUniverse from "../sidecar/config/market-universe.json";
 
 // Global type declarations for Cloudflare Worker compilation
 declare global {
@@ -361,10 +362,28 @@ export interface MissionConfig {
   messaging_angle?: string;
 }
 
+const MARKET_UNIVERSE_POLICY = marketUniverse as {
+  priority_countries?: string[];
+  default_priority_countries?: string[];
+  bvelt_compatible_segments?: string[];
+  excluded_business_categories?: string[];
+};
+
+const MARKET_PRIORITY_COUNTRIES = Array.from(new Set([
+  ...(MARKET_UNIVERSE_POLICY.default_priority_countries || []),
+  ...(MARKET_UNIVERSE_POLICY.priority_countries || [])
+].map(country => String(country).trim().toUpperCase()).filter(Boolean)));
+
+const DEFAULT_FOUNDER_SEGMENTS = (MARKET_UNIVERSE_POLICY.bvelt_compatible_segments || [])
+  .map(segment => String(segment).trim().toLowerCase())
+  .filter(Boolean);
+
 export const DEFAULT_FOUNDER_MISSION: MissionConfig = {
   mode: "founder",
   target: "bvelt_customers",
-  niches: [],
+  // Broad Bvelt-compatible segments are exploration priorities, not an allowlist.
+  // Custom niches remain valid through FOUNDING_TRADES or dashboard configuration.
+  niches: [...DEFAULT_FOUNDER_SEGMENTS],
   subniches: [],
   services: [],
   geographies: [],
@@ -7446,16 +7465,17 @@ export async function getPriorityTargets(
     return evB - evA;
   });
 
-  // Founder automatic rotation is opt-in: explicit city lists take precedence.
-  // Without cities, both a country scope and at least one niche are required.
+  // Founder auto-rotation uses the available gazetteer; explicit city lists take precedence.
+  // Market-universe countries are soft priorities, not a country allowlist.
   let picks: { place: any; trade: string; why: string }[] = [];
-  if (!skipPicks && mode === "founder" && sortedGeographies.length === 0 && config.countries.length > 0 && sortedNiches.length > 0) {
+  if (!skipPicks && mode === "founder" && sortedGeographies.length === 0 && sortedNiches.length > 0) {
     try {
       picks = await pickTargets(env.RADAR_DB, {
         tenantId: "founder",
         trades: sortedNiches,
         count: Math.min(20, Number(env.RADAR_JOBS_PER_RUN || 15)),
-        countries: config.countries
+        countries: config.countries,
+        priorityCountries: MARKET_PRIORITY_COUNTRIES
       });
     } catch (e) {
       console.warn("[getPriorityTargets] pickTargets error:", e);
