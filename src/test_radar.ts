@@ -3,6 +3,7 @@ declare const process: any;
 import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, resolveTenantBuyerSegments } from './worker';
 import { DEFAULT_FOUNDER_MISSION, MissionConfig } from './worker';
 import { fetchPermitContractors } from './permitSources';
+import { learningCounterDelta } from './learningIntegrity';
 
 console.log("=========================================");
 console.log("RUNNING BVELT RADAR CUSTOM MISSION TESTS");
@@ -22,6 +23,26 @@ function assert(condition: boolean, message: string) {
     throw new Error(message);
   }
 }
+
+tests.push({
+  name: "Learning Integrity: sent, delivered, replied and won remain distinct outcomes",
+  run: () => {
+    const sent = learningCounterDelta("sent");
+    assert(sent.sent_count === 1 && sent.won_count === 0 && sent.replied_count === 0, "Sent must not count as reply or win");
+
+    const delivered = learningCounterDelta("delivered");
+    assert(delivered.delivered_count === 1 && delivered.sent_count === 0 && delivered.won_count === 0, "Delivered must remain separate from sent and won");
+
+    const replied = learningCounterDelta("positive");
+    assert(replied.replied_count === 1 && replied.won_count === 0, "Positive reply must not be treated as a won job");
+
+    const booked = learningCounterDelta("booked");
+    assert(booked.booked_count === 1 && booked.won_count === 0, "Booked must remain distinct from won");
+
+    const won = learningCounterDelta("won");
+    assert(won.won_count === 1 && won.sent_count === 0, "Only an explicit won outcome increments wins");
+  }
+});
 
 tests.push({
   name: "Tenant buyer segments never fall back to the tenant's own trade or generic unrelated markets",
