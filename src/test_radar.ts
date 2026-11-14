@@ -139,7 +139,7 @@ tests.push({
     assert(first, "First event must be recorded");
     assert(retry, "An exact retry must be acknowledged");
     assert(!conflict, "A conflicting reuse of an idempotency key must be rejected");
-    assert(aggregateChanges === 3, "City, trade and pair aggregates must increment exactly once");
+    assert(aggregateChanges === 5, "City, trade, pair, variant and angle aggregates must increment exactly once");
 
     const rates = await readScopedLearningStats(mockDb, "tenant", "tenant_alpha");
     assert(Math.abs(rates["trade:plumbing"] - (2 / 6)) < 0.0001, "Win rate must use four unique contacted prospects, including lost/booked outcomes");
@@ -1279,7 +1279,7 @@ tests.push({
       },
       {
         id: "p_2",
-        tenant_id: "t_tenant123",
+        tenant_id: "bvelt_tenant123",
         name: "Lone Star Plumbing",
         city: "Dallas, TX",
         trade: "plumbing",
@@ -1316,7 +1316,12 @@ tests.push({
         TELEGRAM_CHAT_ID: "",
         RADAR_DB: {
           prepare: (sql: string) => ({
-            all: async () => ({ results: mockProspects })
+            run: async () => ({ success: true, meta: { changes: 1 } }),
+            first: async () => null,
+            bind: (...args: any[]) => ({
+              all: async () => ({ results: mockProspects }),
+              run: async () => ({ success: true, meta: { changes: 1 } })
+            })
           })
         }
       };
@@ -1360,8 +1365,8 @@ tests.push({
 
       try {
         const tenantEnv: any = {
-          BVELT_INGEST_URL: "https://bvelt.app/api/radar/observations",
-          BVELT_INGEST_KEY: "test_tenant_key_456",
+          BVELT_TENANT_INGEST_URL: "https://bvelt.app/api/radar/observations",
+          BVELT_TENANT_INGEST_KEY: "test_tenant_key_456",
           RADAR_DB: {
             prepare: (sql: string) => ({
               bind: (...args: any[]) => ({
@@ -1369,7 +1374,7 @@ tests.push({
                   results: [
                     {
                       id: "p_tenant_1",
-                      tenant_id: "t_tenant123",
+                      tenant_id: "bvelt_tenant123",
                       name: "Lone Star Plumbing",
                       city: "Dallas, TX",
                       trade: "plumbing",
@@ -1385,16 +1390,17 @@ tests.push({
                   ]
                 })
               })
-            })
+            }),
+            batch: async (statements: any[]) => statements.map(() => ({ meta: { changes: 1 } }))
           }
         };
 
-        const tenantRes = await sendTenantObservationsToBvelt(tenantEnv, "t_tenant123");
+        const tenantRes = await sendTenantObservationsToBvelt(tenantEnv, "bvelt_tenant123");
         assert(tenantRes.ok === true, "Tenant observation push must succeed");
         assert(tenantRes.sent_count === 1, "Should send 1 tenant prospect");
         assert(Boolean(tenantPostCalled), "Fetch must be invoked for tenant push");
-        assert(tenantHeaderTenantId === "t_tenant123", "X-Bvelt-Tenant-Id header must match tenant ID");
-        assert(tenantPostBody.tenant_id === "t_tenant123", "Payload tenant_id must be t_tenant123");
+        assert(tenantHeaderTenantId === "bvelt_tenant123", "X-Bvelt-Tenant-Id header must match tenant ID");
+        assert(tenantPostBody.tenant_id === "bvelt_tenant123", "Payload tenant_id must be t_tenant123");
         assert(tenantPostBody.items[0].name === "Lone Star Plumbing", "Item should be Lone Star Plumbing");
       } finally {
         globalThis.fetch = originalFetch2;
