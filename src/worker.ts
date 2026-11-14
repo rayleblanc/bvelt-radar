@@ -9834,12 +9834,12 @@ async function generateAICopy(
     ${angleFocus}
 
     REGLAS:
-    1. Idioma: Español técnico y profesional.
-    2. Longitud: 45 a 65 palabras en el primer contacto; 35 a 55 en seguimiento.
-    3. Tono: Respetuoso, directo, mentalidad de emprendedor de guerrilla.
-    4. Explica el valor sin prometer resultados: "${tenantInfo ? `Bvelt ayuda a dar seguimiento a solicitudes y clientes.` : "Bvelt ayuda a negocios de servicios a dar seguimiento por SMS a llamadas no atendidas y presupuestos pendientes."}"
-    5. Primer contacto: pregunta si quiere recibir un ejemplo breve; no incluyas enlaces. Seguimiento: puedes incluir un único enlace simple a ${demoLink}.
-    6. No inventes hechos, porcentajes, velocidad web, llamadas perdidas ni pérdidas de ingresos. No uses "auditoría gratis", "garantizado", "instantáneo" ni promesas de 60 segundos sin evidencia explícita. Sin emojis ni signos de exclamación. SIN FIRMA NI PIE DE PÁGINA (el sistema añade el legal).
+    1. Idioma: Español natural y profesional, como una persona real escribiendo a otro negocio.
+    2. Longitud: 40 a 60 palabras en el primer contacto; 30 a 45 en seguimiento. Frases cortas y máximo dos párrafos antes de la pregunta.
+    3. Asunto: 4 a 9 palabras, específico para este negocio. Nunca uses "quick question", "quick audit", "free audit", "technical audit" ni asuntos en mayúsculas.
+    4. Gancho: usa un hecho concreto solo si aparece verificado en los datos del prospecto. Si no hay evidencia, abre con una pregunta operativa relevante para su oficio; jamás finjas haber revisado su web ni afirmes que pierde clientes.\n    5. Explica el valor sin prometer resultados: "${tenantInfo ? `Bvelt ayuda a dar seguimiento a solicitudes y clientes.` : "Bvelt ayuda a negocios de servicios a organizar solicitudes y mantener visibles los seguimientos pendientes mediante los canales actualmente disponibles."}"
+    6. Primer contacto: una sola pregunta y ofrece enviar un ejemplo breve; no incluyas enlaces. Seguimiento: utiliza un ángulo distinto y puedes incluir un único enlace simple a ${demoLink}.
+    7. No inventes hechos, porcentajes, velocidad web, llamadas perdidas ni pérdidas de ingresos. No prometas SMS automatizado, auditorías, garantías, recuperaciones ni resultados no disponibles. Sin emojis ni signos de exclamación. SIN FIRMA NI PIE DE PÁGINA (el sistema añade el legal).
     7. ${!tenantInfo && founderLine ? `FRASE FUNDADOR (úsala una vez, natural, no inventes otra biografía): "${founderLine}"` : "No inventes historia personal del fundador."}
     8. ${isFollowUp ? "Esto es SEGUIMIENTO toque #" + outreachTouch + " sin respuesta. Más corto, otro ángulo, sin culpar. Asunto sin Re: falso." : "Primer correo en frío."}
     9. Formato JSON: {"subject": "...", "body": "..."}
@@ -9856,11 +9856,11 @@ async function generateAICopy(
     ${angleFocus}
 
     RULES:
-    1. Length: ${isFollowUp ? "35 to 55" : "45 to 65"} words. Contractor-friendly and concise.
-    2. Tone: Respectful, direct, guerrilla entrepreneur mindset. Never beg. Never play for pity.
-    3. Explain value without promising outcomes: "${tenantInfo ? `Bvelt helps manage follow-up with enquiries and customers.` : "Bvelt helps service businesses follow up by SMS with missed calls and pending estimates."}"
-    4. First touch: ask whether a short example would be useful; include no URL. Follow-up: one plain-text link to ${demoLink} is allowed.
-    5. Never invent facts, percentages, site-speed measurements, missed calls, or lost revenue. Do not use "free audit", "guaranteed", "instant", or 60-second promises without explicit evidence. No emoji, hype, or exclamation marks. NO SIGNATURE OR FOOTER (system adds legal footer).
+    1. Length: ${isFollowUp ? "30 to 45" : "40 to 60"} words. Use short sentences and no more than two short paragraphs before the question.
+    2. Subject: 4 to 9 words, specific to this business and distinct from generic templates. Never use "quick question", "quick audit", "free audit", "technical audit", or all-caps subjects.
+    3. Hook: use a concrete fact only when present in verified prospect evidence. Otherwise open with a relevant operational question for this trade; never pretend to have audited the website or claim the business is losing customers.\n    4. Explain value without promising outcomes: "${tenantInfo ? `Bvelt helps manage follow-up with enquiries and customers.` : "Bvelt helps service businesses organize enquiries and keep pending follow-ups visible through currently available channels."}"
+    5. First touch: one relevant question and offer a short example; no URL. Follow-up: use a different angle from the previous message; one plain-text link to ${demoLink} is allowed.
+    6. Never invent facts, percentages, site-speed measurements, missed calls, or lost revenue. Never promise automated SMS, audits, guarantees, recovery, or unavailable results. No emoji, hype, or exclamation marks. NO SIGNATURE OR FOOTER (system adds legal footer).
     6. ${!tenantInfo && founderLine ? `FOUNDER LINE (use once, natural English, do not invent a different bio): "${founderLine}"` : "Do not invent a personal founder story."}
     7. ${isFollowUp ? "This is FOLLOW-UP touch #" + outreachTouch + " after no reply. Different angle from a first cold email. Shorter. Do not guilt-trip. Subject must NOT start with Re: unless truly a thread. Mention you are checking in once, then offer the demo link again." : "This is the FIRST outreach email."}
     8. JSON format: {"subject": "...", "body": "..."}
