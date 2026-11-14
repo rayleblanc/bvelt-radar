@@ -11289,6 +11289,9 @@ export async function sendOrQueueOutreach(prospect: any, runId: string, env: Env
 
   // 8. Budget check: Reserve outreach unit from authoritative Daily Budget Governor
   const tenantId = prospect.tenant_id || "founder";
+  const founderEligibility = await getFounderOutreachEligibility(env.RADAR_DB, prospect);
+  if (!founderEligibility.allowed) return { success: false, reason: "FOUNDER_OUTREACH_GUARD: " + founderEligibility.reason };
+  const nextTouch = founderEligibility.nextTouch;
   const outreachReserved = await reserveBudget(env.RADAR_DB, tenantId, 'outreach_units', 1);
   if (!outreachReserved) {
     await env.RADAR_DB.prepare("UPDATE prospects SET status = 'held', outcome = 'outreach_budget_limit_exceeded', updated_at = ? WHERE id = ?")
@@ -11320,7 +11323,7 @@ export async function sendOrQueueOutreach(prospect: any, runId: string, env: Env
   }
 
   const sequenceId = hasHunter ? env.HUNTER_SEQUENCE_ID!.trim() : (hasResend ? 'resend_live' : 'brevo_live');
-  const idempotencyKey = buildOutreachIdempotencyKey(tenantId, prospect.id, sequenceId, getOutreachTouch(prospect));
+  const idempotencyKey = buildOutreachIdempotencyKey(tenantId, prospect.id, sequenceId, nextTouch);
 
   // 10. Idempotency Check
   try {
@@ -11362,7 +11365,7 @@ export async function sendOrQueueOutreach(prospect: any, runId: string, env: Env
       body: prospect.draft_body,
       from: env.OUTBOUND_EMAIL_FROM,
       prospectId: prospect.id,
-      touchCount: getOutreachTouch(prospect),
+      touchCount: nextTouch,
       resendApiKey: env.RESEND_API_KEY,
       brevoApiKey: env.BREVO_API_KEY,
       senderName: env.SENDER_NAME
