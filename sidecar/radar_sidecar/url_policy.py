@@ -13,7 +13,8 @@ def is_public_http_url(url: str) -> bool:
             return False
         if parsed.username or parsed.password:
             return False
-        if parsed.port not in {None, 80, 443}:
+        expected_port = 443 if parsed.scheme == "https" else 80
+        if parsed.port is not None and parsed.port != expected_port:
             return False
         host = parsed.hostname.rstrip(".").lower()
         if host in {"localhost", "localhost.localdomain"} or host.endswith((".local", ".internal", ".localhost")):
@@ -32,10 +33,20 @@ def is_public_http_url(url: str) -> bool:
 
 
 def is_safe_redirect_target(base_url: str, target: str) -> bool:
-    """Resolve a redirect target relative to base_url and verify it is a public HTTP URL."""
+    """Allow only public same-host redirects; reject HTTPS downgrades."""
     try:
+        base = urlsplit((base_url or "").strip())
         resolved = urljoin(base_url, (target or "").strip())
-        return is_public_http_url(resolved)
+        destination = urlsplit(resolved)
+        if not is_public_http_url(base_url) or not is_public_http_url(resolved):
+            return False
+        base_host = (base.hostname or "").rstrip(".").lower().removeprefix("www.")
+        target_host = (destination.hostname or "").rstrip(".").lower().removeprefix("www.")
+        if not base_host or base_host != target_host:
+            return False
+        if base.scheme == "https" and destination.scheme != "https":
+            return False
+        return True
     except Exception:
         return False
 
