@@ -27,6 +27,7 @@ export interface EmailDispatchOptions {
   logoUrl?: string;
   includeSiteLink?: boolean;
   plainTextOnly?: boolean;
+  founderOutreach?: boolean;
 }
 
 export function resolveBveltSender(raw?: string): { email: string; from: string } | null {
@@ -152,6 +153,36 @@ export interface EmailDispatchResult {
   details?: string;
 }
 
+export function normalizeFounderOutreachCopy(
+  subject: string,
+  body: string,
+  recipientName?: string
+): { subject: string; body: string; sanitized: boolean } {
+  const unsafeCopy = /\b(?:free|quick|technical)\s+(?:website\s+)?audit\b|\bstop\s+losing\b|\bguarantee(?:d)?\b|\bwe\s+noticed\s+your\s+(?:website|site)\b|\byour\s+(?:website|site)\s+(?:is|seems)\s+slow\b|\bmissed\s+calls\s+are\s+costing\b|\byou(?:'re|\s+are)\s+losing\b/i;
+  const sourceSubject = String(subject || '').trim();
+  const sourceBody = String(body || '').trim();
+  const unsafe = unsafeCopy.test(sourceSubject) || unsafeCopy.test(sourceBody);
+  if (!unsafe) {
+    return { subject: sourceSubject.slice(0, 140), body: sourceBody, sanitized: false };
+  }
+
+  const business = String(recipientName || '').trim();
+  const safeSubject = business
+    ? `Question about customer follow-up at ${business}`
+    : 'Question about your customer follow-up process';
+  const footerMatch = sourceBody.match(/(?:^|\n\n)(reply\s+stop[\s\S]*)$/i);
+  const footer = footerMatch ? footerMatch[1].trim() : '';
+  const safeBody = [
+    `Hi ${business || 'team'},`,
+    '',
+    "I'm Ray, founder of Bvelt. We build tools that help service businesses follow up with people who contact them or request estimates.",
+    '',
+    'How do you currently handle those follow-ups when your team is busy?',
+    footer
+  ].filter(Boolean).join('\n\n');
+  return { subject: safeSubject, body: safeBody, sanitized: true };
+}
+
 export function normalizeOutreachBody(body: string, includeSiteLink = true): string {
   let b = (body || '').trim();
   b = b.replace(/https?:\/\/bvelt\.app\/demo\?[^\s)\]>"]+/gi, BVELT_SITE);
@@ -233,8 +264,15 @@ export async function dispatchEmail(options: EmailDispatchOptions): Promise<Emai
     };
   }
 
-  const subject = (options.subject || 'Quick question from Bvelt').trim();
-  const body = normalizeOutreachBody(options.body || '', options.includeSiteLink !== false);
+  const normalizedBody = normalizeOutreachBody(options.body || '', options.includeSiteLink !== false);
+  const founderCopy = options.founderOutreach
+    ? normalizeFounderOutreachCopy(options.subject || 'Question about customer follow-up', normalizedBody, options.recipientName)
+    : { subject: String(options.subject || 'Quick question from Bvelt').trim(), body: normalizedBody, sanitized: false };
+  const subject = founderCopy.subject;
+  const body = founderCopy.body;
+  if (founderCopy.sanitized) {
+    console.warn("[emailDispatcher] Founder copy normalized to remove unsupported audit/guarantee claims.");
+  }
   const senderName = options.senderName || 'Rainer — Bvelt';
   const html = options.plainTextOnly ? undefined : buildBrandedEmailHtml(body, options.logoUrl);
 
