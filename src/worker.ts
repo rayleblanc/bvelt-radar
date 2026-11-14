@@ -1994,13 +1994,34 @@ export default {
           return Response.json({ error: "Unauthorized" }, { status: 401, headers: corsHeaders });
         }
         const body: any = await request.json().catch(() => ({}));
-        const tenantId = body.tenant_id;
+        const tenantId = String(body.tenant_id || "").trim();
         if (!tenantId) {
           return Response.json({ error: "tenant_id required" }, { status: 400, headers: corsHeaders });
+        }
+        if (tenantId === "founder") {
+          return Response.json({ error: "tenant_id_invalid" }, { status: 400, headers: corsHeaders });
         }
         if (!auth.canAccessTenant(tenantId)) {
           return Response.json({ error: "Forbidden: cannot modify configuration for another tenant" }, { status: 403, headers: corsHeaders });
         }
+
+        const industry = String(body.industry || body.trade || "").trim();
+        const niche = String(body.niche || body.trade || "").trim();
+        const cities = (Array.isArray(body.cities) ? body.cities : body.city ? [body.city] : [])
+          .map((value: any) => String(value || "").trim())
+          .filter(Boolean);
+        const missingFields = [
+          !industry ? "industry" : null,
+          !niche ? "niche" : null,
+          cities.length === 0 ? "cities" : null
+        ].filter(Boolean);
+        if (missingFields.length > 0) {
+          return Response.json({
+            error: "tenant_profile_incomplete",
+            missing_fields: missingFields
+          }, { status: 409, headers: corsHeaders });
+        }
+
         const timestamp = new Date().toISOString();
 
         await env.RADAR_DB.prepare(`
@@ -2031,14 +2052,14 @@ export default {
         `).bind(
           tenantId,
           body.tenant_name || body.business_name || "",
-          body.industry || "",
-          body.niche || "",
+          industry,
+          niche,
           JSON.stringify(Array.isArray(body.subniches) ? body.subniches : []),
           JSON.stringify(Array.isArray(body.services) ? body.services : []),
           JSON.stringify(Array.isArray(body.service_areas) ? body.service_areas : []),
           JSON.stringify(Array.isArray(body.countries) ? body.countries : []),
           JSON.stringify(Array.isArray(body.regions) ? body.regions : []),
-          JSON.stringify(Array.isArray(body.cities) ? body.cities : (body.city ? [body.city] : [])),
+          JSON.stringify(cities),
           JSON.stringify(Array.isArray(body.languages) ? body.languages : []),
           body.icp_description || "",
           JSON.stringify(body.icp_keywords || []),
