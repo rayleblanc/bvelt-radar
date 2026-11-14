@@ -246,7 +246,7 @@ export async function readScopedLearningStats(
         AND event_type IN (
           'sent', 'delivered', 'opened', 'clicked', 'bounced',
           'contacted', 'replied', 'positive', 'question', 'negative',
-          'not_now', 'unsubscribe', 'out_of_office', 'qualified',
+          'not_now', 'unsubscribe', 'out_of_office',
           'booked', 'won', 'converted', 'lost'
         )
     ),
