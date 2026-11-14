@@ -10214,18 +10214,20 @@ export async function sendRadarDigest(
   const day = new Date().toISOString().split("T")[0];
   const isDailySlot = (opts.scheduledHourUtc ?? -1) >= 22;
   let shouldSend = !!opts.force;
+  let digestCacheKey: string | null = null;
 
   if (!shouldSend && env.RADAR_DB) {
-    const key = `radar_digest_${day}_${isDailySlot ? "daily" : d.verdict}`;
+    const key = `radar_digest_v2_${day}_${isDailySlot ? "daily" : d.verdict}`;
     const already = await cacheGet(env, key);
     if (!already && (isDailySlot || d.verdict !== "ok")) {
       shouldSend = true;
-      await cachePut(env, key, "1", 86400);
+      digestCacheKey = key;
     }
   }
   if (!shouldSend) return { sent: false, verdict: d.verdict, headline: d.headline, data: d.data };
 
   const tg = await notifyFounder(env, d.text);
+  if (tg.ok && digestCacheKey) await cachePut(env, digestCacheKey, "1", 86400);
   return { sent: !!tg.ok, verdict: d.verdict, headline: d.headline, data: d.data, telegram: tg };
 }
 
