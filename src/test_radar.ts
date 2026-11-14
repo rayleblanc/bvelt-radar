@@ -53,6 +53,75 @@ tests.push({
 });
 
 tests.push({
+  name: "Tenant CRM learning ingest is authenticated, tenant-scoped and idempotent",
+  run: async () => {
+    const storedKeys = new Set<string>();
+    const mockDb: any = {
+      prepare: (sql: string) => ({
+        bind: (...args: any[]) => ({
+          sql,
+          args,
+          first: async () => {
+            if (sql.includes("SELECT id FROM learning_events")) {
+              return storedKeys.has(String(args[1])) ? { id: "event_existing" } : null;
+            }
+            return null;
+          }
+        })
+      }),
+      batch: async (statements: any[]) => {
+        const key = String(statements[0].args[11]);
+        const inserted = !storedKeys.has(key);
+        if (inserted) storedKeys.add(key);
+        return statements.map((_: any, index: number) => ({
+          meta: { changes: index === 0 && inserted ? 1 : 0 }
+        }));
+      }
+    };
+    const env: any = { RADAR_DB: mockDb, RADAR_SERVICE_KEY: "radar-service-secret" };
+    const payload = {
+      mode: "tenant",
+      tenant_id: "bvelt_tenant_alpha",
+      items: [{
+        prospect_id: "radar_prospect_1",
+        event_type: "won",
+        city: "Toronto, ON",
+        trade: "plumbing",
+        occurred_at: "2026-11-14T10:00:00.000Z",
+        idempotency_key: "crm-status-evt-1"
+      }]
+    };
+
+    const unauthorized = await worker.fetch(new Request("https://radar.test/api/learning/events", {
+      method: "POST",
+      headers: { "Authorization": "Bearer wrong-key", "X-Tenant-Id": payload.tenant_id, "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    }), env, {} as any);
+    assert(unauthorized.status === 401, "Learning ingest must reject an invalid service key");
+
+    const mismatch = await worker.fetch(new Request("https://radar.test/api/learning/events", {
+      method: "POST",
+      headers: { "Authorization": "Bearer radar-service-secret", "X-Tenant-Id": "bvelt_tenant_beta", "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    }), env, {} as any);
+    assert(mismatch.status === 403, "Learning ingest must reject tenant header/body mismatch");
+
+    const send = () => worker.fetch(new Request("https://radar.test/api/learning/events", {
+      method: "POST",
+      headers: { "Authorization": "Bearer radar-service-secret", "X-Tenant-Id": payload.tenant_id, "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    }), env, {} as any);
+
+    const first = await send();
+    const firstBody = await first.json() as any;
+    const retry = await send();
+    const retryBody = await retry.json() as any;
+    assert(first.status === 200 && firstBody.inserted === 1, "First CRM outcome must be persisted");
+    assert(retry.status === 200 && retryBody.deduplicated === 1, "Exact retry must be acknowledged without a second insert");
+  }
+});
+
+tests.push({
   name: "Tenant buyer segments never fall back to the tenant's own trade or generic unrelated markets",
   run: () => {
     const hvacBuyers = resolveTenantBuyerSegments("HVAC");
