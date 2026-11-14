@@ -11470,9 +11470,9 @@ function estimateTicketUsd(trade: string): number {
 }
 
 /**
- * Learning brain: win rates by city/trade/variant/segment.
- * Uses learning_stats (primary) + live prospect outcomes as Bayesian prior.
- * Lower threshold (total_count >= 2) so the system starts learning faster.
+ * Scoped learning rates by city/trade/variant/segment.
+ * Append-only tenant-scoped events are primary; live prospect rows are fallback only.
+ * Replies and bookings remain distinct from won outcomes.
  * Returns scores in [0, 1] used to re-rank cities, trades and ICP segments.
  */
 async function getLearningStats(
