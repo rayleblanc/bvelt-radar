@@ -1,6 +1,6 @@
 declare const process: any;
 
-import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, resolveTenantBuyerSegments, tenantBuyerNameFits, isNonBusinessEntity } from './worker';
+import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, resolveTenantBuyerSegments, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence } from './worker';
 import { DEFAULT_FOUNDER_MISSION, MissionConfig } from './worker';
 import { fetchPermitContractors } from './permitSources';
 import { pickTargets } from './geoFrontier';
@@ -153,10 +153,15 @@ tests.push({
   run: async () => {
     const targets = await getPriorityTargets(1, {} as any, "founder", null);
     assert(targets.activeCities.length > 0, "Founder should rotate through the available gazetteer");
-    assert(targets.activeTrades.length > 0, "Founder should seed broad Bvelt-compatible segments");
+    assert(targets.activeTrades.length > 0, "Founder should seed searchable Bvelt-compatible business categories");
     assert(targets.missionConfig.geographies.length === 0, "Founder must not hardcode city lists");
     assert(targets.missionConfig.countries.length === 0, "Priority countries must not become a country allowlist");
-    assert(DEFAULT_FOUNDER_MISSION.niches.includes("home_services"), "Founder seeds broad market-universe segments");
+    assert(DEFAULT_FOUNDER_MISSION.niches.includes("home_services"), "Founder keeps broad market-universe segment priorities");
+    assert(targets.missionConfig.niches.includes("plumbing"), "Founder expands home services into searchable trades");
+    assert(targets.missionConfig.niches.includes("dental_clinic"), "Founder expands healthcare into appointment-driven businesses");
+    assert(targets.missionConfig.niches.includes("law_firm"), "Founder expands professional services into searchable categories");
+    assert(!targets.missionConfig.niches.includes("beauty_fitness_and_personal_services"), "Explicitly excluded segments are not searched");
+    assert(!targets.missionConfig.niches.includes("pet_services_and_animal_care"), "Explicitly excluded pet services are not searched");
     assert(DEFAULT_FOUNDER_MISSION.geographies.length === 0, "Default Founder mission must not pin cities");
 
     const picks = await pickTargets({} as any, {
@@ -166,6 +171,34 @@ tests.push({
       countries: []
     });
     assert(picks.length === 0, "GeoFrontier must not invent a trade when none is supplied");
+  }
+});
+
+tests.push({
+  name: "Founder market segments expand into searchable niches without closing custom targeting",
+  run: async () => {
+    const expanded = expandFounderDiscoveryNiches([
+      "home_services",
+      "healthcare_dental_veterinary_and_wellness",
+      "beauty_fitness_and_personal_services",
+      "pet_services_and_animal_care",
+      "custom_specialty_service",
+      "home_services"
+    ]);
+    assert(expanded.includes("plumbing") && expanded.includes("hvac"), "Home services must expand into concrete searchable niches");
+    assert(expanded.includes("dental_clinic") && expanded.includes("medical_clinic"), "Healthcare must expand into appointment-driven business types");
+    assert(!expanded.includes("beauty_fitness_and_personal_services"), "Excluded beauty/fitness segment must not leak into discovery");
+    assert(!expanded.includes("pet_services_and_animal_care"), "Excluded pet segment must not leak into discovery");
+    assert(expanded.includes("custom_specialty_service"), "Unknown custom niches must remain eligible");
+    assert(new Set(expanded).size === expanded.length, "Expanded niches must be deduplicated");
+    const custom = checkTradeCoherence(
+      "Northstar Specialty Services",
+      "custom_specialty_service",
+      "https://northstar.example",
+      JSON.stringify({ website: "https://northstar.example" }),
+      "founder"
+    );
+    assert(custom.coherent && !custom.disqualified, "Unknown custom niches with contact evidence must pass the initial coherence gate");
   }
 });
 
