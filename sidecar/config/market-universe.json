@@ -27,6 +27,7 @@
     "tenant_goal": "Find the Tenant's own potential customers using that Tenant's ICP, services, geography, and language configuration. Never substitute Founder targeting for Tenant targeting."
   },
   "bvelt_compatible_segments": [
+    "home_services",
     "home_property_construction_and_trades",
     "cleaning_facility_and_maintenance",
     "automotive_transport_and_mobility",
@@ -44,6 +45,19 @@
     "agriculture_landscape_and_outdoor_services",
     "recreation_sports_tourism_and_venues",
     "other_customer_inquiry_or_appointment_driven_businesses"
+  ],
+  "excluded_business_categories": [
+    "pet care",
+    "hair/nail salons",
+    "tattoo/piercing",
+    "gyms/fitness studios",
+    "massage",
+    "grocery/supermarket",
+    "convenience stores",
+    "florists",
+    "boutiques",
+    "pure ecommerce",
+    "low-value retail"
   ],
   "founder_fit_signals": [
     "inbound_calls_or_messages",

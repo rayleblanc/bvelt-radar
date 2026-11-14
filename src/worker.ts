@@ -3,7 +3,7 @@
  * Autonomous B2B Prospecting & Multi-factor Lead Scoring for Bvelt
  * 
  * Capabilities:
- * - Dynamic Sun Belt & Mid-size Regional Ranking
+ * - Configurable market and niche targeting without implicit geography defaults
  * - Trade-specific Overpass OSM & BizData Scrapers
  * - Multi-Factor 0-100 Scoring with historical conversion learning
  * - Trade Psychology Copywriting (A/B testing: missed_calls vs dormant_leads)
@@ -19,6 +19,7 @@ import { sanitizeEmail, sanitizeProspectEmail, isOffIcpName, hasMxRecords } from
 import { dispatchScraplingResearch } from './research/githubActions';
 import { recordScopedLearningEvent, readScopedLearningStats } from './learningIntegrity';
 import { fetchPermitContractors as fetchMunicipalPermitContractors } from './permitSources';
+import marketUniverse from "../sidecar/config/market-universe.json";
 
 // Global type declarations for Cloudflare Worker compilation
 declare global {
@@ -93,8 +94,11 @@ export interface Env {
   TRUST_SERVICE_KEY?: string;
   TRUST_STACK_KEY?: string;
   WEBHOOK_SECRET?: string; // token para webhooks de correo (?token=...)
-  FOUNDING_CITIES?: string; // e.g. "Tampa, FL;Austin, TX"
-  FOUNDING_TRADES?: string; // e.g. "landscaping;hvac;plumbing"
+  FOUNDING_CITIES?: string; // semicolon-separated explicit city labels; no implicit defaults
+  FOUNDING_TRADES?: string; // semicolon-separated explicit niches; no implicit defaults
+  FOUNDING_COUNTRIES?: string; // ISO country codes used only for automatic geo rotation
+  FOUNDING_LANGUAGES?: string;
+  FOUNDING_MIN_SCORE?: string;
   FOUNDER_AUTO_OUTREACH?: string;
   TELEGRAM_WEBHOOK_SECRET?: string;
   SENDER_NAME?: string;
@@ -358,34 +362,64 @@ export interface MissionConfig {
   messaging_angle?: string;
 }
 
+const MARKET_UNIVERSE_POLICY = marketUniverse as {
+  market_tiers?: {
+    core_english_commercial?: string[];
+    additional_english_commercial?: string[];
+  };
+  geography_policy?: {
+    priority_countries?: string[];
+    default_priority_countries?: string[];
+  };
+  bvelt_compatible_segments?: string[];
+  excluded_business_categories?: string[];
+};
+
+const MARKET_PRIORITY_COUNTRIES = Array.from(new Set([
+  ...(MARKET_UNIVERSE_POLICY.market_tiers?.core_english_commercial || []),
+  ...(MARKET_UNIVERSE_POLICY.market_tiers?.additional_english_commercial || []),
+  ...(MARKET_UNIVERSE_POLICY.geography_policy?.default_priority_countries || []),
+  ...(MARKET_UNIVERSE_POLICY.geography_policy?.priority_countries || [])
+].map(country => String(country).trim().toUpperCase()).filter(Boolean)));
+
+const DEFAULT_FOUNDER_SEGMENTS = (MARKET_UNIVERSE_POLICY.bvelt_compatible_segments || [])
+  .map(segment => String(segment).trim().toLowerCase())
+  .filter(Boolean);
+
 export const DEFAULT_FOUNDER_MISSION: MissionConfig = {
   mode: "founder",
   target: "bvelt_customers",
-  niches: [
-    "landscaping", "lawn_care", "hvac", "plumbing", "house_cleaning", "pool_cleaning",
-    "handyman", "roofing", "pest_control", "electrical", "painting", "garage_door",
-    "appliance_repair", "junk_removal", "moving", "fencing", "concrete", "flooring"
-  ],
-  subniches: ["residential_contractors", "commercial_contractors", "emergency_service_providers"],
-  services: ["repair", "maintenance", "installation", "cleaning"],
-  geographies: [
-    "Tampa, FL", "Orlando, FL", "Jacksonville, FL", "Miami, FL", "Fort Lauderdale, FL",
-    "Austin, TX", "Houston, TX", "Dallas, TX", "San Antonio, TX", "Fort Worth, TX",
-    "Atlanta, GA", "Charlotte, NC", "Raleigh, NC", "Nashville, TN", "Birmingham, AL",
-    "Phoenix, AZ", "Tucson, AZ", "Las Vegas, NV", "Denver, CO", "Salt Lake City, UT",
-    "Columbus, OH", "Indianapolis, IN", "Kansas City, MO", "Oklahoma City, OK",
-    "Richmond, VA", "Virginia Beach, VA", "Louisville, KY", "Memphis, TN",
-    "Sacramento, CA", "Riverside, CA", "San Diego, CA", "Portland, OR", "Seattle, WA"
-  ],
-  countries: ["US", "CA"],
-  languages: ["en", "es"],
+  // Broad Bvelt-compatible segments are exploration priorities, not an allowlist.
+  // Custom niches remain valid through FOUNDING_TRADES or dashboard configuration.
+  niches: [...DEFAULT_FOUNDER_SEGMENTS],
+  subniches: [],
+  services: [],
+  geographies: [],
+  countries: [],
+  languages: [],
   icp: {
-    description: "Local service businesses with visible phone lines, websites, high-margin jobs, and lead-capture friction across US/CA markets.",
-    keywords: ["plumber", "hvac", "electrician", "contractor", "cleaning", "landscaping", "roofer", "handyman"]
+    description: "",
+    keywords: []
   },
   min_score: 0,
   max_daily_outreach: 12
 };
+
+const US_STATE_CODES = new Set([
+  "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA", "HI", "ID",
+  "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD", "MA", "MI", "MN", "MS",
+  "MO", "MT", "NE", "NV", "NH", "NJ", "NM", "NY", "NC", "ND", "OH", "OK",
+  "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV",
+  "WI", "WY", "DC"
+]);
+
+function extractUsStateCodes(cityLabels: string[]): string[] {
+  return Array.from(new Set(
+    cityLabels
+      .map((label) => String(label || "").split(",").pop()?.trim().toUpperCase() || "")
+      .filter((code) => US_STATE_CODES.has(code))
+  ));
+}
 
 // Hard daily execution limits (respect free-tier API ceilings)
 const LIMITS = {
@@ -394,26 +428,6 @@ const LIMITS = {
   max_ai_calls_per_day: 20,
   max_hunter_credits_per_day: 10,
 };
-
-// National rotation pool — founder must not stay stuck in 6 metros
-const PRIORITY_CITIES = [
-  "Tampa, FL", "Orlando, FL", "Jacksonville, FL", "Miami, FL", "Fort Lauderdale, FL", "St. Petersburg, FL",
-  "Austin, TX", "Houston, TX", "Dallas, TX", "San Antonio, TX", "Fort Worth, TX", "El Paso, TX",
-  "Atlanta, GA", "Charlotte, NC", "Raleigh, NC", "Nashville, TN", "Memphis, TN", "Knoxville, TN",
-  "Birmingham, AL", "Phoenix, AZ", "Tucson, AZ", "Las Vegas, NV", "Denver, CO", "Colorado Springs, CO",
-  "Salt Lake City, UT", "Columbus, OH", "Cincinnati, OH", "Indianapolis, IN", "Kansas City, MO", "St. Louis, MO",
-  "Oklahoma City, OK", "Tulsa, OK", "Richmond, VA", "Virginia Beach, VA", "Louisville, KY", "New Orleans, LA",
-  "Sacramento, CA", "Fresno, CA", "Riverside, CA", "San Diego, CA", "Bakersfield, CA",
-  "Portland, OR", "Seattle, WA", "Boise, ID", "Albuquerque, NM", "Omaha, NE", "Des Moines, IA",
-  "Minneapolis, MN", "Milwaukee, WI", "Detroit, MI", "Grand Rapids, MI", "Pittsburgh, PA", "Philadelphia, PA",
-  "Buffalo, NY", "Rochester, NY", "Hartford, CT", "Providence, RI", "Baltimore, MD", "Washington, DC"
-];
-
-const PRIORITY_TRADES = [
-  "landscaping", "lawn_care", "hvac", "plumbing", "house_cleaning", "pool_cleaning",
-  "handyman", "roofing", "pest_control", "electrical", "painting", "garage_door",
-  "appliance_repair", "junk_removal", "fencing", "flooring"
-];
 
 // Mapping of contractor trades to their ideal B2B target niches
 /**
@@ -1065,7 +1079,7 @@ export default {
       const isTenantScopedRequest =
         ((method === "GET" || method === "POST") && ["/api/tenants/config", "/tenants/config"].includes(path)) ||
         (method === "POST" && ["/api/tenants/search", "/tenants/search", "/api/bvelt/bootstrap", "/bvelt/bootstrap", "/api/prospects/outcome", "/prospects/outcome"].includes(path)) ||
-        (method === "GET" && ["/api/tenants/leads.csv", "/tenants/leads.csv", "/api/bvelt/leads", "/bvelt/leads"].includes(path));
+        (method === "GET" && ["/api/tenants/leads.csv", "/tenants/leads.csv", "/api/tenants/roi", "/tenants/roi", "/api/bvelt/leads", "/bvelt/leads"].includes(path));
 
       if (isResearchCallbackPath) {
         if (!isSidecarCallbackAuthorized(request, env)) {
@@ -1988,13 +2002,34 @@ export default {
           return Response.json({ error: "Unauthorized" }, { status: 401, headers: corsHeaders });
         }
         const body: any = await request.json().catch(() => ({}));
-        const tenantId = body.tenant_id;
+        const tenantId = String(body.tenant_id || "").trim();
         if (!tenantId) {
           return Response.json({ error: "tenant_id required" }, { status: 400, headers: corsHeaders });
+        }
+        if (tenantId === "founder") {
+          return Response.json({ error: "tenant_id_invalid" }, { status: 400, headers: corsHeaders });
         }
         if (!auth.canAccessTenant(tenantId)) {
           return Response.json({ error: "Forbidden: cannot modify configuration for another tenant" }, { status: 403, headers: corsHeaders });
         }
+
+        const industry = String(body.industry || body.trade || "").trim();
+        const niche = String(body.niche || body.trade || "").trim();
+        const cities = (Array.isArray(body.cities) ? body.cities : body.city ? [body.city] : [])
+          .map((value: any) => String(value || "").trim())
+          .filter(Boolean);
+        const missingFields = [
+          !industry ? "industry" : null,
+          !niche ? "niche" : null,
+          cities.length === 0 ? "cities" : null
+        ].filter(Boolean);
+        if (missingFields.length > 0) {
+          return Response.json({
+            error: "tenant_profile_incomplete",
+            missing_fields: missingFields
+          }, { status: 409, headers: corsHeaders });
+        }
+
         const timestamp = new Date().toISOString();
 
         await env.RADAR_DB.prepare(`
@@ -2025,14 +2060,14 @@ export default {
         `).bind(
           tenantId,
           body.tenant_name || body.business_name || "",
-          body.industry || "",
-          body.niche || "",
+          industry,
+          niche,
           JSON.stringify(Array.isArray(body.subniches) ? body.subniches : []),
           JSON.stringify(Array.isArray(body.services) ? body.services : []),
           JSON.stringify(Array.isArray(body.service_areas) ? body.service_areas : []),
           JSON.stringify(Array.isArray(body.countries) ? body.countries : []),
           JSON.stringify(Array.isArray(body.regions) ? body.regions : []),
-          JSON.stringify(Array.isArray(body.cities) ? body.cities : (body.city ? [body.city] : [])),
+          JSON.stringify(cities),
           JSON.stringify(Array.isArray(body.languages) ? body.languages : []),
           body.icp_description || "",
           JSON.stringify(body.icp_keywords || []),
@@ -2251,7 +2286,7 @@ export default {
           return Response.json({ error: "Forbidden: cross-tenant outcome submission denied" }, { status: 403, headers: corsHeaders });
         }
 
-        const validOutcomes = ["contacted", "replied", "won", "lost"];
+        const validOutcomes = ["contacted", "replied", "booked", "won", "lost"];
         if (!validOutcomes.includes(outcome)) {
           return Response.json({ error: "Invalid outcome value" }, { status: 400, headers: corsHeaders });
         }
@@ -2267,9 +2302,30 @@ export default {
         }
 
         const timestamp = new Date().toISOString();
+        const outcomeChanged = String(prospect.tenant_outcome || "") !== outcome;
         await env.RADAR_DB.prepare(
           "UPDATE prospects SET tenant_outcome = ?, won_value_usd = CASE WHEN ? = 'won' THEN COALESCE(?, won_value_usd) ELSE won_value_usd END, updated_at = ? WHERE id = ? AND mode = 'tenant' AND tenant_id = ?"
         ).bind(outcome, outcome, parsedValue, timestamp, prospect_id, tenant_id).run();
+
+        // Any reply, booking, sale or loss proves the prospect was contacted.
+        // Reuse the same key as an explicit "contacted" action so retries and
+        // later stage changes never count the same contact twice.
+        if (outcome !== "contacted") {
+          await recordLearningEvent(
+            env.RADAR_DB,
+            prospect.city,
+            prospect.trade,
+            prospect.variant_id || null,
+            false,
+            {
+              event_type: "contacted",
+              prospect_id: String(prospect.id),
+              mode: "tenant",
+              tenant_id: tenant_id,
+              idempotency_key: `tenant-outcome:${prospect.id}:contacted`
+            }
+          );
+        }
 
         await recordLearningEvent(
           env.RADAR_DB,
@@ -2293,15 +2349,28 @@ export default {
           prospectIds: [String(prospect_id)]
         }).catch((error) => console.warn("[Tenant Bvelt Sync] Outcome sync failed:", error));
 
-        if ((outcome === "replied" || outcome === "won") && prospect.city && prospect.trade) {
+        if (outcomeChanged && prospect.city && prospect.trade) {
           try {
             const place = findPlace(prospect.city);
             if (place) {
               const placeKeyStr = placeKey(place);
-              const col = outcome === "replied" ? "replies" : "wins";
-              await env.RADAR_DB.prepare(
-                `UPDATE geo_coverage SET ${col} = ${col} + 1 WHERE tenant_id = ? AND place_key = ? AND trade = ?`
-              ).bind(tenant_id, placeKeyStr, prospect.trade.toLowerCase()).run();
+              if (prospect.tenant_outcome === "won" && outcome !== "won") {
+                await env.RADAR_DB.prepare(
+                  "UPDATE geo_coverage SET wins = MAX(0, wins - 1) WHERE tenant_id = ? AND place_key = ? AND trade = ?"
+                ).bind(tenant_id, placeKeyStr, prospect.trade.toLowerCase()).run();
+              }
+              if (outcome === "won" && prospect.tenant_outcome !== "won") {
+                await env.RADAR_DB.prepare(
+                  "UPDATE geo_coverage SET wins = wins + 1 WHERE tenant_id = ? AND place_key = ? AND trade = ?"
+                ).bind(tenant_id, placeKeyStr, prospect.trade.toLowerCase()).run();
+              }
+              const wasReplyStage = prospect.tenant_outcome === "replied" || prospect.tenant_outcome === "booked";
+              const isReplyStage = outcome === "replied" || outcome === "booked";
+              if (!wasReplyStage && isReplyStage) {
+                await env.RADAR_DB.prepare(
+                  "UPDATE geo_coverage SET replies = replies + 1 WHERE tenant_id = ? AND place_key = ? AND trade = ?"
+                ).bind(tenant_id, placeKeyStr, prospect.trade.toLowerCase()).run();
+              }
             }
           } catch (e) {
             // ignore if row doesn't exist
@@ -2314,15 +2383,30 @@ export default {
       // (b) GET /api/tenants/roi — full funnel + $ EV for product sales story
       if ((path === "/api/tenants/roi" || path === "/tenants/roi") && method === "GET") {
         const tenantId = url.searchParams.get("tenant_id") || "founder";
+        const auth = resolveTenantAuthContext(request, env, serviceKey, validSessionHash);
+        if (!auth.authorized) {
+          return Response.json({ error: "Unauthorized" }, { status: 401, headers: corsHeaders });
+        }
+        if (!auth.canAccessTenant(tenantId)) {
+          return Response.json({ error: "Forbidden: cross-tenant ROI access denied" }, { status: 403, headers: corsHeaders });
+        }
         try {
           const res = await env.RADAR_DB.prepare(`
             SELECT 
               COUNT(*) as total,
               SUM(CASE WHEN status IN ('scouted','qualified','scored','enriched') THEN 1 ELSE 0 END) as pipeline,
               SUM(CASE WHEN status IN ('sent','queued','approved','notified') THEN 1 ELSE 0 END) as outreach,
-              SUM(CASE WHEN status IN ('replied','won') OR tenant_outcome IN ('replied','won') THEN 1 ELSE 0 END) as replied,
-              SUM(CASE WHEN status = 'won' OR tenant_outcome = 'won' THEN 1 ELSE 0 END) as won,
-              SUM(CASE WHEN COALESCE(tenant_outcome,'') = 'contacted' THEN 1 ELSE 0 END) as contacted,
+              SUM(CASE WHEN status IN ('sent','queued','approved','notified','replied','booked','converted','won','lost')
+                         OR outcome IN ('sent','positive','replied','booked','won','lost','converted')
+                         OR tenant_outcome IN ('contacted','replied','booked','won','lost') THEN 1 ELSE 0 END) as conversion_denominator,
+              SUM(CASE WHEN status IN ('replied','booked') OR outcome IN ('positive','replied','booked')
+                         OR tenant_outcome IN ('replied','booked') THEN 1 ELSE 0 END) as replied,
+              SUM(CASE WHEN status = 'booked' OR outcome = 'booked' OR tenant_outcome = 'booked' THEN 1 ELSE 0 END) as booked,
+              SUM(CASE WHEN status IN ('won','converted') OR outcome IN ('won','converted') OR tenant_outcome = 'won' THEN 1 ELSE 0 END) as won,
+              SUM(CASE WHEN status = 'lost' OR outcome = 'lost' OR tenant_outcome = 'lost' THEN 1 ELSE 0 END) as lost,
+              SUM(CASE WHEN status IN ('sent','queued','approved','notified','replied','booked','converted','won','lost')
+                         OR outcome IN ('sent','positive','replied','booked','won','lost','converted')
+                         OR tenant_outcome IN ('contacted','replied','booked','won','lost') THEN 1 ELSE 0 END) as contacted,
               SUM(COALESCE(won_value_usd, 0)) as won_value_usd_total,
               SUM(COALESCE(expected_value, opportunity_score, score, 0)) as pipeline_ev_raw,
               AVG(COALESCE(score, opportunity_score, 0)) as avg_score
@@ -2333,20 +2417,26 @@ export default {
 
           const total = Number(res?.total || 0);
           const outreach = Number(res?.outreach || 0);
+          const conversionDenominator = Number(res?.conversion_denominator || 0);
           const replied = Number(res?.replied || 0);
+          const booked = Number(res?.booked || 0);
           const won = Number(res?.won || 0);
+          const lost = Number(res?.lost || 0);
           const pipelineEv = Math.round(Number(res?.pipeline_ev_raw || 0));
-          const replyRate = outreach > 0 ? Math.round((replied / outreach) * 1000) / 10 : 0;
-          const winRate = outreach > 0 ? Math.round((won / outreach) * 1000) / 10 : 0;
+          const replyRate = conversionDenominator > 0 ? Math.round((replied / conversionDenominator) * 1000) / 10 : 0;
+          const winRate = conversionDenominator > 0 ? Math.round((won / conversionDenominator) * 1000) / 10 : 0;
 
           return Response.json({
             tenant_id: tenantId,
             total,
             pipeline: Number(res?.pipeline || 0),
             outreach,
+            conversion_denominator: conversionDenominator,
             contacted: Number(res?.contacted || 0),
             replied,
+            booked,
             won,
+            lost,
             won_value_usd_total: Number(res?.won_value_usd_total || 0),
             pipeline_ev_usd: pipelineEv,
             avg_score: Math.round(Number(res?.avg_score || 0)),
@@ -2355,8 +2445,9 @@ export default {
           }, { headers: corsHeaders });
         } catch (e: any) {
           return Response.json({
-            tenant_id: tenantId, total: 0, pipeline: 0, outreach: 0, contacted: 0,
-            replied: 0, won: 0, won_value_usd_total: 0, pipeline_ev_usd: 0,
+            tenant_id: tenantId, total: 0, pipeline: 0, outreach: 0,
+            conversion_denominator: 0, contacted: 0, replied: 0, booked: 0,
+            won: 0, lost: 0, won_value_usd_total: 0, pipeline_ev_usd: 0,
             avg_score: 0, reply_rate_pct: 0, win_rate_pct: 0
           }, { headers: corsHeaders });
         }
@@ -4425,22 +4516,63 @@ export async function bootstrapBveltTenant(
     };
   }
 
-  // Contractor trade → who they sell TO (buyer ICP)
+  const toStringList = (value: any): string[] => {
+    const raw = Array.isArray(value) ? value : typeof value === "string" ? value.split(/[;,]/) : [];
+    return Array.from(new Set(raw
+      .map((item: any) => typeof item === "string" ? item : String(item?.label || ""))
+      .map((item: string) => item.trim())
+      .filter(Boolean)));
+  };
+
+  // Buyer segments may come from explicit ICP, AI expansion, or the curated map.
+  // The map is a fallback, never an industry allowlist.
   const tradeKey = userTrade.replace(/-/g, "_");
-  const niches =
-    (Array.isArray(body.subniches) && body.subniches.length > 0 ? body.subniches : null) ||
-    (Array.isArray(body.target_niches) && body.target_niches.length > 0 ? body.target_niches : null) ||
+  const mappedNiches =
     TENANT_TARGET_MAP[tradeKey] ||
     TENANT_TARGET_MAP[tradeKey.replace(/_/g, " ")] ||
-    ["property management", "real estate", "hoa"];
-  const primaryNiche = niches[0]; // e.g. property management
-  const searchTrade = primaryNiche.toLowerCase().includes("property")
-    ? "property management"
-    : primaryNiche.toLowerCase().includes("hotel")
-      ? "hotel"
-      : primaryNiche.toLowerCase().includes("hoa")
-        ? "property management"
-        : primaryNiche;
+    [];
+  const niches =
+    toStringList(body.target_niches).length ? toStringList(body.target_niches) :
+    toStringList(body.subniches).length ? toStringList(body.subniches) :
+    toStringList(body.allowed_markets).length ? toStringList(body.allowed_markets) :
+    toStringList(body.icp_keywords).length ? toStringList(body.icp_keywords) :
+    mappedNiches;
+
+  // Store the tenant's own business niche separately from its buyer segments.
+  const primaryNiche = String(body.niche || rawTrade).trim().toLowerCase().replace(/\s+/g, "_");
+  const primaryBuyerSegment = niches[0] || "";
+  const searchTrade = primaryBuyerSegment
+    ? primaryBuyerSegment.toLowerCase().includes("property")
+      ? "property management"
+      : primaryBuyerSegment.toLowerCase().includes("hotel")
+        ? "hotel"
+        : primaryBuyerSegment.toLowerCase().includes("hoa")
+          ? "property management"
+          : primaryBuyerSegment
+    : "";
+
+  const suppliedCountries = toStringList(body.countries);
+  const explicitCountries = suppliedCountries.length
+    ? suppliedCountries
+    : body.country_code || body.country ? [body.country_code || body.country] : [];
+  const resolvedCountry = findPlace(cityLabel)?.country;
+  const countries = Array.from(new Set(
+    (explicitCountries.length ? explicitCountries : resolvedCountry ? [resolvedCountry] : [])
+      .map((value: any) => String(value).trim().toUpperCase())
+      .filter(Boolean)
+  ));
+  const languages = toStringList(body.languages || body.language).map(value => value.toLowerCase());
+  const services = toStringList(body.services).length ? toStringList(body.services) : [userTrade];
+  const serviceAreas = toStringList(body.service_areas).length ? toStringList(body.service_areas) : [cityLabel];
+  const regions = toStringList(body.regions);
+  const cities = toStringList(body.cities).length ? toStringList(body.cities) : [cityLabel];
+  const icpKeywords = toStringList(body.icp_keywords);
+  const allowedMarkets = toStringList(body.allowed_markets).length ? toStringList(body.allowed_markets) : niches;
+  const icpDescription = String(body.icp_description || `Customers likely to buy ${userTrade} services in ${cityLabel}.`);
+  const minimumScore = Number.isFinite(Number(body.minimum_score)) ? Number(body.minimum_score) : 45;
+  const dailyOutreachLimit = Number.isFinite(Number(body.daily_outreach_limit)) ? Number(body.daily_outreach_limit) : 15;
+  const campaignGoal = String(body.campaign_goal || "Book qualified jobs from nearby buyers");
+  const messagingAngle = String(body.messaging_angle || "fast_response_guarantee");
 
   const timestamp = new Date().toISOString();
   await env.RADAR_DB.prepare(`
@@ -4453,30 +4585,40 @@ export async function bootstrapBveltTenant(
       tenant_name = excluded.tenant_name,
       industry = excluded.industry,
       niche = excluded.niche,
+      subniches_json = excluded.subniches_json,
+      services_json = excluded.services_json,
+      service_areas_json = excluded.service_areas_json,
+      countries_json = excluded.countries_json,
+      regions_json = excluded.regions_json,
       cities_json = excluded.cities_json,
+      languages_json = excluded.languages_json,
       icp_description = excluded.icp_description,
       icp_keywords_json = excluded.icp_keywords_json,
+      minimum_score = excluded.minimum_score,
+      daily_outreach_limit = excluded.daily_outreach_limit,
       allowed_markets_json = excluded.allowed_markets_json,
+      campaign_goal = excluded.campaign_goal,
+      messaging_angle = excluded.messaging_angle,
       updated_at = excluded.updated_at
   `).bind(
     tenantId,
     tenantName,
-    userTrade,
+    String(body.industry || userTrade).trim().toLowerCase(),
     primaryNiche,
-    JSON.stringify(niches.slice(0, 5)),
-    JSON.stringify([userTrade]),
-    JSON.stringify([cityLabel]),
-    JSON.stringify(["US", "CA"]),
-    JSON.stringify([]),
-    JSON.stringify([cityLabel]),
-    JSON.stringify(["en"]),
-    `Buyers near ${cityLabel} for a local ${userTrade} operator (auto from Bvelt ${source}).`,
-    JSON.stringify(niches),
-    45,
-    15,
-    JSON.stringify(niches),
-    "Book jobs from nearby commercial/residential buyers",
-    "fast_response_guarantee",
+    JSON.stringify(niches.slice(0, 6)),
+    JSON.stringify(services),
+    JSON.stringify(serviceAreas),
+    JSON.stringify(countries),
+    JSON.stringify(regions),
+    JSON.stringify(cities),
+    JSON.stringify(languages),
+    icpDescription,
+    JSON.stringify(icpKeywords),
+    minimumScore,
+    dailyOutreachLimit,
+    JSON.stringify(allowedMarkets),
+    campaignGoal,
+    messagingAngle,
     timestamp,
     timestamp
   ).run();
@@ -4484,7 +4626,7 @@ export async function bootstrapBveltTenant(
   // --- FAST PATH: one Overpass/BizData pull, top 2 leads now ---
   const leads: any[] = [];
   try {
-    const businesses = body.skip_fast_discovery ? [] : (await fetchLocalBusinessesWithDiagnostics(cityLabel, searchTrade, env, undefined, 'tenant')).businesses;
+    const businesses = body.skip_fast_discovery || !searchTrade ? [] : (await fetchLocalBusinessesWithDiagnostics(cityLabel, searchTrade, env, undefined, 'tenant')).businesses;
     const ranked = (businesses || [])
       .filter((b: any) => b && b.name && tenantBuyerNameFits(b.name, searchTrade))
       .map((b: any) => {
@@ -4570,10 +4712,10 @@ export async function bootstrapBveltTenant(
   let runId: string | null = null;
   const runPromise = startProspectingRun(env, "tenant", tenantId, {
     cities: cityLabel,
-    trades: searchTrade,
-    countries: null,
-    languages: null,
-    min_score: null
+    trades: searchTrade || null,
+    countries: countries.join(";") || null,
+    languages: languages.join(";") || null,
+    min_score: String(minimumScore)
   }, true).then((r) => {
     runId = r.run_id;
     return r;
@@ -4590,18 +4732,21 @@ export async function bootstrapBveltTenant(
     } catch { /* ok */ }
   }
 
+  const pendingBuyerIcp = niches.length === 0 && (!runId || runId === "no_buyer_segments" || runId === "no_targets");
   return {
     success: true,
-    status: "active",
+    status: pendingBuyerIcp ? "pending_configuration" : "active",
     tenant_id: tenantId,
     city: cityLabel,
     niches,
     run_id: runId,
     leads,
-    message:
-      leads.length > 0
-        ? `Listo: ${leads.length} cliente(s) potencial(es) cerca de ${cityLabel}. Más en camino.`
-        : `Tenant listo en ${cityLabel}. Buscando compradores (property/HOA) — revisa /api/bvelt/leads en 1–2 min.`,
+    message: leads.length > 0
+      ? `Listo: ${leads.length} cliente(s) potencial(es) cerca de ${cityLabel}. Más en camino.`
+      : pendingBuyerIcp
+        ? "Perfil guardado. El buyer ICP se intentará expandir con la información del negocio; si no hay segmentos suficientes, añade target_niches, allowed_markets o icp_keywords."
+        : `Tenant listo en ${cityLabel}. Buscando compradores: ${niches.slice(0, 4).join(", ")}.`,
+    missing_fields: pendingBuyerIcp ? ["target_niches_or_icp_keywords"] : undefined,
     source
   };
 }
@@ -4674,16 +4819,16 @@ export async function startProspectingRun(
     };
   }
 
-  // Abort early if no valid cities (tenant without config, or empty founder markets)
-  if ((!activeCities || activeCities.length === 0) && (!pairs || pairs.length === 0)) {
+  // Abort early unless there is at least one complete city+niche target.
+  if ((!activeCities || activeCities.length === 0 || !activeTrades || activeTrades.length === 0) && (!pairs || pairs.length === 0)) {
     const reason = mode === "tenant"
-      ? `Tenant "${tId}" no tiene ciudades configuradas. Configura cities_json en Tenant Mode antes de correr el Radar.`
-      : "No hay ciudades activas para discovery. Revisa FOUNDING_CITIES.";
+      ? `Tenant "${tId}" no tiene mercados o segmentos compradores válidos. Configura cities_json e ICP buyer segments antes de correr el Radar.`
+      : "No hay mercados y nichos activos para discovery. Configura FOUNDING_CITIES + FOUNDING_TRADES, o FOUNDING_COUNTRIES + FOUNDING_TRADES.";
     console.warn(`[startProspectingRun] ${reason}`);
     return {
-      run_id: "no_cities",
+      run_id: "no_targets",
       jobs_enqueued: 0,
-      active_cities: [],
+      active_cities: activeCities || [],
       active_trades: activeTrades || [],
       diagnostics: { reason, city: null, trade: null, discovered_raw: 0 }
     };
@@ -4757,56 +4902,39 @@ export function tenantBuyerNameFits(name: string, nicheOrTrade: string): boolean
   const n = name.toLowerCase();
   const niche = (nicheOrTrade || "").toLowerCase();
 
-  // Hard reject obvious non-buyers for property/commercial ICP
-  if (/wig|scuba|diving|fence|metal fabricat|iron works|moving|attorney|lawyer|law office|criminal|church|ministry|school district|university|college\b|museum|florist|nursery\b|auto (repair|body|parts)|plumbing parts|marketing firm/i.test(n)) {
-    return false;
+  const propertyNiche = /property|real estate|hoa|condo|apartment|realty|facility|building management|community management|office park|industrial park|warehouse/.test(niche);
+  const hotelNiche = /hotel|hospitality|lodging|extended stay|senior living|assisted living|nursing home/.test(niche);
+
+  if (propertyNiche) {
+    return /property|management|manager|hoa|condo|apartment|realty|real estate|facility|building management|community management|office park|industrial park|warehouse/i.test(n);
+  }
+  if (hotelNiche) {
+    return /hotel|inn|suites|lodge|motel|resort|senior living|assisted living|nursing home/i.test(n);
   }
 
-  if (/property|management|manager|hoa|condo|apartment|realty|real estate|property mgmt|prop management|facility|building management|community management|hotel|motel|inn\b|resort|hospitality|extended stay|senior living|assisted living|nursing home|office park|industrial park|warehouse/i.test(n)) {
-    return true;
-  }
-
-  // Soft allow if niche is hotel/hospitality and name has lodging cues
-  if (/hotel|hospitality|extended/.test(niche) && /hotel|inn|suites|lodge|motel|resort/i.test(n)) {
-    return true;
-  }
-
-  // Default: for strict property management search, reject weak names
-  if (/property management|property manager|hoa|real estate/.test(niche)) {
-    return false;
-  }
-
-  return true; // other niches: allow through, Clef will refine
+  // Other buyer categories stay open; the tenant's ICP and evidence refine them.
+  return true;
 }
 
 export function isNonBusinessEntity(name: string, website: string | undefined, mode: string): boolean {
-  if (website) {
+  if (website && mode !== "tenant") {
     try {
       const parsedUrl = new URL(website.startsWith("http") ? website : `http://${website}`);
-      const hostname = parsedUrl.hostname.toLowerCase();
-      if (hostname.endsWith(".edu") || hostname.endsWith(".gov")) {
-        return true;
-      }
+      if (parsedUrl.hostname.toLowerCase().endsWith(".gov")) return true;
     } catch {
       const lowerWeb = website.toLowerCase();
-      if (lowerWeb.endsWith(".edu") || lowerWeb.endsWith(".gov") || lowerWeb.includes(".edu/") || lowerWeb.includes(".gov/")) {
-        return true;
-      }
+      if (lowerWeb.endsWith(".gov") || lowerWeb.includes(".gov/")) return true;
     }
   }
 
   if (name) {
     const lowerName = name.toLowerCase();
-    const commonPattern = /\b(extension|university|college|school district|county|city of|library|museum|foundation|chamber of commerce)\b/;
-    if (commonPattern.test(lowerName)) {
-      return true;
-    }
+    const publicAgencyPattern = /\b(police department|fire department|city government|county government|government agency|public authority)\b/;
+    if (publicAgencyPattern.test(lowerName)) return true;
 
     if (mode !== "tenant") {
-      const nonTenantPattern = /\b(church|ministry|association|hoa|homeowners)\b/;
-      if (nonTenantPattern.test(lowerName)) {
-        return true;
-      }
+      const founderNonBuyerPattern = /\b(church|ministry|association|hoa|homeowners)\b/;
+      if (founderNonBuyerPattern.test(lowerName)) return true;
     }
   }
 
@@ -5316,9 +5444,8 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
 
     // Descartes baratos ANTES de reservar presupuesto (evita 3 escrituras a D1 por cada candidato que se rechaza)
     const preName = (candidate.name || "").toLowerCase();
-    const allowGym = job.mode === 'tenant';
-    const EXTRA_SYNTACTIC_ICP_EXCLUSION = /\b(store|shop|market|pet|nails|hair|grocery|florist|boutique)\b/i;
-    if (isOffIcpName(candidate.name, allowGym) || EXTRA_SYNTACTIC_ICP_EXCLUSION.test(candidate.name)) {
+    const allowTenantBuyer = job.mode === 'tenant';
+    if (isOffIcpName(candidate.name, allowTenantBuyer)) {
       console.log(`[ICP Gate: Discarded] "${candidate.name}" matched off-ICP exclusion in handleDiscoveryJob`);
       filteredCount++;
       continue;
@@ -5456,23 +5583,27 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
     let signalEvent: string | null = candidate.signal_event || null;
     let signalArea: string | null = candidate.signal_area || null;
 
-    if (!signalEvent && env.FOUNDING_CITIES) {
+    if (!signalEvent) {
       try {
-        const foundingStr = env.FOUNDING_CITIES;
-        const extractedStates = Array.from(new Set(foundingStr.match(/\b[A-Z]{2}\b/g) || ["FL", "TX"]));
-        const alerts = await getAlerts(extractedStates);
-        const candCity = (candidate.city || "").split(',')[0].trim().toLowerCase();
-        const candTrade = (candidate.trade || "").toLowerCase();
+        const cityLabel = String(job.payload?.city || candidate.city || env.FOUNDING_CITIES || "");
+        const configuredCountries = String(env.FOUNDING_COUNTRIES || "").split(";").map(value => value.trim().toUpperCase());
+        const isUsMarket = String(candidate.country || job.payload?.country || "").toUpperCase() === "US" || configuredCountries.includes("US");
+        const extractedStates = isUsMarket ? extractUsStateCodes(cityLabel.split(";")) : [];
+        if (extractedStates.length > 0) {
+          const alerts = await getAlerts(extractedStates);
+          const candCity = (candidate.city || "").split(',')[0].trim().toLowerCase();
+          const candTrade = (candidate.trade || "").toLowerCase();
 
-        for (const alert of alerts) {
-          const areaLower = (alert.areaDesc || "").toLowerCase();
-          const cityMatch = candCity && areaLower.includes(candCity);
-          const tradeMatch = eventAppliesToTrade(alert.event, candTrade);
+          for (const alert of alerts) {
+            const areaLower = (alert.areaDesc || "").toLowerCase();
+            const cityMatch = candCity && areaLower.includes(candCity);
+            const tradeMatch = eventAppliesToTrade(alert.event, candTrade);
 
-          if (cityMatch && tradeMatch) {
-            signalEvent = alert.event;
-            signalArea = alert.areaDesc;
-            break;
+            if (cityMatch && tradeMatch) {
+              signalEvent = alert.event;
+              signalArea = alert.areaDesc;
+              break;
+            }
           }
         }
       } catch (e) {}
@@ -7136,14 +7267,32 @@ export async function getPriorityTargets(
           config.min_score = Number(tenantConfig.minimum_score ?? 50);
           config.max_daily_outreach = 0;
 
-          // Prefer an AI-generated ICP of likely recurring buyers. Use the
-          // curated map only for recognized trades; unknown trades fail closed.
-          let expandedBuyerSegments: Array<{ label: string }> = [];
+          // AI expansion is primary. Explicit ICP markets/keywords and the
+          // curated map are fallbacks; the trade map is not an industry allowlist.
+          const parseTenantList = (value: any): any[] => {
+            try {
+              const parsed = typeof value === "string" ? JSON.parse(value || "[]") : value;
+              return Array.isArray(parsed) ? parsed : [];
+            } catch {
+              return [];
+            }
+          };
+          const explicitBuyerSegments = [
+            ...parseTenantList(tenantConfig.subniches_json),
+            ...parseTenantList(tenantConfig.allowed_markets_json),
+            ...parseTenantList(tenantConfig.icp_keywords_json)
+          ];
+          let expandedBuyerSegments: Array<string | { label?: string }> = [...explicitBuyerSegments];
           if (!skipPicks) {
             const expanded = await expandTenantIcp(env, tenantConfig);
-            if (expanded?.segments?.length) expandedBuyerSegments = expanded.segments;
+            if (expanded?.segments?.length) {
+              expandedBuyerSegments = [...expanded.segments, ...explicitBuyerSegments];
+            }
           }
-          config.niches = resolveTenantBuyerSegments(tenantConfig.niche || "", expandedBuyerSegments);
+          config.niches = resolveTenantBuyerSegments(
+            tenantConfig.niche || tenantConfig.industry || "",
+            expandedBuyerSegments
+          );
         } catch (e) {
           console.error("Error parsing tenant config: ", e);
         }
@@ -7351,16 +7500,17 @@ export async function getPriorityTargets(
     return evB - evA;
   });
 
-  // Founder: national US+CA pool (geoFrontier). Sun Belt is soft boost, not a wall.
-  // Tenant keeps allowedCities / centerLabel isolation.
+  // Founder auto-rotation uses the available gazetteer; explicit city lists take precedence.
+  // Market-universe countries are soft priorities, not a country allowlist.
   let picks: { place: any; trade: string; why: string }[] = [];
-  if (!skipPicks && mode === "founder" && !(overrides && overrides.cities)) {
+  if (!skipPicks && mode === "founder" && sortedGeographies.length === 0 && sortedNiches.length > 0) {
     try {
       picks = await pickTargets(env.RADAR_DB, {
         tenantId: "founder",
         trades: sortedNiches,
         count: Math.min(20, Number(env.RADAR_JOBS_PER_RUN || 15)),
-        countries: ["US", "CA"]
+        countries: config.countries,
+        priorityCountries: MARKET_PRIORITY_COUNTRIES
       });
     } catch (e) {
       console.warn("[getPriorityTargets] pickTargets error:", e);
@@ -7368,25 +7518,26 @@ export async function getPriorityTargets(
     }
   }
 
-  // Weather Signals: Para el clima usa como estados las regiones de 2 letras de los picks de país US
-  const foundingStr = env.FOUNDING_CITIES || config.geographies.join(";");
-  let extractedStates: string[] = [];
-
-  if (picks.length > 0) {
-    extractedStates = Array.from(new Set(
-      picks
-        .filter(p => ((p.place && p.place.country) || (p.place as any)?.país || p.place?.[2] || "").toUpperCase() === "US")
-        .map(p => ((p.place && p.place.region) || (p.place as any)?.región || p.place?.[1] || "").toUpperCase().trim())
-        .filter(r => /^[A-Z]{2}$/.test(r))
-    ));
+  if (tenantPicks.length === 0 && picks.length === 0 && (sortedGeographies.length === 0 || sortedNiches.length === 0)) {
+    (config as any).weather_alerts = [];
+    return { activeCities: [], activeTrades: [], missionConfig: config, pairs: [] };
   }
 
-  if (extractedStates.length === 0) {
-    extractedStates = Array.from(new Set(foundingStr.match(/\b[A-Z]{2}\b/g) || ["FL", "TX"]));
-  }
+  // Weather alerts are US-only and use only state codes explicitly present
+  // in configured US places or selected US geoFrontier results.
+  const pickedUsStates = picks
+    .filter(p => ((p.place && p.place.country) || (p.place as any)?.país || p.place?.[2] || "").toUpperCase() === "US")
+    .map(p => ((p.place && p.place.region) || (p.place as any)?.región || p.place?.[1] || "").toUpperCase().trim());
+  const explicitUsStates = config.countries.includes("US")
+    ? extractUsStateCodes(config.geographies)
+    : [];
+  const extractedStates = Array.from(new Set([
+    ...pickedUsStates.filter(state => US_STATE_CODES.has(state)),
+    ...explicitUsStates
+  ]));
 
   let weatherAlerts: WeatherAlert[] = [];
-  if (!skipPicks) {
+  if (!skipPicks && extractedStates.length > 0) {
     try {
       weatherAlerts = await getAlerts(extractedStates);
     } catch (e) {
@@ -7976,8 +8127,7 @@ export function calculateMultiFactorScore(
 
   // 4. Commercial Value (0 - 15 pts)
   let commercialValueScore = 0;
-  const isSunBeltCity = /fl|florida|tx|texas|ga|georgia|az|arizona|nc|sc|tn|tennessee|nv|al|tampa|orlando|miami|houston|austin|dallas|phoenix|atlanta|nashville/i.test(item.city || "");
-  if (isPriorityCity || isSunBeltCity) commercialValueScore += 10;
+  if (isPriorityCity) commercialValueScore += 10;
   const tradeKey = `trade:${tradeLower}`;
   const winRate = learningStats[tradeKey] || 0;
   if (winRate > 0.6) commercialValueScore += 5;
@@ -8081,7 +8231,7 @@ export function calculateMultiFactorScore(
   if (!email && !phone) legacyContactability = 0;
 
   let legacyCommercial = 0;
-  if (isPriorityCity || isSunBeltCity) legacyCommercial += 5;
+  if (isPriorityCity) legacyCommercial += 5;
   if (isPriorityTrade || isPreferred) legacyCommercial += 5;
   if (isIndependent) legacyCommercial += 2;
   if (winRate > 0.6) legacyCommercial += 3;
@@ -8896,13 +9046,11 @@ export async function fetchLocalBusinessesWithDiagnostics(
   const allCandidates = [...permitCandidates, ...rawBusinesses];
   const seen = new Set<string>();
   const deduped: any[] = [];
-  const EXTRA_SYNTACTIC_ICP_EXCLUSION = /\b(store|shop|market|pet|nails|hair|grocery|florist|boutique)\b/i;
-
   for (const item of allCandidates) {
     const rawName = String(item.name || "").trim();
     const candTrade = item.trade || trade;
-    const coherence = checkTradeCoherence(rawName, candTrade, item.website);
-    if (isOffIcpName(rawName) || EXTRA_SYNTACTIC_ICP_EXCLUSION.test(rawName) || !coherence.coherent || coherence.disqualified) {
+    const coherence = checkTradeCoherence(rawName, candTrade, item.website, JSON.stringify(item), mode);
+    if (isOffIcpName(rawName, mode === "tenant") || !coherence.coherent || coherence.disqualified) {
       console.log(`[ICP Gate: Discarded] "${rawName}" matched off-ICP/coherence filter in discovery for ${city} - ${candTrade}`);
       continue;
     }
@@ -9051,7 +9199,22 @@ export async function expandTenantIcp(
   const modelList = modelsStr.split(",").map(m => m.trim()).filter(Boolean);
   const modelsToTry = modelList.slice(0, 2);
 
-  const prompt = `Negocio local: ${tc.tenant_name || ""}, industria ${tc.industry || ""}, nicho ${tc.niche || ""}, ICP ${tc.icp_description || ""}. Devuelve SOLO JSON {segments:[{label,osm_tags,keywords,why}]}, máximo 6 segmentos de CLIENTES que le compran a este negocio, ordenados por probabilidad de compra recurrente. osm_tags: 1 a 3 etiquetas OSM válidas como office=estate_agent o amenity=restaurant. Sin texto extra.`;
+  const readList = (value: any): string[] => {
+    try {
+      const parsed = typeof value === "string" ? JSON.parse(value || "[]") : value;
+      return Array.isArray(parsed) ? parsed.map((item: any) => String(item?.label || item || "").trim()).filter(Boolean) : [];
+    } catch {
+      return [];
+    }
+  };
+  const services = readList(tc.services_json);
+  const serviceAreas = readList(tc.service_areas_json);
+  const countries = readList(tc.countries_json);
+  const languages = readList(tc.languages_json);
+  const keywords = readList(tc.icp_keywords_json);
+  const allowedMarkets = readList(tc.allowed_markets_json);
+  const prompt = `Negocio: ${tc.tenant_name || ""}. Industria: ${tc.industry || ""}. Nicho propio: ${tc.niche || ""}. Servicios: ${services.join(", ")}. Zonas: ${serviceAreas.join(", ")}. Países: ${countries.join(", ")}. Idiomas: ${languages.join(", ")}. ICP: ${tc.icp_description || ""}. Keywords ICP: ${keywords.join(", ")}. Mercados indicados: ${allowedMarkets.join(", ")}.
+Genera hasta 6 segmentos de CLIENTES que compran a este negocio; no devuelvas competidores ni empresas del mismo oficio. No limites el resultado a un mapa cerrado de industrias: usa el perfil completo y deduce compradores B2B o consumidores según el modelo de negocio. Si el ICP no permite una inferencia fiable, devuelve segments vacío. Devuelve SOLO JSON {segments:[{label,osm_tags,keywords,why}]}, ordenado por probabilidad de compra recurrente. osm_tags: 1 a 3 etiquetas OSM válidas como office=estate_agent o amenity=restaurant. Sin texto extra.`;
 
   let geminiResult: any = null;
   for (const model of modelsToTry) {
@@ -10110,8 +10273,8 @@ export async function sendTenantObservationsToBvelt(
   history_error?: boolean;
   tenant_id: string;
 }> {
-  if (!tenantId || !tenantId.startsWith("bvelt_")) {
-    return { skipped: true, reason: "tenant_id_required", tenant_id: tenantId };
+  if (!tenantId || !tenantId.startsWith("bvelt_") || tenantId === "bvelt_founder") {
+    return { skipped: true, reason: "invalid_bvelt_tenant_scope", tenant_id: tenantId };
   }
   const ingestUrl = (env as any).BVELT_TENANT_INGEST_URL;
   const ingestKey = (env as any).BVELT_TENANT_INGEST_KEY;
@@ -11491,7 +11654,9 @@ async function getLearningStats(
     const live = await db.prepare(`
       SELECT city, trade,
         SUM(CASE WHEN outcome IN ('won','converted') OR tenant_outcome = 'won' THEN 1 ELSE 0 END) AS wins,
-        SUM(CASE WHEN outcome IN ('sent','positive','booked','won','lost','converted') OR status IN ('sent','delivered','replied','booked','converted','won','lost') OR tenant_outcome IN ('replied','booked','won','lost') THEN 1 ELSE 0 END) AS sent
+        SUM(CASE WHEN outcome IN ('sent','positive','booked','won','lost','converted')
+                  OR status IN ('sent','delivered','replied','booked','converted','won','lost','contacted')
+                  OR tenant_outcome IN ('contacted','replied','booked','won','lost') THEN 1 ELSE 0 END) AS sent
       FROM prospects
       WHERE mode = ?
         AND COALESCE(tenant_id, 'founder') = ?
@@ -11595,10 +11760,9 @@ export function inferTradeFromTextDetailed(...textParts: (string | undefined)[])
     return { trade: 'general', confidence: 'none', isNonHomeService: false };
   }
 
-  // Check off-ICP first
-  if (isOffIcpName(combined)) {
-    return { trade: 'non_home_service', confidence: 'high', isNonHomeService: true, detectedClue: 'off_icp_token' };
-  }
+  // ICP eligibility is mode-aware and enforced by checkTradeCoherence; this
+  // helper only classifies the observed trade so Tenant buyers are not
+  // accidentally filtered by Founder-only exclusions.
 
   const tradePatterns: [string, RegExp][] = [
     ['lawn_care', /\b(lawn\s*care|lawn\s*mowing|mowing|turf|weed\s*control|aeration|yard\s*care|lawn\s*service)\b/i],
@@ -11643,8 +11807,8 @@ export function checkTradeCoherence(
   tags?: string | null,
   mode: string = 'founder'
 ): TradeCoherenceCheck {
-  const allowGym = mode === 'tenant';
-  if (isOffIcpName(name, allowGym)) {
+  const allowTenantBuyer = mode === 'tenant';
+  if (isOffIcpName(name, allowTenantBuyer)) {
     return {
       coherent: false,
       verifiedTrade: null,
