@@ -2324,10 +2324,16 @@ export default {
                   "UPDATE geo_coverage SET wins = MAX(0, wins - 1) WHERE tenant_id = ? AND place_key = ? AND trade = ?"
                 ).bind(tenant_id, placeKeyStr, prospect.trade.toLowerCase()).run();
               }
-              if (outcome === "replied" || outcome === "booked" || outcome === "won") {
-                const col = outcome === "won" ? "wins" : "replies";
+              if (outcome === "won" && prospect.tenant_outcome !== "won") {
                 await env.RADAR_DB.prepare(
-                  `UPDATE geo_coverage SET ${col} = ${col} + 1 WHERE tenant_id = ? AND place_key = ? AND trade = ?`
+                  "UPDATE geo_coverage SET wins = wins + 1 WHERE tenant_id = ? AND place_key = ? AND trade = ?"
+                ).bind(tenant_id, placeKeyStr, prospect.trade.toLowerCase()).run();
+              }
+              const wasReplyStage = prospect.tenant_outcome === "replied" || prospect.tenant_outcome === "booked";
+              const isReplyStage = outcome === "replied" || outcome === "booked";
+              if (!wasReplyStage && isReplyStage) {
+                await env.RADAR_DB.prepare(
+                  "UPDATE geo_coverage SET replies = replies + 1 WHERE tenant_id = ? AND place_key = ? AND trade = ?"
                 ).bind(tenant_id, placeKeyStr, prospect.trade.toLowerCase()).run();
               }
             }
