@@ -1,3 +1,5 @@
+import marketUniverse from "../sidecar/config/market-universe.json";
+
 /**
  * Email Sanitizer & ICP Guard for Bvelt Radar
  * Prevents invalid emails (e.g. clock@2x.png, system mailboxes, disposables)
@@ -165,32 +167,42 @@ export async function hasMxRecords(domainOrEmail: string): Promise<boolean> {
   }
 }
 
+const MARKET_EXCLUSIONS = new Set(
+  (((marketUniverse as any).excluded_business_categories || []) as string[])
+    .map((value) => String(value).trim().toLowerCase())
+);
+
+const FOUNDER_EXCLUSION_RULES: Array<{ category: string; pattern: RegExp }> = [
+  { category: "pet care", pattern: /\b(pet care|pet store|pet grooming|dog grooming|veterinary|vet clinic|animal hospital)\b/i },
+  { category: "hair/nail salons", pattern: /\b(barber|barbershop|hairdresser|hair salon|nail salon|beauty salon|salon)\b/i },
+  { category: "tattoo/piercing", pattern: /\b(tattoo|piercing)\b/i },
+  { category: "gyms/fitness studios", pattern: /\b(gym|fitness studio|crossfit|pilates|yoga)\b/i },
+  { category: "massage", pattern: /\b(massage)\b/i },
+  { category: "grocery/supermarket", pattern: /\b(grocery|supermarket)\b/i },
+  { category: "convenience stores", pattern: /\b(convenience store)\b/i },
+  { category: "florists", pattern: /\b(florist|flower shop)\b/i },
+  { category: "boutiques", pattern: /\b(boutique)\b/i },
+  { category: "pure ecommerce", pattern: /\b(pure e[- ]?commerce|online[- ]only|dropshipping)\b/i },
+  { category: "low-value retail", pattern: /\b(dollar store|discount store|thrift store|pawn shop)\b/i },
+];
+
+const NON_BUSINESS_ENTITY_REGEX =
+  /\b(church|iglesia|ministry|ministerio|chapel|temple|parish|cathedral)\b/i;
+
 /**
- * Detects if a business name is clearly off-ICP (consumer retail, restaurants, beauty, barbers, medical, etc.)
+ * Founder-only exclusions are driven by market-universe.json.
+ * Tenant mode bypasses Founder exclusions because the tenant's buyer ICP is authoritative.
+ * Broad categories such as restaurants, healthcare, education, automotive and retail remain eligible.
  */
-export function isOffIcpName(name: string | null | undefined, allowGym: boolean = false): boolean {
-  if (!name || typeof name !== 'string') {
-    return true;
-  }
+export function isOffIcpName(name: string | null | undefined, allowTenantBuyer: boolean = false): boolean {
+  if (!name || typeof name !== "string") return true;
   const clean = name.trim().toLowerCase();
   if (!clean) return true;
 
-  // Strict regex for off-ICP business keywords
-  const offIcpRegex =
-    /\b(barber|barbershop|hairdresser|hair\s*salon|hair\s*studio|salon|beauty|nails?|spa|tattoo|piercing|restaurant|cafe|coffee|bistro|bakery|diner|grill|pizzeria|pizza|taco|taquer|tamal|tamales|catering|burger|sushi|kitchen|brewery|winery|bar|pub|church|iglesia|ministry|ministerio|chapel|temple|parish|cathedral|dental|dentist|orthodont|clinic|doctor|medical|pharmacy|veterinar|vet|animal\s*hospital|daycare|childcare|child\s*care|preschool|kindergarten|school|academy|college|university|retail|retail\s*shop|boutique|clothing|apparel|shoe|shoes|jewelry|jeweler|pawn|pawnshop|cannabis|dispensary|smoke\s*shop|vape|tobacco|liquor|florist|flower|gift\s*shop|pet\s*store|grocery|supermarket|arcade|bowling|casino|theater|cinema|auto\s*repair|auto_repair|car\s*repair|mechanic|tire|body\s*shop|auto\s*body|muffler|transmission)\b/i;
+  if (NON_BUSINESS_ENTITY_REGEX.test(clean)) return true;
+  if (allowTenantBuyer) return false;
 
-  if (offIcpRegex.test(clean)) {
-    return true;
-  }
-
-  // Non-word-boundary safety catch for concatenated terms like 'vibbarbershop', 'taqueria', 'tamales', 'autorepair', etc.
-  if (/barber|barbershop|hairdresser|taquer|tamal|pizzeria|dispensary|daycare|boutique|cannabis|autorepair|carrepair|mechanic|bodyshop/i.test(clean)) {
-    return true;
-  }
-
-  if (!allowGym && /\b(gym|fitness|crossfit|pilates|yoga)\b/i.test(clean)) {
-    return true;
-  }
-
-  return false;
+  return FOUNDER_EXCLUSION_RULES.some((rule) =>
+    MARKET_EXCLUSIONS.has(rule.category) && rule.pattern.test(clean)
+  );
 }
