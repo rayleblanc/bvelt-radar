@@ -499,14 +499,10 @@ export default function App() {
         }
       }
 
-      // Session is managed via HttpOnly cookie with credentials: 'include' or Bearer token.
-      const token = typeof window !== 'undefined' ? localStorage.getItem('RADAR_BEARER_TOKEN') : null;
-      const authHeaders: Record<string, string> = token ? { 'Authorization': `Bearer ${token}` } : {};
-
-      // 2. GET /stats (protected by Worker HttpOnly cookie or Bearer token)
+      // Founder authentication is held only in the Worker HttpOnly session cookie.
+      // Never read or send a service key from browser storage.
       const statsRes = await fetch(`${apiUrl}/stats`, {
-        credentials: 'include',
-        headers: authHeaders
+        credentials: 'include'
       }).catch(() => null);
       
       if (statsRes && statsRes.ok) {
@@ -549,14 +545,12 @@ export default function App() {
       // 3. GET /prospects
       let prospectsRes = await fetch(`${apiUrl}/prospects${queryParam}`, {
         credentials: 'include',
-        headers: authHeaders
       }).catch(() => null);
 
       if (!prospectsRes || !prospectsRes.ok) {
         prospectsRes = await fetch(`${apiUrl}/api/prospects${queryParam}`, {
           credentials: 'include',
-          headers: authHeaders
-        }).catch(() => null);
+          }).catch(() => null);
       }
       
       // ROI funnel (founder or selected tenant)
@@ -759,15 +753,9 @@ const submitDecision = async (prospectId: string, action: string) => {
         payload.tenant_id = selectedTenantId;
       }
 
-      const token = typeof window !== 'undefined' ? localStorage.getItem('RADAR_BEARER_TOKEN') : null;
-      const authHeaders: Record<string, string> = token ? { 'Authorization': `Bearer ${token}` } : {};
-
       const res = await fetch(`${apiUrl}/decision`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...authHeaders
-        },
+        headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
         body: JSON.stringify(payload)
       });
@@ -1646,7 +1634,7 @@ const submitDecision = async (prospectId: string, action: string) => {
                     </div>
                     {!hasCities && (
                       <div className="px-3 py-2 bg-amber-950/30 border border-amber-800/40 rounded-lg text-[11px] text-amber-200/90">
-                        Este tenant no tiene ciudades. Ve a la pestaña <strong>Tenant</strong>, añade ciudades (ej. <code className="text-amber-100">["Tampa, FL","Orlando, FL"]</code>) y guarda. Sin ciudades el Radar no buscará.
+                        Este tenant no tiene ciudades. Ve a la pestaña <strong>Tenant</strong>, añade ciudades (ej. <code className="text-amber-100">["City A, Region","City B, Region"]</code>) y guarda. Sin ciudades el Radar no buscará.
                       </div>
                     )}
                   </div>
