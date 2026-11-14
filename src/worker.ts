@@ -1436,6 +1436,11 @@ export default {
                     AND COALESCE(NULLIF(TRIM(tenant_id), ''), 'founder') = ?
                   AND lower(COALESCE(status, 'open')) = 'open'
                      AND lower(COALESCE(decision_state, '')) != 'closed'
+                     AND NOT EXISTS (
+                       SELECT 1 FROM prospects p WHERE p.id = opportunities.prospect_id
+                         AND (lower(COALESCE(p.status, '')) IN ('sent','delivered','opened','clicked','bounced','unsubscribed','replied','human_review','discarded','blocked','suppressed','converted','disqualified')
+                           OR (p.cooldown_until IS NOT NULL AND datetime(p.cooldown_until) > datetime('now')))
+                     )
                    ORDER BY COALESCE(strategic_score, 0) DESC LIMIT ?`,
             binds: [minScore, scopeTenant, limit],
           },
@@ -1459,6 +1464,11 @@ export default {
                   WHERE COALESCE(NULLIF(TRIM(tenant_id), ''), 'founder') = ?
                   AND lower(COALESCE(status, 'open')) = 'open'
                      AND lower(COALESCE(decision_state, '')) != 'closed'
+                     AND NOT EXISTS (
+                       SELECT 1 FROM prospects p WHERE p.id = opportunities.prospect_id
+                         AND (lower(COALESCE(p.status, '')) IN ('sent','delivered','opened','clicked','bounced','unsubscribed','replied','human_review','discarded','blocked','suppressed','converted','disqualified')
+                           OR (p.cooldown_until IS NOT NULL AND datetime(p.cooldown_until) > datetime('now')))
+                     )
                    ORDER BY rowid DESC LIMIT ?`,
             binds: [scopeTenant, limit],
           },
@@ -11543,6 +11553,10 @@ export async function sendOrQueueOutreach(prospect: any, runId: string, env: Env
         SET status = 'sent', outcome = 'sent', dispatch_provider = ?, dispatch_message_id = ?, dispatch_status = 'dispatched', last_contact_at = ?, updated_at = ?
         WHERE id = ?
       `).bind(dispatch.provider, dispatch.messageId, timestamp, timestamp, prospect.id).run();
+      try {
+        await env.RADAR_DB.prepare("UPDATE opportunities SET status = 'closed', decision_state = 'closed', updated_at = ? WHERE prospect_id = ?")
+          .bind(timestamp, prospect.id).run();
+      } catch (e) {}
 
       await env.RADAR_DB.prepare(`
         UPDATE outreach_idempotency
