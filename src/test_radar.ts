@@ -300,6 +300,15 @@ tests.push({
     );
     assert(!safe.sanitized, "Neutral factual copy should remain unchanged");
     assert(safe.body.includes("Street address"), "The configured legal footer must be appended when missing");
+    const followUp = normalizeFounderOutreachCopy(
+      "Quick audit: Stop losing leads",
+      "We noticed your website is slow and can recover lost revenue with automated SMS.",
+      "Example Plumbing",
+      "Rainer, founder of Bvelt\\nStreet address, City, Region, Country\\nThis is a commercial message. Reply unsubscribe to opt out.",
+      2
+    );
+    assert(followUp.sanitized && followUp.subject !== unsafe.subject, "Follow-up copy must use a distinct touch-specific subject");
+    assert(followUp.body.includes("estimates") && followUp.body.includes("unsubscribe"), "Follow-up hook and legal footer must remain intact");
   }
 });
 
