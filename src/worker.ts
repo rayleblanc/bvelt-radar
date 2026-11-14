@@ -4487,44 +4487,42 @@ export async function bootstrapBveltTenant(
     };
   }
 
-  // Contractor trade → who they sell TO (buyer ICP)
+  const toStringList = (value: any): string[] => {
+    const raw = Array.isArray(value) ? value : typeof value === "string" ? value.split(/[;,]/) : [];
+    return Array.from(new Set(raw
+      .map((item: any) => typeof item === "string" ? item : String(item?.label || ""))
+      .map((item: string) => item.trim())
+      .filter(Boolean)));
+  };
+
+  // Buyer segments may come from explicit ICP, AI expansion, or the curated map.
+  // The map is a fallback, never an industry allowlist.
   const tradeKey = userTrade.replace(/-/g, "_");
-  const suppliedNiches =
-    (Array.isArray(body.target_niches) && body.target_niches.length > 0 ? body.target_niches : null) ||
-    (Array.isArray(body.subniches) && body.subniches.length > 0 ? body.subniches : null);
   const mappedNiches =
     TENANT_TARGET_MAP[tradeKey] ||
-    TENANT_TARGET_MAP[tradeKey.replace(/_/g, " ")];
-  const niches = suppliedNiches || mappedNiches || [];
+    TENANT_TARGET_MAP[tradeKey.replace(/_/g, " ")] ||
+    [];
+  const niches =
+    toStringList(body.target_niches).length ? toStringList(body.target_niches) :
+    toStringList(body.subniches).length ? toStringList(body.subniches) :
+    toStringList(body.allowed_markets).length ? toStringList(body.allowed_markets) :
+    toStringList(body.icp_keywords).length ? toStringList(body.icp_keywords) :
+    mappedNiches;
 
-  // Unknown trades must not be assigned generic buyer segments.
-  if (niches.length === 0) {
-    return {
-      success: false,
-      status: "pending_configuration",
-      tenant_id: tenantId,
-      city: cityLabel,
-      niches: [],
-      run_id: null,
-      leads: [],
-      message: "target_niches_required: no existe un buyer ICP validado para este oficio; configura target_niches en Bvelt.",
-      missing_fields: ["target_niches"],
-      source
-    };
-  }
+  // Store the tenant's own business niche separately from its buyer segments.
+  const primaryNiche = String(body.niche || rawTrade).trim().toLowerCase().replace(/\s+/g, "_");
+  const primaryBuyerSegment = niches[0] || "";
+  const searchTrade = primaryBuyerSegment
+    ? primaryBuyerSegment.toLowerCase().includes("property")
+      ? "property management"
+      : primaryBuyerSegment.toLowerCase().includes("hotel")
+        ? "hotel"
+        : primaryBuyerSegment.toLowerCase().includes("hoa")
+          ? "property management"
+          : primaryBuyerSegment
+    : "";
 
-  const primaryNiche = niches[0]; // buyer segment, e.g. property management
-  const searchTrade = primaryNiche.toLowerCase().includes("property")
-    ? "property management"
-    : primaryNiche.toLowerCase().includes("hotel")
-      ? "hotel"
-      : primaryNiche.toLowerCase().includes("hoa")
-        ? "property management"
-        : primaryNiche;
-
-  const suppliedCountries = Array.isArray(body.countries)
-    ? body.countries
-    : typeof body.countries === "string" ? body.countries.split(/[;,]/) : [];
+  const suppliedCountries = toStringList(body.countries);
   const explicitCountries = suppliedCountries.length
     ? suppliedCountries
     : body.country_code || body.country ? [body.country_code || body.country] : [];
@@ -4534,13 +4532,18 @@ export async function bootstrapBveltTenant(
       .map((value: any) => String(value).trim().toUpperCase())
       .filter(Boolean)
   ));
-  const suppliedLanguages = Array.isArray(body.languages)
-    ? body.languages
-    : typeof body.languages === "string" ? body.languages.split(/[;,]/)
-      : body.language ? [body.language] : [];
-  const languages = Array.from(new Set(
-    suppliedLanguages.map((value: any) => String(value).trim().toLowerCase()).filter(Boolean)
-  ));
+  const languages = toStringList(body.languages || body.language).map(value => value.toLowerCase());
+  const services = toStringList(body.services).length ? toStringList(body.services) : [userTrade];
+  const serviceAreas = toStringList(body.service_areas).length ? toStringList(body.service_areas) : [cityLabel];
+  const regions = toStringList(body.regions);
+  const cities = toStringList(body.cities).length ? toStringList(body.cities) : [cityLabel];
+  const icpKeywords = toStringList(body.icp_keywords);
+  const allowedMarkets = toStringList(body.allowed_markets).length ? toStringList(body.allowed_markets) : niches;
+  const icpDescription = String(body.icp_description || `Customers likely to buy ${userTrade} services in ${cityLabel}.`);
+  const minimumScore = Number.isFinite(Number(body.minimum_score)) ? Number(body.minimum_score) : 45;
+  const dailyOutreachLimit = Number.isFinite(Number(body.daily_outreach_limit)) ? Number(body.daily_outreach_limit) : 15;
+  const campaignGoal = String(body.campaign_goal || "Book qualified jobs from nearby buyers");
+  const messagingAngle = String(body.messaging_angle || "fast_response_guarantee");
 
   const timestamp = new Date().toISOString();
   await env.RADAR_DB.prepare(`
@@ -4571,22 +4574,22 @@ export async function bootstrapBveltTenant(
   `).bind(
     tenantId,
     tenantName,
-    userTrade,
+    String(body.industry || userTrade).trim().toLowerCase(),
     primaryNiche,
-    JSON.stringify(niches.slice(0, 5)),
-    JSON.stringify([userTrade]),
-    JSON.stringify([cityLabel]),
+    JSON.stringify(niches.slice(0, 6)),
+    JSON.stringify(services),
+    JSON.stringify(serviceAreas),
     JSON.stringify(countries),
-    JSON.stringify([]),
-    JSON.stringify([cityLabel]),
+    JSON.stringify(regions),
+    JSON.stringify(cities),
     JSON.stringify(languages),
-    `Buyers near ${cityLabel} for a local ${userTrade} operator (auto from Bvelt ${source}).`,
-    JSON.stringify(niches),
-    45,
-    15,
-    JSON.stringify(niches),
-    "Book jobs from nearby commercial/residential buyers",
-    "fast_response_guarantee",
+    icpDescription,
+    JSON.stringify(icpKeywords),
+    minimumScore,
+    dailyOutreachLimit,
+    JSON.stringify(allowedMarkets),
+    campaignGoal,
+    messagingAngle,
     timestamp,
     timestamp
   ).run();
@@ -4594,7 +4597,7 @@ export async function bootstrapBveltTenant(
   // --- FAST PATH: one Overpass/BizData pull, top 2 leads now ---
   const leads: any[] = [];
   try {
-    const businesses = body.skip_fast_discovery ? [] : (await fetchLocalBusinessesWithDiagnostics(cityLabel, searchTrade, env, undefined, 'tenant')).businesses;
+    const businesses = body.skip_fast_discovery || !searchTrade ? [] : (await fetchLocalBusinessesWithDiagnostics(cityLabel, searchTrade, env, undefined, 'tenant')).businesses;
     const ranked = (businesses || [])
       .filter((b: any) => b && b.name && tenantBuyerNameFits(b.name, searchTrade))
       .map((b: any) => {
@@ -4680,10 +4683,10 @@ export async function bootstrapBveltTenant(
   let runId: string | null = null;
   const runPromise = startProspectingRun(env, "tenant", tenantId, {
     cities: cityLabel,
-    trades: searchTrade,
-    countries: null,
-    languages: null,
-    min_score: null
+    trades: searchTrade || null,
+    countries: countries.join(";") || null,
+    languages: languages.join(";") || null,
+    min_score: String(minimumScore)
   }, true).then((r) => {
     runId = r.run_id;
     return r;
@@ -4700,18 +4703,21 @@ export async function bootstrapBveltTenant(
     } catch { /* ok */ }
   }
 
+  const pendingBuyerIcp = niches.length === 0 || runId === "no_buyer_segments";
   return {
     success: true,
-    status: "active",
+    status: pendingBuyerIcp ? "pending_configuration" : "active",
     tenant_id: tenantId,
     city: cityLabel,
     niches,
     run_id: runId,
     leads,
-    message:
-      leads.length > 0
-        ? `Listo: ${leads.length} cliente(s) potencial(es) cerca de ${cityLabel}. Más en camino.`
-        : `Tenant listo en ${cityLabel}. Buscando compradores (property/HOA) — revisa /api/bvelt/leads en 1–2 min.`,
+    message: leads.length > 0
+      ? `Listo: ${leads.length} cliente(s) potencial(es) cerca de ${cityLabel}. Más en camino.`
+      : pendingBuyerIcp
+        ? "Perfil guardado. El buyer ICP se intentará expandir con la información del negocio; si no hay segmentos suficientes, añade target_niches, allowed_markets o icp_keywords."
+        : `Tenant listo en ${cityLabel}. Buscando compradores: ${niches.slice(0, 4).join(", ")}.`,
+    missing_fields: pendingBuyerIcp ? ["target_niches_or_icp_keywords"] : undefined,
     source
   };
 }
