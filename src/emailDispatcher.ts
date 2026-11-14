@@ -99,7 +99,7 @@ export async function inspectOutboundEmailAuth(
   const dmarcText = dmarc.map(x => String(x.data || '').replace(/^"|"$/g, '')).find(x => /v=DMARC1/i.test(x)) || '';
   const spfText = spf.map(x => String(x.data || '').replace(/^"|"$/g, '')).find(x => /v=spf1/i.test(x)) || '';
   base.dmarcPresent = !!dmarcText;
-  base.dmarcPolicy = dmarcText.match(/(?:^|;)\\s*p=([a-z]+)/i)?.[1]?.toLowerCase() || 'unknown';
+  base.dmarcPolicy = dmarcText.match(/(?:^|;)\s*p=([a-z]+)/i)?.[1]?.toLowerCase() || 'unknown';
   base.dkimPresent = dkim.some(x => /p=[A-Za-z0-9+/=]+/.test(String(x.data || '')));
   base.spfPresent = !!spfText;
   base.returnPathMxPresent = returnMx.some(x => /amazonses|resend/i.test(String(x.data || '')));
