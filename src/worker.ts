@@ -663,6 +663,22 @@ async function handleTenantLearningIngest(
         return Response.json({ ok: false, error: "invalid_value_usd" }, { status: 400, headers: corsHeaders });
       }
 
+      const choiceReasonCode = String(item?.customer_choice_reason_code || "").trim().toUpperCase();
+      const choiceProvenance = String(item?.customer_choice_provenance || "").trim().toUpperCase();
+      const allowedChoiceReasons = new Set([
+        "PRICE", "AVAILABILITY", "TIMING", "COMPETITOR", "TRUST_REPUTATION",
+        "REFERRAL", "COMMUNICATION", "SPECIALIZATION", "LOCATION",
+        "NO_RESPONSE", "NOT_A_FIT", "OTHER", "UNKNOWN"
+      ]);
+      if (choiceReasonCode || choiceProvenance) {
+        if (!["won", "lost"].includes(eventType) ||
+            !allowedChoiceReasons.has(choiceReasonCode) ||
+            !["OWNER_REPORTED_CUSTOMER_STATEMENT", "UNKNOWN"].includes(choiceProvenance) ||
+            (choiceReasonCode === "UNKNOWN") !== (choiceProvenance === "UNKNOWN")) {
+          return Response.json({ ok: false, error: "invalid_customer_choice_provenance" }, { status: 400, headers: corsHeaders });
+        }
+      }
+
       const input = {
         mode: "tenant" as const,
         tenantId: headerTenantId,
@@ -674,7 +690,13 @@ async function handleTenantLearningIngest(
         angle: item?.angle ? String(item.angle).trim().slice(0, 160) : null,
         valueUsd,
         occurredAt,
-        idempotencyKey: `bvelt-outcome:${idempotencyKey}`
+        idempotencyKey: `bvelt-outcome:${idempotencyKey}`,
+        metadata: choiceReasonCode ? {
+          customer_choice: {
+            reason_code: choiceReasonCode,
+            provenance: choiceProvenance
+          }
+        } : {}
       };
 
       const inserted = await recordScopedLearningEvent(env.RADAR_DB, input);
