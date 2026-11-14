@@ -199,7 +199,7 @@ export function isOffIcpName(name: string | null | undefined, allowTenantBuyer: 
   const clean = name.trim().toLowerCase();
   if (!clean) return true;
 
-  if (NON_BUSINESS_ENTITY_REGEX.test(clean)) return true;
+  if (!allowTenantBuyer && NON_BUSINESS_ENTITY_REGEX.test(clean)) return true;
   if (allowTenantBuyer) return false;
 
   return FOUNDER_EXCLUSION_RULES.some((rule) =>
