@@ -11344,11 +11344,6 @@ async function recordLearningEvent(
 
   const eventType = String(details?.event_type || (isSent ? "sent" : details?.outcome || "unknown")).toLowerCase();
   const occurredAt = new Date().toISOString();
-  const keys = [`city:${city}`, `trade:${String(trade || "").toLowerCase()}`];
-  if (variantId) keys.push(`variant:${variantId}`);
-  if (details?.angle) keys.push(`angle:${details.angle}`);
-  if (city && trade) keys.push(`pair:${city}|${String(trade).toLowerCase()}`);
-
   try {
     await recordScopedLearningEvent(db, {
       mode,
@@ -11448,7 +11443,7 @@ async function getLearningStats(
     const live = await db.prepare(`
       SELECT city, trade,
         SUM(CASE WHEN outcome IN ('won','converted') OR tenant_outcome = 'won' THEN 1 ELSE 0 END) AS wins,
-        SUM(CASE WHEN outcome = 'sent' OR status IN ('sent','delivered','replied','converted','won') OR tenant_outcome IN ('contacted','replied','won','lost') THEN 1 ELSE 0 END) AS sent
+        SUM(CASE WHEN outcome IN ('sent','positive','booked','converted','won') OR status IN ('sent','delivered','replied','converted','won') OR tenant_outcome IN ('contacted','replied','won','lost') THEN 1 ELSE 0 END) AS sent
       FROM prospects
       WHERE mode = ?
         AND COALESCE(tenant_id, 'founder') = ?
