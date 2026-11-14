@@ -9491,7 +9491,7 @@ export async function getFounderOutreachEligibility(db: D1Database, prospect: an
   if (String(prospect.mode || "").toLowerCase() === "tenant") return { allowed: true, reason: "tenant_policy", nextTouch: getOutreachTouch(prospect) };
   const [history, idempotency] = await Promise.all([
     db.prepare("SELECT COUNT(DISTINCT message_id) AS touch_count, MAX(created_at) AS last_send_at FROM email_dispatch_logs WHERE prospect_id = ? AND message_id IS NOT NULL").bind(prospect.id).first(),
-    db.prepare("SELECT COUNT(DISTINCT idempotency_key) AS touch_count, MAX(updated_at) AS last_send_at FROM outreach_idempotency WHERE prospect_id = ? AND status IN ('reserved','queued','sent','scheduled','provider_unknown')").bind(prospect.id).first()
+    db.prepare("SELECT COUNT(DISTINCT idempotency_key) AS touch_count, MAX(updated_at) AS last_send_at FROM outreach_idempotency WHERE prospect_id = ? AND status IN ('queued','sent','scheduled','provider_unknown')").bind(prospect.id).first()
   ]) as any[];
   const state = String(prospect.status || "").toLowerCase();
   const fallbackTouch = prospect.last_contact_at ? 1 : 0;
