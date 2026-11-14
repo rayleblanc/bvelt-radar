@@ -1696,7 +1696,7 @@ tests.push({
             source_url: "https://acmeplumbing.com",
             evidence_type: "business_website_profile",
             evidence: { contact_form_observed: true, page_title: "Acme Plumbing Services" },
-            content_hash: "hash_001",
+            content_hash: "a".repeat(64),
             extractor_version: "bvelt-scrapling-1.0.0",
             confidence: 0.78,
             observed_at: new Date().toISOString()
@@ -2277,7 +2277,7 @@ tests.push({
             source_id: "scrapling_test",
             source_url: "https://testbusiness.com",
             evidence_type: "business_profile",
-            content_hash: "hash_sync_123",
+            content_hash: "b".repeat(64),
             evidence: {
               page_title: "Test Business Homepage",
               public_business_phones: ["+15551234567"]
