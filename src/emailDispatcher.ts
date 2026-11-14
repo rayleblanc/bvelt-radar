@@ -28,6 +28,7 @@ export interface EmailDispatchOptions {
   includeSiteLink?: boolean;
   plainTextOnly?: boolean;
   founderOutreach?: boolean;
+  legalFooter?: string;
 }
 
 export function resolveBveltSender(raw?: string): { email: string; from: string } | null {
@@ -156,33 +157,38 @@ export interface EmailDispatchResult {
 export function normalizeFounderOutreachCopy(
   subject: string,
   body: string,
-  recipientName?: string
+  recipientName?: string,
+  legalFooter?: string
 ): { subject: string; body: string; sanitized: boolean } {
-  const unsafeCopy = /\b(?:free|quick|technical)\s+(?:website\s+)?audit\b|\bstop\s+losing\b|\bguarantee(?:d)?\b|\bwe\s+noticed\s+your\s+(?:website|site)\b|\byour\s+(?:website|site)\s+(?:is|seems)\s+slow\b|\bmissed\s+calls\s+are\s+costing\b|\byou(?:'re|\s+are)\s+losing\b/i;
+  const unsafeCopy = /\b(?:free|quick|technical)\s+(?:website\s+)?audit\b|\bstop\s+losing\b|\bguarantee(?:d)?\b|\bwe\s+noticed\s+your\s+(?:website|site)\b|\byour\s+(?:website|site)\s+(?:is|seems)\s+slow\b|\bmissed\s+calls\s+are\s+costing\b|\byou(?:'re|\s+are)\s+losing\b|\b(?:mobile\s+)?speed\s+checks?\b|\bover\s+\d+(?:\.\d+)?\s+seconds?\b|\bmost\s+(?:people|customers|homeowners)\s+(?:hang\s+up|leave)\b|\b(?:automatically\s+)?re-?engages?\s+missed\s+leads\b|\brecover(?:s|ed)?\s+lost\s+(?:jobs|revenue|leads)\b|\b(?:automated\s+)?sms\b|\b\d{1,3}\s?%\b/i;
   const sourceSubject = String(subject || '').trim();
   const sourceBody = String(body || '').trim();
-  const unsafe = unsafeCopy.test(sourceSubject) || unsafeCopy.test(sourceBody);
+  const business = String(recipientName || '').trim();
+  const footer = String(legalFooter || '').trim();
+  const footerStart = sourceBody.search(/(?:^|\n)(?:--\s*$|this is a commercial message|reply\s+(?:stop|unsubscribe)|unsubscribe)/im);
+  const bodyWithoutFooter = footerStart >= 0 ? sourceBody.slice(0, footerStart).trim() : sourceBody;
+  const unsafe = unsafeCopy.test(sourceSubject) || unsafeCopy.test(bodyWithoutFooter);
   if (!unsafe) {
-    return { subject: sourceSubject.slice(0, 140), body: sourceBody, sanitized: false };
+    const normalizedBody = footer && !bodyWithoutFooter.includes(footer)
+      ? [bodyWithoutFooter, footer].filter(Boolean).join('\n\n')
+      : sourceBody;
+    return { subject: sourceSubject.slice(0, 140), body: normalizedBody, sanitized: false };
   }
 
-  const business = String(recipientName || '').trim();
   const safeSubject = business
-    ? `Question about customer follow-up at ${business}`
-    : 'Question about your customer follow-up process';
-  const footerMatch = sourceBody.match(/(reply\s+stop[\s\S]*)$/i);
-  const footer = footerMatch ? footerMatch[1].trim() : '';
+    ? 'How does ' + business + ' follow up with new enquiries?'
+    : 'How do you follow up with new enquiries?';
   const safeBody = [
-    `Hi ${business || 'team'},`,
+    'Hi ' + (business || 'team') + ',',
     '',
-    "I'm Rainer, founder of Bvelt. We build tools that help service businesses follow up with people who contact them or request estimates.",
+    "I'm Rainer, founder of Bvelt. We help service businesses keep enquiries and estimate follow-ups organized.",
     '',
-    'How do you currently handle those follow-ups when your team is busy?',
+    'How do you currently follow up when a call goes unanswered or an estimate is still open?',
+    'Would a short example be useful?',
     footer
   ].filter(Boolean).join('\n\n');
-  return { subject: safeSubject, body: safeBody, sanitized: true };
+  return { subject: safeSubject.slice(0, 140), body: safeBody, sanitized: true };
 }
-
 export function normalizeOutreachBody(body: string, includeSiteLink = true): string {
   let b = (body || '').trim();
   b = b.replace(/https?:\/\/bvelt\.app\/demo\?[^\s)\]>"]+/gi, BVELT_SITE);
@@ -266,7 +272,7 @@ export async function dispatchEmail(options: EmailDispatchOptions): Promise<Emai
 
   const normalizedBody = normalizeOutreachBody(options.body || '', options.includeSiteLink !== false);
   const founderCopy = options.founderOutreach
-    ? normalizeFounderOutreachCopy(options.subject || 'Question about customer follow-up', normalizedBody, options.recipientName)
+    ? normalizeFounderOutreachCopy(options.subject || 'Question about customer follow-up', normalizedBody, options.recipientName, options.legalFooter)
     : { subject: String(options.subject || 'Quick question from Bvelt').trim(), body: normalizedBody, sanitized: false };
   const subject = founderCopy.subject;
   const body = founderCopy.body;
