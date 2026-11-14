@@ -3953,8 +3953,8 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
         const testRes = await dispatchEmail({
           to: targetEmail,
           recipientName: "Bvelt Founder Test",
-          subject: "⚡ Test Outbound Live - Bvelt Radar",
-          body: `Hola,\n\nEste es un mensaje de prueba enviado desde tu bot de Telegram en Bvelt Radar.\n\nProveedor detectado: ${env.RESEND_API_KEY ? "Resend API" : env.BREVO_API_KEY ? "Brevo API" : "Simulado"}\nFecha: ${new Date().toISOString()}\n\nReply STOP to opt out`,
+          subject: "Bvelt email delivery check",
+          body: `This is a plain-text delivery check from Bvelt Radar. No action is required.\n\nSent at: ${new Date().toISOString()}.`,
           from: env.OUTBOUND_EMAIL_FROM,
           resendApiKey: env.RESEND_API_KEY,
           brevoApiKey: env.BREVO_API_KEY,
@@ -10554,7 +10554,7 @@ export async function notifyFounder(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(15000)
+      signal: AbortSignal.timeout(20000)
     });
 
     const data: any = await res.json().catch(() => ({ ok: false, description: `HTTP ${res.status}: Failed to parse JSON` }));
