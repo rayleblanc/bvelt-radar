@@ -11522,36 +11522,48 @@ export async function sendOrQueueOutreach(
   const sequenceId = hasHunter ? env.HUNTER_SEQUENCE_ID!.trim() : (hasResend ? 'resend_live' : 'brevo_live');
   const idempotencyKey = buildOutreachIdempotencyKey(tenantId, prospect.id, sequenceId, nextTouch);
 
-  // 10. Idempotency Check
+  // 10. Idempotency Check — fail closed if D1 cannot confirm the reservation.
+  let existingRecord: any = null;
   try {
-    const existingRecord = await env.RADAR_DB.prepare(
+    existingRecord = await env.RADAR_DB.prepare(
       "SELECT * FROM outreach_idempotency WHERE idempotency_key = ?"
     ).bind(idempotencyKey).first() as any;
+  } catch (e) {
+    await releaseBudget(env.RADAR_DB, tenantId, 'outreach_units', 1);
+    return { success: false, reason: "idempotency_read_failed" };
+  }
 
-    if (existingRecord) {
-      if (['scheduled', 'queued', 'sent'].includes(existingRecord.status)) {
-        console.log(`[Idempotency] Prospect ${prospect.id} already processed for sequence ${sequenceId}. Skipping resend.`);
-        await releaseBudget(env.RADAR_DB, tenantId, 'outreach_units', 1);
-        return { success: true, reason: "Already accepted by provider (idempotent skip)" };
-      }
-      if (existingRecord.status === 'provider_unknown') {
-        console.warn(`[Idempotency] Prospect ${prospect.id} in provider_unknown state. Reconciling before resend.`);
-        await releaseBudget(env.RADAR_DB, tenantId, 'outreach_units', 1);
-        await env.RADAR_DB.prepare("UPDATE prospects SET status = 'provider_unknown', outcome = 'reconciliation_required', updated_at = ? WHERE id = ?")
-          .bind(new Date().toISOString(), prospect.id).run();
-        return { success: false, reason: "provider_unknown: Reconciliation required before resend" };
-      }
+  if (existingRecord) {
+    if (['reserved', 'scheduled', 'queued', 'sent'].includes(String(existingRecord.status || '').toLowerCase())) {
+      await releaseBudget(env.RADAR_DB, tenantId, 'outreach_units', 1);
+      return { success: false, reason: "idempotency_touch_already_reserved_or_sent" };
     }
-  } catch (e) {}
+    if (String(existingRecord.status || '').toLowerCase() === 'provider_unknown') {
+      await releaseBudget(env.RADAR_DB, tenantId, 'outreach_units', 1);
+      await env.RADAR_DB.prepare("UPDATE prospects SET status = 'provider_unknown', outcome = 'reconciliation_required', updated_at = ? WHERE id = ?")
+        .bind(new Date().toISOString(), prospect.id).run();
+      return { success: false, reason: "provider_unknown: reconciliation required before resend" };
+    }
+  }
 
-  // Reserve idempotency entry
+  // Atomic per-touch reservation prevents concurrent cron/manual jobs from both sending.
   const timestamp = new Date().toISOString();
   try {
-    await env.RADAR_DB.prepare(`
-      INSERT OR REPLACE INTO outreach_idempotency (idempotency_key, prospect_id, tenant_id, email, status, created_at, updated_at)
+    const reservation = await env.RADAR_DB.prepare(`
+      INSERT INTO outreach_idempotency (idempotency_key, prospect_id, tenant_id, email, status, created_at, updated_at)
       VALUES (?, ?, ?, ?, 'reserved', ?, ?)
-    `).bind(idempotencyKey, prospect.id, tenantId, prospect.email.toLowerCase().trim(), timestamp, timestamp).run();
-  } catch (e) {}
+      ON CONFLICT(idempotency_key) DO UPDATE SET
+        status = 'reserved', email = excluded.email, updated_at = excluded.updated_at
+      WHERE outreach_idempotency.status = 'failed'
+    `).bind(idempotencyKey, prospect.id, tenantId, prospect.email.toLowerCase().trim(), timestamp, timestamp).run() as any;
+    if (!(Number(reservation?.meta?.changes || 0) > 0)) {
+      await releaseBudget(env.RADAR_DB, tenantId, 'outreach_units', 1);
+      return { success: false, reason: "idempotency_reservation_conflict" };
+    }
+  } catch (e) {
+    await releaseBudget(env.RADAR_DB, tenantId, 'outreach_units', 1);
+    return { success: false, reason: "idempotency_reservation_failed" };
+  }
 
   // 11. Provider Action: Resend / Brevo Direct Outbound Flow
   if (hasResend || hasBrevo) {
