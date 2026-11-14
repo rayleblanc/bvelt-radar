@@ -10265,8 +10265,8 @@ export async function sendTenantObservationsToBvelt(
   history_error?: boolean;
   tenant_id: string;
 }> {
-  if (!tenantId || !tenantId.startsWith("bvelt_")) {
-    return { skipped: true, reason: "tenant_id_required", tenant_id: tenantId };
+  if (!tenantId || !tenantId.startsWith("bvelt_") || tenantId === "bvelt_founder") {
+    return { skipped: true, reason: "invalid_bvelt_tenant_scope", tenant_id: tenantId };
   }
   const ingestUrl = (env as any).BVELT_TENANT_INGEST_URL;
   const ingestKey = (env as any).BVELT_TENANT_INGEST_KEY;
