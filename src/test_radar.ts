@@ -2249,6 +2249,71 @@ tests.push({
   }
 });
 
+tests.push({
+  name: "Tenant ROI: requires authentication and enforces exact tenant scope",
+  run: async () => {
+    const env: any = {
+      FOUNDER_SERVICE_KEY: "founder-secret",
+      RADAR_SERVICE_KEY: "radar-service-secret",
+      RADAR_DB: {
+        prepare: (sql: string) => ({
+          bind: (...args: any[]) => ({
+            first: async () => ({
+              total: 8,
+              pipeline: 2,
+              outreach: 1,
+              conversion_denominator: 5,
+              contacted: 4,
+              replied: 2,
+              booked: 1,
+              won: 1,
+              lost: 1,
+              won_value_usd_total: 250,
+              pipeline_ev_raw: 900,
+              avg_score: 70
+            })
+          })
+        })
+      }
+    };
+
+    const unauthenticated = await worker.fetch(
+      new Request("https://radar.test/api/tenants/roi?tenant_id=tenant_alpha"),
+      env,
+      {} as any
+    );
+    assert(unauthenticated.status === 401, "ROI must reject unauthenticated requests");
+
+    const crossTenant = await worker.fetch(
+      new Request("https://radar.test/api/tenants/roi?tenant_id=tenant_beta", {
+        headers: {
+          "Authorization": "Bearer radar-service-secret",
+          "X-Tenant-Id": "tenant_alpha"
+        }
+      }),
+      env,
+      {} as any
+    );
+    assert(crossTenant.status === 403, "Tenant service credentials must not read another tenant's ROI");
+
+    const scoped = await worker.fetch(
+      new Request("https://radar.test/api/tenants/roi?tenant_id=tenant_alpha", {
+        headers: {
+          "Authorization": "Bearer radar-service-secret",
+          "X-Tenant-Id": "tenant_alpha"
+        }
+      }),
+      env,
+      {} as any
+    );
+    assert(scoped.status === 200, "A tenant-scoped service credential must read its own ROI");
+    const body = await scoped.json() as any;
+    assert(body.conversion_denominator === 5, "ROI must expose the full contacted denominator");
+    assert(body.booked === 1 && body.won === 1 && body.lost === 1, "Bookings, wins and losses must remain distinct funnel stages");
+    assert(body.reply_rate_pct === 40 && body.win_rate_pct === 20, "Conversion rates must use the unique contacted denominator");
+  }
+});
+
 // Run all test cases
 async function runTests() {
 
