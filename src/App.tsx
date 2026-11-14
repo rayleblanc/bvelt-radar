@@ -499,14 +499,10 @@ export default function App() {
         }
       }
 
-      // Session is managed via HttpOnly cookie with credentials: 'include' or Bearer token.
-      const token = typeof window !== 'undefined' ? localStorage.getItem('RADAR_BEARER_TOKEN') : null;
-      const authHeaders: Record<string, string> = token ? { 'Authorization': `Bearer ${token}` } : {};
-
-      // 2. GET /stats (protected by Worker HttpOnly cookie or Bearer token)
+      // Founder authentication is held only in the Worker HttpOnly session cookie.
+      // Never read or send a service key from browser storage.
       const statsRes = await fetch(`${apiUrl}/stats`, {
-        credentials: 'include',
-        headers: authHeaders
+        credentials: 'include'
       }).catch(() => null);
       
       if (statsRes && statsRes.ok) {
@@ -759,15 +755,9 @@ const submitDecision = async (prospectId: string, action: string) => {
         payload.tenant_id = selectedTenantId;
       }
 
-      const token = typeof window !== 'undefined' ? localStorage.getItem('RADAR_BEARER_TOKEN') : null;
-      const authHeaders: Record<string, string> = token ? { 'Authorization': `Bearer ${token}` } : {};
-
       const res = await fetch(`${apiUrl}/decision`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...authHeaders
-        },
+        headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
         body: JSON.stringify(payload)
       });
