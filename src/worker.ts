@@ -2274,8 +2274,11 @@ export default {
         const effectiveWonValue = outcome === "won"
           ? (parsedValue ?? (prospect.won_value_usd == null ? null : Number(prospect.won_value_usd)))
           : null;
+        const existingWonValue = prospect.won_value_usd == null
+          ? null
+          : Number(prospect.won_value_usd);
         if (outcome === "won" && currentOutcome === "won" &&
-            (prospect.won_value_usd ?? null) !== effectiveWonValue) {
+            existingWonValue !== effectiveWonValue) {
           return Response.json({ error: "The recorded won value is immutable; use a reviewed correction." }, { status: 409, headers: corsHeaders });
         }
 
