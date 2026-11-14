@@ -3955,6 +3955,8 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
           recipientName: "Bvelt Founder Test",
           subject: "Bvelt email delivery check",
           body: `This is a plain-text delivery check from Bvelt Radar. No action is required.\n\nSent at: ${new Date().toISOString()}.`,
+          includeSiteLink: false,
+          plainTextOnly: true,
           from: env.OUTBOUND_EMAIL_FROM,
           resendApiKey: env.RESEND_API_KEY,
           brevoApiKey: env.BREVO_API_KEY,
