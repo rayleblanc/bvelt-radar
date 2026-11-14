@@ -30,8 +30,8 @@ export interface EmailDispatchOptions {
 export function resolveBveltSender(raw?: string): { email: string; from: string } | null {
   const value = String(raw || '').trim();
   if (!value) return null;
-  const match = value.match(/^(.*?)\\s*<([^<>]+)>$/);
-  const displayName = match?.[1]?.trim().replace(/[<>\\r\\n]/g, '') || 'Bvelt';
+  const match = value.match(/^(.*?)\s*<([^<>]+)>$/);
+  const displayName = match?.[1]?.trim().replace(/[<>\r\n]/g, '') || 'Bvelt';
   const candidate = (match?.[2] || value).trim();
   const parsed = sanitizeEmail(candidate);
   if (!parsed.valid || !parsed.email || parsed.email.split('@')[1] !== 'bvelt.app') return null;
