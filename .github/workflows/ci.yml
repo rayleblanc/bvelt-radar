@@ -2,8 +2,12 @@ name: Radar CI
 
 on:
   push:
-    branches: ["**"]
+    branches-ignore:
+      - "deploy-artifacts/**"
   pull_request:
+
+permissions:
+  contents: write
 
 jobs:
   typescript-build:
@@ -27,3 +31,71 @@ jobs:
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -r sidecar/requirements.txt pytest
       - run: python -m pytest sidecar/tests -q
+
+  worker-bundle:
+    if: github.ref == 'refs/heads/main'
+    needs: [typescript-build, sidecar-tests]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci --no-audit --no-fund
+      - name: Bundle production Worker without deploying
+        run: |
+          set -euo pipefail
+          npx wrangler deploy --dry-run --outdir=.wrangler/deploy-output
+          echo "Wrangler bundle files:"
+          find .wrangler/deploy-output -maxdepth 2 -type f -printf '%P %s bytes\n' | sort
+          mkdir -p /tmp/radar-deploy
+          MAIN_FILE="$(find .wrangler/deploy-output -maxdepth 2 -type f -name 'workerEntry.js' -print -quit)"
+          if [ -z "$MAIN_FILE" ]; then
+            MAIN_FILE="$(find .wrangler/deploy-output -maxdepth 2 -type f -name '*.js' ! -name '*.map' -print -quit)"
+          fi
+          if [ -z "$MAIN_FILE" ]; then
+            echo "No bundled Worker JavaScript found"
+            exit 1
+          fi
+          cp "$MAIN_FILE" /tmp/radar-deploy/workerEntry.js
+          if [ -f "${MAIN_FILE}.map" ]; then
+            cp "${MAIN_FILE}.map" /tmp/radar-deploy/workerEntry.js.map
+          fi
+          python - <<'PY'
+          import base64, gzip, json, os
+          root = "/tmp/radar-deploy"
+          files = []
+          for filename in sorted(os.listdir(root)):
+              if filename not in ("workerEntry.js", "workerEntry.js.map"):
+                  continue
+              path = os.path.join(root, filename)
+              with open(path, "rb") as f:
+                  payload = base64.b64encode(gzip.compress(f.read(), compresslevel=9)).decode("ascii")
+              prefix = filename + ".chunk-"
+              chunks = []
+              for offset in range(0, len(payload), 12000):
+                  name = f"{prefix}{len(chunks):04d}.txt"
+                  with open(os.path.join(root, name), "w", encoding="ascii") as f:
+                      f.write(payload[offset:offset + 12000])
+                  chunks.append(name)
+              files.append({
+                  "path": filename,
+                  "prefix": prefix,
+                  "chunks": len(chunks),
+                  "content_type": "application/source-map" if filename.endswith(".map") else "application/javascript+module",
+                  "encoding": "gzip-base64"
+              })
+          if not any(item["path"] == "workerEntry.js" for item in files):
+              raise SystemExit("workerEntry.js missing from bundle manifest")
+          with open(os.path.join(root, "manifest.json"), "w", encoding="utf-8") as f:
+              json.dump({"main_module": "workerEntry.js", "files": files}, f, separators=(",", ":"))
+          print(json.dumps({"files": files}, indent=2))
+          PY
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch --orphan "deploy-artifacts/${GITHUB_SHA}"
+          git rm -rf . >/dev/null 2>&1 || true
+          cp /tmp/radar-deploy/* .
+          git add .
+          git commit -m "Build Radar deployment bundle ${GITHUB_SHA}"
+          git push origin "HEAD:refs/heads/deploy-artifacts/${GITHUB_SHA}"
