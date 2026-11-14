@@ -4470,13 +4470,31 @@ export async function bootstrapBveltTenant(
 
   // Contractor trade → who they sell TO (buyer ICP)
   const tradeKey = userTrade.replace(/-/g, "_");
-  const niches =
-    (Array.isArray(body.subniches) && body.subniches.length > 0 ? body.subniches : null) ||
+  const suppliedNiches =
     (Array.isArray(body.target_niches) && body.target_niches.length > 0 ? body.target_niches : null) ||
+    (Array.isArray(body.subniches) && body.subniches.length > 0 ? body.subniches : null);
+  const mappedNiches =
     TENANT_TARGET_MAP[tradeKey] ||
-    TENANT_TARGET_MAP[tradeKey.replace(/_/g, " ")] ||
-    ["property management", "real estate", "hoa"];
-  const primaryNiche = niches[0]; // e.g. property management
+    TENANT_TARGET_MAP[tradeKey.replace(/_/g, " ")];
+  const niches = suppliedNiches || mappedNiches || [];
+
+  // Unknown trades must not be assigned generic buyer segments.
+  if (niches.length === 0) {
+    return {
+      success: false,
+      status: "pending_configuration",
+      tenant_id: tenantId,
+      city: cityLabel,
+      niches: [],
+      run_id: null,
+      leads: [],
+      message: "target_niches_required: no existe un buyer ICP validado para este oficio; configura target_niches en Bvelt.",
+      missing_fields: ["target_niches"],
+      source
+    };
+  }
+
+  const primaryNiche = niches[0]; // buyer segment, e.g. property management
   const searchTrade = primaryNiche.toLowerCase().includes("property")
     ? "property management"
     : primaryNiche.toLowerCase().includes("hotel")
@@ -4509,10 +4527,29 @@ export async function bootstrapBveltTenant(
     JSON.stringify(niches.slice(0, 5)),
     JSON.stringify([userTrade]),
     JSON.stringify([cityLabel]),
-    JSON.stringify(["US", "CA"]),
+    JSON.stringify((() => {
+      const supplied = Array.isArray(body.countries)
+        ? body.countries
+        : typeof body.countries === "string" ? body.countries.split(/[;,]/) : [];
+      const explicit = supplied.length
+        ? supplied
+        : body.country_code || body.country
+          ? [body.country_code || body.country]
+          : [];
+      const resolvedCountry = findPlace(cityLabel)?.country;
+      return Array.from(new Set((explicit.length ? explicit : resolvedCountry ? [resolvedCountry] : [])
+        .map((value: any) => String(value).trim().toUpperCase())
+        .filter(Boolean)));
+    })()),
     JSON.stringify([]),
     JSON.stringify([cityLabel]),
-    JSON.stringify(["en"]),
+    JSON.stringify((() => {
+      const supplied = Array.isArray(body.languages)
+        ? body.languages
+        : typeof body.languages === "string" ? body.languages.split(/[;,]/)
+          : body.language ? [body.language] : [];
+      return Array.from(new Set(supplied.map((value: any) => String(value).trim().toLowerCase()).filter(Boolean)));
+    })()),
     `Buyers near ${cityLabel} for a local ${userTrade} operator (auto from Bvelt ${source}).`,
     JSON.stringify(niches),
     45,
