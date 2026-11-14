@@ -1441,7 +1441,7 @@ tests.push({
                   results: [
                     {
                       id: "p_tenant_1",
-                      tenant_id: "t_tenant123",
+                      tenant_id: "bvelt_tenant123",
                       name: "Lone Star Plumbing",
                       city: "Dallas, TX",
                       trade: "plumbing",
@@ -1534,7 +1534,7 @@ tests.push({
     ];
 
     const mockDb: any = {
-      batch: async (statements: any[]) => [],
+      batch: async (statements: any[]) => Promise.all(statements.map(statement => statement.run())),
       prepare: (sql: string) => {
         const sqlLower = sql.toLowerCase().replace(/\s+/g, " ");
         return {
@@ -2171,6 +2171,7 @@ tests.push({
     ];
 
     const mockDb: any = {
+      batch: async (statements: any[]) => Promise.all(statements.map(statement => statement.run())),
       prepare: (sql: string) => ({
         bind: (...args: any[]) => ({
           first: async () => {
