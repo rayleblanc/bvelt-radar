@@ -9767,8 +9767,16 @@ export function buildOutreachIdempotencyKey(tenantId: string, prospectId: string
 
 export function buildRecipientOutreachIdempotencyKey(tenantId: string, recipientEmail: string, sequenceId: string, touchCount: number): string {
   const normalizedEmail = String(recipientEmail || "").trim().toLowerCase();
+  let hashA = 2166136261;
+  let hashB = 0x9e3779b9;
+  for (let i = 0; i < normalizedEmail.length; i++) {
+    const code = normalizedEmail.charCodeAt(i);
+    hashA = Math.imul(hashA ^ code, 16777619);
+    hashB = Math.imul(hashB ^ code, 2246822519);
+  }
+  const recipientKey = (hashA >>> 0).toString(16).padStart(8, "0") + (hashB >>> 0).toString(16).padStart(8, "0");
   const touch = Math.max(1, Math.floor(Number(touchCount) || 1));
-  return `idempotency:${tenantId}:recipient:${normalizedEmail}:${sequenceId}:touch:${touch}`;
+  return `idempotency:${tenantId}:recipient:${recipientKey}:${sequenceId}:touch:${touch}`;
 }
 
 async function generateAICopy(
