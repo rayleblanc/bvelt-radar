@@ -93,8 +93,11 @@ export interface Env {
   TRUST_SERVICE_KEY?: string;
   TRUST_STACK_KEY?: string;
   WEBHOOK_SECRET?: string; // token para webhooks de correo (?token=...)
-  FOUNDING_CITIES?: string; // e.g. "Tampa, FL;Austin, TX"
-  FOUNDING_TRADES?: string; // e.g. "landscaping;hvac;plumbing"
+  FOUNDING_CITIES?: string; // semicolon-separated explicit city labels; no implicit defaults
+  FOUNDING_TRADES?: string; // semicolon-separated explicit niches; no implicit defaults
+  FOUNDING_COUNTRIES?: string; // ISO country codes used only for automatic geo rotation
+  FOUNDING_LANGUAGES?: string;
+  FOUNDING_MIN_SCORE?: string;
   FOUNDER_AUTO_OUTREACH?: string;
   TELEGRAM_WEBHOOK_SECRET?: string;
   SENDER_NAME?: string;
@@ -361,27 +364,15 @@ export interface MissionConfig {
 export const DEFAULT_FOUNDER_MISSION: MissionConfig = {
   mode: "founder",
   target: "bvelt_customers",
-  niches: [
-    "landscaping", "lawn_care", "hvac", "plumbing", "house_cleaning", "pool_cleaning",
-    "handyman", "roofing", "pest_control", "electrical", "painting", "garage_door",
-    "appliance_repair", "junk_removal", "moving", "fencing", "concrete", "flooring"
-  ],
-  subniches: ["residential_contractors", "commercial_contractors", "emergency_service_providers"],
-  services: ["repair", "maintenance", "installation", "cleaning"],
-  geographies: [
-    "Tampa, FL", "Orlando, FL", "Jacksonville, FL", "Miami, FL", "Fort Lauderdale, FL",
-    "Austin, TX", "Houston, TX", "Dallas, TX", "San Antonio, TX", "Fort Worth, TX",
-    "Atlanta, GA", "Charlotte, NC", "Raleigh, NC", "Nashville, TN", "Birmingham, AL",
-    "Phoenix, AZ", "Tucson, AZ", "Las Vegas, NV", "Denver, CO", "Salt Lake City, UT",
-    "Columbus, OH", "Indianapolis, IN", "Kansas City, MO", "Oklahoma City, OK",
-    "Richmond, VA", "Virginia Beach, VA", "Louisville, KY", "Memphis, TN",
-    "Sacramento, CA", "Riverside, CA", "San Diego, CA", "Portland, OR", "Seattle, WA"
-  ],
-  countries: ["US", "CA"],
-  languages: ["en", "es"],
+  niches: [],
+  subniches: [],
+  services: [],
+  geographies: [],
+  countries: [],
+  languages: [],
   icp: {
-    description: "Local service businesses with visible phone lines, websites, high-margin jobs, and lead-capture friction across US/CA markets.",
-    keywords: ["plumber", "hvac", "electrician", "contractor", "cleaning", "landscaping", "roofer", "handyman"]
+    description: "",
+    keywords: []
   },
   min_score: 0,
   max_daily_outreach: 12
@@ -394,26 +385,6 @@ const LIMITS = {
   max_ai_calls_per_day: 20,
   max_hunter_credits_per_day: 10,
 };
-
-// National rotation pool — founder must not stay stuck in 6 metros
-const PRIORITY_CITIES = [
-  "Tampa, FL", "Orlando, FL", "Jacksonville, FL", "Miami, FL", "Fort Lauderdale, FL", "St. Petersburg, FL",
-  "Austin, TX", "Houston, TX", "Dallas, TX", "San Antonio, TX", "Fort Worth, TX", "El Paso, TX",
-  "Atlanta, GA", "Charlotte, NC", "Raleigh, NC", "Nashville, TN", "Memphis, TN", "Knoxville, TN",
-  "Birmingham, AL", "Phoenix, AZ", "Tucson, AZ", "Las Vegas, NV", "Denver, CO", "Colorado Springs, CO",
-  "Salt Lake City, UT", "Columbus, OH", "Cincinnati, OH", "Indianapolis, IN", "Kansas City, MO", "St. Louis, MO",
-  "Oklahoma City, OK", "Tulsa, OK", "Richmond, VA", "Virginia Beach, VA", "Louisville, KY", "New Orleans, LA",
-  "Sacramento, CA", "Fresno, CA", "Riverside, CA", "San Diego, CA", "Bakersfield, CA",
-  "Portland, OR", "Seattle, WA", "Boise, ID", "Albuquerque, NM", "Omaha, NE", "Des Moines, IA",
-  "Minneapolis, MN", "Milwaukee, WI", "Detroit, MI", "Grand Rapids, MI", "Pittsburgh, PA", "Philadelphia, PA",
-  "Buffalo, NY", "Rochester, NY", "Hartford, CT", "Providence, RI", "Baltimore, MD", "Washington, DC"
-];
-
-const PRIORITY_TRADES = [
-  "landscaping", "lawn_care", "hvac", "plumbing", "house_cleaning", "pool_cleaning",
-  "handyman", "roofing", "pest_control", "electrical", "painting", "garage_door",
-  "appliance_repair", "junk_removal", "fencing", "flooring"
-];
 
 // Mapping of contractor trades to their ideal B2B target niches
 /**
@@ -4730,16 +4701,16 @@ export async function startProspectingRun(
     };
   }
 
-  // Abort early if no valid cities (tenant without config, or empty founder markets)
-  if ((!activeCities || activeCities.length === 0) && (!pairs || pairs.length === 0)) {
+  // Abort early unless there is at least one complete city+niche target.
+  if ((!activeCities || activeCities.length === 0 || !activeTrades || activeTrades.length === 0) && (!pairs || pairs.length === 0)) {
     const reason = mode === "tenant"
-      ? `Tenant "${tId}" no tiene ciudades configuradas. Configura cities_json en Tenant Mode antes de correr el Radar.`
-      : "No hay ciudades activas para discovery. Revisa FOUNDING_CITIES.";
+      ? `Tenant "${tId}" no tiene mercados o segmentos compradores válidos. Configura cities_json e ICP buyer segments antes de correr el Radar.`
+      : "No hay mercados y nichos activos para discovery. Configura FOUNDING_CITIES + FOUNDING_TRADES, o FOUNDING_COUNTRIES + FOUNDING_TRADES.";
     console.warn(`[startProspectingRun] ${reason}`);
     return {
-      run_id: "no_cities",
+      run_id: "no_targets",
       jobs_enqueued: 0,
-      active_cities: [],
+      active_cities: activeCities || [],
       active_trades: activeTrades || [],
       diagnostics: { reason, city: null, trade: null, discovered_raw: 0 }
     };
@@ -5512,23 +5483,25 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
     let signalEvent: string | null = candidate.signal_event || null;
     let signalArea: string | null = candidate.signal_area || null;
 
-    if (!signalEvent && env.FOUNDING_CITIES) {
+    if (!signalEvent) {
       try {
-        const foundingStr = env.FOUNDING_CITIES;
-        const extractedStates = Array.from(new Set(foundingStr.match(/\b[A-Z]{2}\b/g) || ["FL", "TX"]));
-        const alerts = await getAlerts(extractedStates);
-        const candCity = (candidate.city || "").split(',')[0].trim().toLowerCase();
-        const candTrade = (candidate.trade || "").toLowerCase();
+        const cityLabel = String(job.payload?.city || candidate.city || env.FOUNDING_CITIES || "");
+        const extractedStates = extractUsStateCodes(cityLabel.split(";"));
+        if (extractedStates.length > 0) {
+          const alerts = await getAlerts(extractedStates);
+          const candCity = (candidate.city || "").split(',')[0].trim().toLowerCase();
+          const candTrade = (candidate.trade || "").toLowerCase();
 
-        for (const alert of alerts) {
-          const areaLower = (alert.areaDesc || "").toLowerCase();
-          const cityMatch = candCity && areaLower.includes(candCity);
-          const tradeMatch = eventAppliesToTrade(alert.event, candTrade);
+          for (const alert of alerts) {
+            const areaLower = (alert.areaDesc || "").toLowerCase();
+            const cityMatch = candCity && areaLower.includes(candCity);
+            const tradeMatch = eventAppliesToTrade(alert.event, candTrade);
 
-          if (cityMatch && tradeMatch) {
-            signalEvent = alert.event;
-            signalArea = alert.areaDesc;
-            break;
+            if (cityMatch && tradeMatch) {
+              signalEvent = alert.event;
+              signalArea = alert.areaDesc;
+              break;
+            }
           }
         }
       } catch (e) {}
@@ -7407,16 +7380,16 @@ export async function getPriorityTargets(
     return evB - evA;
   });
 
-  // Founder: national US+CA pool (geoFrontier). Sun Belt is soft boost, not a wall.
-  // Tenant keeps allowedCities / centerLabel isolation.
+  // Founder automatic rotation is opt-in: explicit city lists take precedence.
+  // Without cities, both a country scope and at least one niche are required.
   let picks: { place: any; trade: string; why: string }[] = [];
-  if (!skipPicks && mode === "founder" && !(overrides && overrides.cities)) {
+  if (!skipPicks && mode === "founder" && sortedGeographies.length === 0 && config.countries.length > 0 && sortedNiches.length > 0) {
     try {
       picks = await pickTargets(env.RADAR_DB, {
         tenantId: "founder",
         trades: sortedNiches,
         count: Math.min(20, Number(env.RADAR_JOBS_PER_RUN || 15)),
-        countries: ["US", "CA"]
+        countries: config.countries
       });
     } catch (e) {
       console.warn("[getPriorityTargets] pickTargets error:", e);
@@ -7424,25 +7397,23 @@ export async function getPriorityTargets(
     }
   }
 
-  // Weather Signals: Para el clima usa como estados las regiones de 2 letras de los picks de país US
-  const foundingStr = env.FOUNDING_CITIES || config.geographies.join(";");
-  let extractedStates: string[] = [];
-
-  if (picks.length > 0) {
-    extractedStates = Array.from(new Set(
-      picks
-        .filter(p => ((p.place && p.place.country) || (p.place as any)?.país || p.place?.[2] || "").toUpperCase() === "US")
-        .map(p => ((p.place && p.place.region) || (p.place as any)?.región || p.place?.[1] || "").toUpperCase().trim())
-        .filter(r => /^[A-Z]{2}$/.test(r))
-    ));
+  if (tenantPicks.length === 0 && picks.length === 0 && (sortedGeographies.length === 0 || sortedNiches.length === 0)) {
+    (config as any).weather_alerts = [];
+    return { activeCities: [], activeTrades: [], missionConfig: config, pairs: [] };
   }
 
-  if (extractedStates.length === 0) {
-    extractedStates = Array.from(new Set(foundingStr.match(/\b[A-Z]{2}\b/g) || ["FL", "TX"]));
-  }
+  // Weather alerts are US-only and use only state codes explicitly present
+  // in configured US places or selected US geoFrontier results.
+  const pickedUsStates = picks
+    .filter(p => ((p.place && p.place.country) || (p.place as any)?.país || p.place?.[2] || "").toUpperCase() === "US")
+    .map(p => ((p.place && p.place.region) || (p.place as any)?.región || p.place?.[1] || "").toUpperCase().trim());
+  const extractedStates = extractUsStateCodes([
+    ...config.geographies,
+    ...pickedUsStates.map(state => `Market, ${state}`)
+  ]);
 
   let weatherAlerts: WeatherAlert[] = [];
-  if (!skipPicks) {
+  if (!skipPicks && extractedStates.length > 0) {
     try {
       weatherAlerts = await getAlerts(extractedStates);
     } catch (e) {
@@ -8032,8 +8003,7 @@ export function calculateMultiFactorScore(
 
   // 4. Commercial Value (0 - 15 pts)
   let commercialValueScore = 0;
-  const isSunBeltCity = /fl|florida|tx|texas|ga|georgia|az|arizona|nc|sc|tn|tennessee|nv|al|tampa|orlando|miami|houston|austin|dallas|phoenix|atlanta|nashville/i.test(item.city || "");
-  if (isPriorityCity || isSunBeltCity) commercialValueScore += 10;
+  if (isPriorityCity) commercialValueScore += 10;
   const tradeKey = `trade:${tradeLower}`;
   const winRate = learningStats[tradeKey] || 0;
   if (winRate > 0.6) commercialValueScore += 5;
@@ -8137,7 +8107,7 @@ export function calculateMultiFactorScore(
   if (!email && !phone) legacyContactability = 0;
 
   let legacyCommercial = 0;
-  if (isPriorityCity || isSunBeltCity) legacyCommercial += 5;
+  if (isPriorityCity) legacyCommercial += 5;
   if (isPriorityTrade || isPreferred) legacyCommercial += 5;
   if (isIndependent) legacyCommercial += 2;
   if (winRate > 0.6) legacyCommercial += 3;
