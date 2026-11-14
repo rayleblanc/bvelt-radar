@@ -1343,7 +1343,7 @@ tests.push({
       },
       {
         id: "p_2",
-        tenant_id: "t_tenant123",
+        tenant_id: "bvelt_tenant123",
         name: "Lone Star Plumbing",
         city: "Dallas, TX",
         trade: "plumbing",
@@ -1431,9 +1431,10 @@ tests.push({
 
       try {
         const tenantEnv: any = {
-          BVELT_INGEST_URL: "https://bvelt.app/api/radar/observations",
-          BVELT_INGEST_KEY: "test_tenant_key_456",
+          BVELT_TENANT_INGEST_URL: "https://bvelt.app/api/radar/observations",
+          BVELT_TENANT_INGEST_KEY: "test_tenant_key_456",
           RADAR_DB: {
+            batch: async (statements: any[]) => statements.map(() => ({ meta: { changes: 1 } })),
             prepare: (sql: string) => ({
               bind: (...args: any[]) => ({
                 all: async () => ({
@@ -1464,12 +1465,12 @@ tests.push({
           }
         };
 
-        const tenantRes = await sendTenantObservationsToBvelt(tenantEnv, "t_tenant123");
+        const tenantRes = await sendTenantObservationsToBvelt(tenantEnv, "bvelt_tenant123");
         assert(tenantRes.ok === true, "Tenant observation push must succeed");
         assert(tenantRes.sent_count === 1, "Should send 1 tenant prospect");
         assert(Boolean(tenantPostCalled), "Fetch must be invoked for tenant push");
-        assert(tenantHeaderTenantId === "t_tenant123", "X-Bvelt-Tenant-Id header must match tenant ID");
-        assert(tenantPostBody.tenant_id === "t_tenant123", "Payload tenant_id must be t_tenant123");
+        assert(tenantHeaderTenantId === "bvelt_tenant123", "X-Bvelt-Tenant-Id header must match tenant ID");
+        assert(tenantPostBody.tenant_id === "bvelt_tenant123", "Payload tenant_id must be t_tenant123");
         assert(tenantPostBody.items[0].name === "Lone Star Plumbing", "Item should be Lone Star Plumbing");
       } finally {
         globalThis.fetch = originalFetch2;
@@ -1611,7 +1612,7 @@ tests.push({
                 } else if (sqlLower.includes("select 1 from research_run_candidates")) {
                   const c = candidatesStore.find(x => x.run_id === args[0] && x.mode === args[1] && x.tenant_id === args[2] && x.prospect_id === args[3]);
                   return c ? { 1: 1 } : null;
-                } else if (sqlLower.includes("select id, signals_json from prospects")) {
+                } else if (sqlLower.includes("select id, signals_json") && sqlLower.includes("from prospects")) {
                   const p = prospectsStore.find(x => x.id === args[0] && x.mode === args[1] && (x.tenant_id || "founder") === args[2]);
                   return p ? { id: p.id, signals_json: p.signals_json, website: p.website } : null;
                 } else if (sqlLower.includes("select id from source_evidence")) {
