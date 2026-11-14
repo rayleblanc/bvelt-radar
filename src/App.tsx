@@ -1636,7 +1636,7 @@ const submitDecision = async (prospectId: string, action: string) => {
                     </div>
                     {!hasCities && (
                       <div className="px-3 py-2 bg-amber-950/30 border border-amber-800/40 rounded-lg text-[11px] text-amber-200/90">
-                        Este tenant no tiene ciudades. Ve a la pestaña <strong>Tenant</strong>, añade ciudades (ej. <code className="text-amber-100">["Tampa, FL","Orlando, FL"]</code>) y guarda. Sin ciudades el Radar no buscará.
+                        Este tenant no tiene ciudades. Ve a la pestaña <strong>Tenant</strong>, añade ciudades (ej. <code className="text-amber-100">["City A, Region","City B, Region"]</code>) y guarda. Sin ciudades el Radar no buscará.
                       </div>
                     )}
                   </div>
