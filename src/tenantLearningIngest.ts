@@ -82,13 +82,19 @@ export async function handleTenantLearningIngest(
       )
         .bind(headerTenantId, storedKey)
         .first();
-      if (!existing) {
+      if (existing) {
+        // recordScopedLearningEvent returns true for an exact retry. If it
+        // returned false but this key exists, the payload conflicts with the
+        // immutable event already stored under that key.
         return Response.json(
-          { ok: false, error: "learning_event_persistence_unconfirmed" },
-          { status: 503, headers: corsHeaders }
+          { ok: false, error: "idempotency_conflict" },
+          { status: 409, headers: corsHeaders }
         );
       }
-      duplicateCount++;
+      return Response.json(
+        { ok: false, error: "learning_event_persistence_unconfirmed" },
+        { status: 503, headers: corsHeaders }
+      );
     }
   } catch (error: any) {
     console.error("[Radar Learning Ingest] Persistence failed:", error?.message || error);
