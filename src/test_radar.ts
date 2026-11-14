@@ -4,6 +4,7 @@ import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter
 import { DEFAULT_FOUNDER_MISSION, MissionConfig } from './worker';
 import { fetchPermitContractors } from './permitSources';
 import { pickTargets } from './geoFrontier';
+import { isOffIcpName } from './emailSanitizer';
 import { learningCounterDelta, readScopedLearningStats, recordScopedLearningEvent } from './learningIntegrity';
 
 console.log("=========================================");
@@ -2060,6 +2061,19 @@ tests.push({
     const internationalInsert = tenantWrites.filter(write => write.sql.includes("INSERT INTO tenant_config")).slice(-1)[0];
     assert(JSON.stringify(JSON.parse(internationalInsert.args[7])) === JSON.stringify(["GB"]), "International country code must be preserved without US/CA defaults");
     assert(JSON.stringify(JSON.parse(internationalInsert.args[10])) === JSON.stringify(["en"]), "Explicit language must be preserved");
+  }
+});
+
+tests.push({
+  name: "ICP policy follows market-universe and Tenant buyer scope",
+  run: () => {
+    assert(isOffIcpName("Gentlemen's Barber & Shave Parlor") === true, "Founder must exclude hair/nail salon category");
+    assert(isOffIcpName("Northside Auto Repair") === false, "Automotive businesses remain Founder-eligible");
+    assert(isOffIcpName("Downtown Dental Clinic") === false, "Healthcare businesses remain Founder-eligible");
+    assert(isOffIcpName("Harborview Hotel") === false, "Hospitality businesses remain Founder-eligible");
+    assert(isOffIcpName("Anytime Fitness", true) === false, "Tenant ICP may target gyms when configured");
+    assert(isOffIcpName("Downtown Grocery Market", true) === false, "Tenant ICP may target grocery buyers when configured");
+    assert(isOffIcpName("St Mary's Church", true) === true, "Non-business institutions remain excluded");
   }
 });
 
