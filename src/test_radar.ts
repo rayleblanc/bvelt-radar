@@ -36,6 +36,14 @@ tests.push({
     const replied = learningCounterDelta("positive");
     assert(replied.replied_count === 1 && replied.won_count === 0, "Positive reply must not be treated as a won job");
 
+    for (const replyType of ["negative", "not_now", "unsubscribe", "out_of_office", "question", "replied"]) {
+      assert(learningCounterDelta(replyType).replied_count === 1, `${replyType} must be recorded as a reply, not a win`);
+    }
+
+    assert(learningCounterDelta("opened").opened_count === 1, "Opened must remain a separate engagement event");
+    assert(learningCounterDelta("clicked").clicked_count === 1, "Clicked must remain a separate engagement event");
+    assert(learningCounterDelta("bounced").bounced_count === 1, "Bounced must remain a separate delivery event");
+
     const booked = learningCounterDelta("booked");
     assert(booked.booked_count === 1 && booked.won_count === 0, "Booked must remain distinct from won");
 
