@@ -7055,7 +7055,7 @@ export async function handleProspectEvent(
     prospect = await db.prepare("SELECT * FROM prospects WHERE id = ?").bind(params.prospect_id).first();
   }
   if (!prospect && params.email) {
-    prospect = await db.prepare("SELECT * FROM prospects WHERE email = ?").bind(params.email.toLowerCase().trim()).first();
+    prospect = await db.prepare("SELECT * FROM prospects WHERE lower(email) = ?").bind(params.email.toLowerCase().trim()).first();
   }
 
   if (!prospect) {
@@ -7217,6 +7217,27 @@ export async function handleProspectEvent(
       break;
 
     case 'replied':
+      autoStopped = true;
+      newStatus = 'human_review';
+      newOutcome = classification;
+      if (env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID) {
+        try {
+          await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              chat_id: env.TELEGRAM_CHAT_ID,
+              text: `📩 *PROSPECT REPLIED — REVIEW REQUIRED*\\n\\n*Business:* ${escapeMarkdown(prospect.name)}\\n*City:* ${escapeMarkdown(prospect.city)}\\n*Email:* ${escapeMarkdown(prospect.email || "N/A")}\\n\\n*Reply:* "${escapeMarkdown(params.content || "Inbound reply received; body unavailable")}"\\n\\n⚠️ _All automated follow-ups stopped._`,
+              parse_mode: "Markdown"
+            }),
+            signal: AbortSignal.timeout(15000)
+          });
+        } catch (e) {
+          console.warn("[Reply Alert] Telegram notification failed:", (e as any)?.message || e);
+        }
+      }
+      break;
+
     case 'unknown':
     default:
       autoStopped = true;
