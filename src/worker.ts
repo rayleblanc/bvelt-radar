@@ -4140,6 +4140,15 @@ async function handleDecision(
   const timestamp = new Date().toISOString();
 
   if (action === "sent" || action === "approve") {
+    const manualEligibility = await getFounderOutreachEligibility(db, prospect);
+    if (!manualEligibility.allowed) return Response.json({ success: false, blocked: true, reason: manualEligibility.reason, id }, { status: 409, headers });
+    const manualSequenceId = env.RESEND_API_KEY ? "resend_live" : env.BREVO_API_KEY ? "brevo_live" : "manual_simulated";
+    const manualIdempotencyKey = buildOutreachIdempotencyKey(prospect.tenant_id || "founder", prospect.id, manualSequenceId, manualEligibility.nextTouch);
+    const existingManual = await db.prepare("SELECT status FROM outreach_idempotency WHERE idempotency_key = ?").bind(manualIdempotencyKey).first() as any;
+    if (existingManual && ["reserved", "sent", "scheduled", "queued"].includes(String(existingManual.status || "").toLowerCase())) {
+      return Response.json({ success: false, blocked: true, reason: "already_processed_for_this_touch", id }, { status: 409, headers });
+    }
+    await db.prepare("INSERT OR REPLACE INTO outreach_idempotency (idempotency_key, prospect_id, tenant_id, email, status, created_at, updated_at) VALUES (?, ?, ?, ?, 'reserved', ?, ?)").bind(manualIdempotencyKey, prospect.id, prospect.tenant_id || "founder", prospect.email || "", timestamp, timestamp).run();
     // Mandatory Trust-Stack Governor Firewall Gate Check
     const gate = await verifyTrustStackGate(prospect, 'manual_send', env);
     if (!gate.allowed) {
@@ -4185,6 +4194,7 @@ async function handleDecision(
         body: typeof safeBody !== 'undefined' ? safeBody : draftBody,
         from: env.OUTBOUND_EMAIL_FROM,
         prospectId: prospect.id,
+        touchCount: manualEligibility.nextTouch,
         resendApiKey: env.RESEND_API_KEY,
         brevoApiKey: env.BREVO_API_KEY,
         senderName: env.SENDER_NAME
@@ -4215,6 +4225,7 @@ async function handleDecision(
             timestamp
           ).run();
         } catch (e) {}
+        try { await db.prepare("UPDATE outreach_idempotency SET status = 'failed', updated_at = ? WHERE idempotency_key = ?").bind(timestamp, manualIdempotencyKey).run(); } catch (e) {}
 
         return Response.json({
           success: false,
@@ -4260,6 +4271,8 @@ async function handleDecision(
         ).run();
       }
     } catch (e) {}
+
+    try { await db.prepare("UPDATE outreach_idempotency SET status = 'sent', provider_reference = ?, updated_at = ? WHERE idempotency_key = ?").bind(dispatchOutcome.messageId || null, timestamp, manualIdempotencyKey).run(); } catch (e) {}
 
     // Auto-suppress email and domain for 21-day cooldown window
     if (prospect.email) {
