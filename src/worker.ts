@@ -11778,8 +11778,8 @@ export function checkTradeCoherence(
   tags?: string | null,
   mode: string = 'founder'
 ): TradeCoherenceCheck {
-  const allowGym = mode === 'tenant';
-  if (isOffIcpName(name, allowGym)) {
+  const allowTenantBuyer = mode === 'tenant';
+  if (isOffIcpName(name, allowTenantBuyer)) {
     return {
       coherent: false,
       verifiedTrade: null,
