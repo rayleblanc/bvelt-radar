@@ -2,6 +2,7 @@ declare const process: any;
 
 import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, resolveTenantBuyerSegments, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey } from './worker';
 import { DEFAULT_FOUNDER_MISSION, MissionConfig } from './worker';
+import { buildResendIdempotencyKey } from './emailDispatcher';
 import { fetchPermitContractors } from './permitSources';
 import { pickTargets } from './geoFrontier';
 import { isOffIcpName } from './emailSanitizer';
@@ -215,7 +216,8 @@ tests.push({
     assert(!shouldSendFounderFollowUp("sent", fiveDaysAgo, null, 3, now), "No more than three total touches are allowed");
     assert(!shouldSendFounderFollowUp("bounced", fiveDaysAgo, null, 1, now), "Bounced prospects are never followed up");
     assert(resolveOutreachTouchCount(1, 5) === 5, "Historical provider messages must override missing legacy touch metadata");
-    assert(buildOutreachIdempotencyKey("founder", "p1", "resend_live", 1) !== buildOutreachIdempotencyKey("founder", "p1", "resend_live", 2), "Each touch needs its own idempotency key");
+    assert(buildOutreachIdempotencyKey("founder", "p1", "resend_live", 1) !== buildOutreachIdempotencyKey("founder", "p1", "resend_live", 2), "Each touch needs its own D1 idempotency key");
+    assert(buildResendIdempotencyKey("p1", 1) !== buildResendIdempotencyKey("p1", 2), "Each touch needs its own Resend idempotency key");
   }
 });
 
