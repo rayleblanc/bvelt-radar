@@ -11647,7 +11647,7 @@ async function recordLearningEvent(
   const eventType = String(details?.event_type || (isSent ? "sent" : details?.outcome || "unknown")).toLowerCase();
   const occurredAt = new Date().toISOString();
   try {
-    return await recordScopedLearningEvent(db, {
+    const recorded = await recordScopedLearningEvent(db, {
       mode,
       tenantId,
       prospectId: String(details.prospect_id),
@@ -11666,6 +11666,7 @@ async function recordLearningEvent(
         source: "radar_worker"
       }
     });
+    return recorded !== false;
   } catch (e) {
     console.warn("[Learning Integrity] Event persistence warning:", e);
     return false;
