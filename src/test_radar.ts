@@ -3,7 +3,7 @@ declare const process: any;
 import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, resolveTenantBuyerSegments } from './worker';
 import { DEFAULT_FOUNDER_MISSION, MissionConfig } from './worker';
 import { fetchPermitContractors } from './permitSources';
-import { learningCounterDelta } from './learningIntegrity';
+import { learningCounterDelta, readScopedLearningStats, recordScopedLearningEvent } from './learningIntegrity';
 
 console.log("=========================================");
 console.log("RUNNING BVELT RADAR CUSTOM MISSION TESTS");
@@ -49,6 +49,12 @@ tests.push({
 
     const won = learningCounterDelta("won");
     assert(won.won_count === 1 && won.sent_count === 0, "Only an explicit won outcome increments wins");
+
+    const contacted = learningCounterDelta("contacted");
+    assert(contacted.contacted_count === 1 && contacted.sent_count === 0, "Manual Tenant contact must be tracked separately from Founder sends");
+
+    const lost = learningCounterDelta("lost");
+    assert(lost.lost_count === 1 && lost.won_count === 0, "Lost outcomes must remain distinct from won outcomes");
   }
 });
 
@@ -61,6 +67,81 @@ tests.push({
     assert(resolveTenantBuyerSegments("specialized unknown service").length === 0, "Unknown trade must fail closed instead of defaulting to property management");
     const aiSegments = resolveTenantBuyerSegments("unknown", ["medical clinics", "property groups"]);
     assert(aiSegments.length === 2 && aiSegments[0] === "medical clinics", "Validated AI buyer segments must take precedence");
+  }
+});
+
+tests.push({
+  name: "Learning Integrity: idempotent retries and unique contact denominators",
+  run: async () => {
+    const events = new Map<string, any>();
+    let aggregateChanges = 0;
+    const mockDb: any = {
+      prepare: (sql: string) => ({
+        bind: (...args: any[]) => ({
+          sql,
+          args,
+          first: async () => {
+            if (!/FROM learning_events WHERE idempotency_key/i.test(sql)) return null;
+            return events.get(String(args[0])) || null;
+          },
+          all: async () => {
+            if (!sql.includes("COUNT(DISTINCT prospect_id)")) throw new Error("Learning rates must use unique prospects, not event totals");
+            assert(sql.includes("'lost'") && sql.includes("'booked'") && sql.includes("'won'"), "Losses, bookings and sales must be in the conversion cohort");
+            return { results: [{ key: "trade:plumbing", contacted_count: 4, won_count: 1 }] };
+          }
+        })
+      }),
+      batch: async (statements: any[]) => {
+        const args = statements[0].args;
+        const key = String(args[11]);
+        const existed = events.has(key);
+        if (!existed) {
+          events.set(key, {
+            prospect_id: args[1],
+            mode: args[2],
+            tenant_id: args[3],
+            event_type: args[4],
+            city: args[5],
+            trade: args[6],
+            variant_id: args[7],
+            angle: args[8],
+            value_usd: args[9]
+          });
+        }
+        const results = [{ meta: { changes: existed ? 0 : 1 } }];
+        for (const statement of statements.slice(1)) {
+          const applied = !existed && statement.sql.includes("WHERE EXISTS (SELECT 1 FROM learning_events WHERE id = ?)");
+          if (applied) aggregateChanges += 1;
+          results.push({ meta: { changes: applied ? 1 : 0 } });
+        }
+        return results;
+      }
+    };
+
+    const input = {
+      mode: "tenant" as const,
+      tenantId: "tenant_alpha",
+      prospectId: "prospect_123",
+      eventType: "won",
+      city: "Toronto, ON",
+      trade: "plumbing",
+      variantId: "variant_a",
+      angle: "contact_gap",
+      valueUsd: 250,
+      occurredAt: "2026-11-13T12:00:00.000Z",
+      idempotencyKey: "tenant-outcome:prospect_123:won"
+    };
+
+    const first = await recordScopedLearningEvent(mockDb, input);
+    const retry = await recordScopedLearningEvent(mockDb, input);
+    const conflict = await recordScopedLearningEvent(mockDb, { ...input, valueUsd: 500 });
+    assert(first, "First event must be recorded");
+    assert(retry, "An exact retry must be acknowledged");
+    assert(!conflict, "A conflicting reuse of an idempotency key must be rejected");
+    assert(aggregateChanges === 3, "City, trade and pair aggregates must increment exactly once");
+
+    const rates = await readScopedLearningStats(mockDb, "tenant", "tenant_alpha");
+    assert(Math.abs(rates["trade:plumbing"] - (2 / 6)) < 0.0001, "Win rate must use four unique contacted prospects, including lost/booked outcomes");
   }
 });
 
