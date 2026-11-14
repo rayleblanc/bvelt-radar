@@ -1,0 +1,19 @@
+name: restore-test-radar
+on:
+  workflow_dispatch:
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: work/tenant-crm-outcome-ingest-20261114
+      - run: node src/restore_test_radar.cjs
+      - run: |
+          git config user.name "rayleblanc"
+          git config user.email "42582904+rayleblanc@users.noreply.github.com"
+          git add src/test_radar.ts
+          git diff --cached --quiet || git commit -m "fix(test): materialize restored test_radar.ts on branch"
+          git push origin HEAD:work/tenant-crm-outcome-ingest-20261114
