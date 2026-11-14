@@ -2002,17 +2002,29 @@ tests.push({
     assert(missingCityRes.status === "pending_configuration", "Status must be pending_configuration");
     assert(missingCityRes.missing_fields?.includes("city") === true, "Must flag missing 'city'");
 
-    // 3. Unknown trade: do not invent generic property-management buyers.
+    // 3. Unknown trade without ICP: preserve the business profile, but do not invent buyers.
     const unknownTradeRes = await bootstrapBveltTenant(mockEnv, {
       tenant_id: "client_unknown_trade",
       trade: "specialty glass repair",
       city: "Dallas, TX",
       skip_fast_discovery: true
     });
-    assert(unknownTradeRes.success === false, "Unknown trades must not receive generic buyer segments");
-    assert(unknownTradeRes.missing_fields?.includes("target_niches") === true, "Unknown trades must request an explicit target ICP");
+    assert(unknownTradeRes.success === true, "An unmapped industry must remain eligible and its profile must be saved");
+    assert(unknownTradeRes.status === "pending_configuration", "Without buyer ICP signals, discovery must remain pending");
+    assert(unknownTradeRes.missing_fields?.includes("target_niches_or_icp_keywords") === true, "Missing buyer ICP inputs must be reported");
 
-    // 4. Valid trade and city: sets up configuration and activates
+    // 4. Unknown trade with explicit ICP keywords: allow the market without a closed trade map.
+    const unknownWithIcpRes = await bootstrapBveltTenant(mockEnv, {
+      tenant_id: "client_unknown_with_icp",
+      trade: "specialty glass repair",
+      city: "Dallas, TX",
+      icp_keywords: ["commercial property owners", "facility managers"],
+      skip_fast_discovery: true
+    }, mockCtx);
+    assert(unknownWithIcpRes.success === true, "Explicit ICP signals must keep an unmapped industry eligible");
+    assert(unknownWithIcpRes.niches.includes("commercial property owners"), "ICP keywords must be usable as buyer segments");
+
+    // 5. Valid trade and city: sets up configuration and activates
     const mockCtx = { waitUntil: (_p: any) => {} } as any;
     const validRes = await bootstrapBveltTenant(mockEnv, {
       tenant_id: "client_plumbing_pro",
@@ -2027,8 +2039,8 @@ tests.push({
     assert(validRes.niches.length > 0, "Niches must be populated from trade map");
     assert(validRes.niches.includes("property management"), "Plumbing must target property management buyers");
 
-    const tenantInsert = tenantWrites.find(write => write.sql.includes("INSERT INTO tenant_config"));
-    assert(!!tenantInsert, "Bootstrap must persist the tenant configuration");
+    const tenantInsert = tenantWrites.find(write => write.sql.includes("INSERT INTO tenant_config") && write.args[0] === "client_plumbing_pro");
+    assert(!!tenantInsert, "Bootstrap must persist the known tenant configuration");
     assert(JSON.stringify(JSON.parse(tenantInsert!.args[7])) === JSON.stringify(["US"]), "US city must infer only US, not default US+CA");
     assert(JSON.parse(tenantInsert!.args[10]).length === 0, "Languages must remain unset unless supplied");
 
