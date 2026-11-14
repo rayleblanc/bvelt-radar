@@ -1,7 +1,7 @@
 # AGENTS.md — Bvelt Intelligence
 
 ## Source of truth
-Read the project reference document `Bvelt_Intelligence_Documento_Maestro_v2.1.md` supplied by Ray before cross-repository or architectural work. This file is the short mandatory operating guide; the master document defines the complete architecture and execution plan.
+Read `Bvelt_Intelligence_Documento_Maestro_v2.1.md` when it is present in the current working context. If it is not available, use the latest explicit direction from Ray and verified repository state; never assume a missing plan file or invent its contents.
 
 ## Non-negotiable rules
 1. Preserve the full ecosystem ambition. Lack of customers, data, budget, or time does not justify silently deleting capabilities from the target architecture.
@@ -20,12 +20,16 @@ Read the project reference document `Bvelt_Intelligence_Documento_Maestro_v2.1.m
 14. Do not change the Gemini/Groq cascade or model names without Ray's explicit instruction.
 15. Do not introduce paid services, card requirements, paid AI, or advertising without explicit approval.
 16. Never expose secret values in code, logs, tool output, reports, or chat. A plaintext credential must be rotated and stored as a secret.
-17. Do not apply production migrations, change production secrets/configuration, or deploy without Ray's explicit authorization.
-18. A merge to main may trigger production deployment. Verify the deployment path first; if uncertain, stop before merging.
-19. Merge only after reviewing the exact diff, required CI green, branch protections confirmed, and no unapproved schema/secret/config/deploy changes.
-20. If branch protection or auto-deploy behavior cannot be verified, prepare a branch/PR and stop before integration.
-21. Never claim production success from a passing build or the presence of a Worker deployment alone.
-22. At the end, report changed files, commit/PR, CI evidence, maturity, unresolved risks, and any action required from Ray.
+17. Production migrations, secret rotation, and binding/configuration changes still require Ray's explicit approval.
+18. Standing authorization for `bvelt-radar`: deploy to production after each completed code phase once the exact diff is reviewed and every required GitHub check is green. This authorization applies only to Radar, not Bvelt.
+19. Before merging, inspect GitHub Actions workflow runs, jobs, and logs—not only the green summary. Never bypass branch protection; if GitHub rejects the merge, stop and report the blocker.
+20. After merge, verify the new Cloudflare Worker version is deployed at 100%, preserve bindings/secrets/schedules, and confirm the Founder cron remains active. Do not claim deployment if Cloudflare does not confirm it.
+21. Keep Radar operational during development. Do not disable Founder discovery, outreach, queues, or cron unless Ray explicitly instructs.
+22. Do not close an operational recovery phase until a genuine post-deploy Founder run has been inspected for discovery results, source diagnostics, filtering, email dispatch, and Telegram delivery. Never fabricate production events.
+23. Founder outreach is capped at three total touches (initial + two follow-ups), at least five days apart, and stops on reply, bounce, unsubscribe, or complaint. Use per-touch idempotency and historical message counts to protect legacy prospects.
+24. Keep `GITHUB_ACTIONS_TOKEN` and all credentials as encrypted Worker secrets. A plaintext credential must be rotated, not merely hidden in logs.
+25. Never claim production success from a passing build or the presence of a Worker deployment alone.
+26. At the end, report changed files, commit/PR, CI logs, Cloudflare deployment evidence, post-deploy runtime evidence, unresolved risks, and any action required from Ray.
 
 ## Working sequence
 - Verify current repository and Cloudflare state before acting.
