@@ -3,7 +3,7 @@ declare const process: any;
 import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, resolveTenantBuyerSegments } from './worker';
 import { DEFAULT_FOUNDER_MISSION, MissionConfig } from './worker';
 import { fetchPermitContractors } from './permitSources';
-import { learningCounterDelta, readScopedLearningStats } from './learningIntegrity';
+import { learningCounterDelta, readScopedLearningStats, recordScopedLearningEvent } from './learningIntegrity';
 
 console.log("=========================================");
 console.log("RUNNING BVELT RADAR CUSTOM MISSION TESTS");
@@ -150,6 +150,51 @@ tests.push({
     const rates = await readScopedLearningStats(mockDb, "tenant", "bvelt_tenant_alpha");
     assert(query.includes("contacted_count"), "Learning query must include CRM-confirmed contacts");
     assert(rates["trade:plumbing"] === 0.5, "One win from two manually confirmed contacts must produce a smoothed 0.5 rate");
+  }
+});
+
+tests.push({
+  name: "Learning event retries do not double-increment Tenant aggregates",
+  run: async () => {
+    const insertedKeys = new Set<string>();
+    const aggregates = new Map<string, number>();
+    const mockDb: any = {
+      prepare: (sql: string) => ({ bind: (...args: any[]) => ({ sql, args }) }),
+      batch: async (statements: any[]) => {
+        const key = String(statements[0].args[11]);
+        const inserted = !insertedKeys.has(key);
+        if (inserted) insertedKeys.add(key);
+        let previousChanges = inserted ? 1 : 0;
+        const results = [{ meta: { changes: previousChanges } }];
+        for (const statement of statements.slice(1)) {
+          const guarded = /WHERE changes\(\) = 1/i.test(statement.sql);
+          const applied = guarded && previousChanges === 1;
+          const aggregateKey = String(statement.args[2]);
+          if (applied) aggregates.set(aggregateKey, (aggregates.get(aggregateKey) || 0) + Number(statement.args[15] || 0));
+          previousChanges = applied ? 1 : 0;
+          results.push({ meta: { changes: previousChanges } });
+        }
+        return results;
+      }
+    };
+    const input = {
+      mode: "tenant" as const,
+      tenantId: "bvelt_tenant_alpha",
+      prospectId: "radar_prospect_1",
+      eventType: "won",
+      city: "Toronto, ON",
+      trade: "plumbing",
+      occurredAt: "2026-11-14T10:00:00.000Z",
+      idempotencyKey: "crm-status-event-1"
+    };
+    const first = await recordScopedLearningEvent(mockDb, input);
+    const countAfterFirst = Array.from(aggregates.values()).reduce((sum, value) => sum + value, 0);
+    const retry = await recordScopedLearningEvent(mockDb, input);
+    const countAfterRetry = Array.from(aggregates.values()).reduce((sum, value) => sum + value, 0);
+    assert(first, "First outcome must be inserted");
+    assert(!retry, "Duplicate outcome must be acknowledged as no new insert");
+    assert(countAfterFirst === 3, "City, trade and pair aggregates must increment once");
+    assert(countAfterRetry === countAfterFirst, "Retry must not increment aggregates again");
   }
 });
 
