@@ -6952,25 +6952,28 @@ export async function handleProspectEvent(
     prospect.id
   ).run();
 
-  await recordLearningEvent(
-    db,
-    prospect.city,
-    prospect.trade,
-    prospect.variant_id,
-    false,
-    {
-      score: prospect.score,
-      angle: prospect.bvelt_angle,
-      market: prospect.city,
-      niche: prospect.trade,
-      outcome: newOutcome,
-      response_type: classification,
-      event_type: classification,
-      prospect_id: String(prospect.id),
-      mode: prospect.mode,
-      tenant_id: prospect.tenant_id || "founder"
-    }
-  );
+  // Record only state transitions. Duplicate provider callbacks must not inflate outcomes.
+  if (newOutcome !== prospect.outcome) {
+    await recordLearningEvent(
+      db,
+      prospect.city,
+      prospect.trade,
+      prospect.variant_id,
+      false,
+      {
+        score: prospect.score,
+        angle: prospect.bvelt_angle,
+        market: prospect.city,
+        niche: prospect.trade,
+        outcome: newOutcome,
+        response_type: classification,
+        event_type: classification,
+        prospect_id: String(prospect.id),
+        mode: prospect.mode,
+        tenant_id: prospect.tenant_id || "founder"
+      }
+    );
+  }
 
   return {
     success: true,
