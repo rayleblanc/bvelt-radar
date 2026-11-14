@@ -1965,11 +1965,15 @@ tests.push({
   name: "Tenant Auto-Prospecting & Bootstrap: rejects missing trade/city without defaulting to HVAC",
   run: async () => {
     const { bootstrapBveltTenant } = await import('./worker');
+    const tenantWrites: Array<{ sql: string; args: any[] }> = [];
     const mockEnv: any = {
       RADAR_DB: {
-        prepare: () => ({
-          bind: () => ({
-            run: async () => ({ success: true }),
+        prepare: (sql: string) => ({
+          bind: (...args: any[]) => ({
+            run: async () => {
+              tenantWrites.push({ sql, args });
+              return { success: true, meta: { changes: 1 } };
+            },
             first: async () => null,
             all: async () => ({ results: [] })
           })
@@ -1998,7 +2002,17 @@ tests.push({
     assert(missingCityRes.status === "pending_configuration", "Status must be pending_configuration");
     assert(missingCityRes.missing_fields?.includes("city") === true, "Must flag missing 'city'");
 
-    // 3. Valid trade and city: sets up configuration and activates
+    // 3. Unknown trade: do not invent generic property-management buyers.
+    const unknownTradeRes = await bootstrapBveltTenant(mockEnv, {
+      tenant_id: "client_unknown_trade",
+      trade: "specialty glass repair",
+      city: "Dallas, TX",
+      skip_fast_discovery: true
+    });
+    assert(unknownTradeRes.success === false, "Unknown trades must not receive generic buyer segments");
+    assert(unknownTradeRes.missing_fields?.includes("target_niches") === true, "Unknown trades must request an explicit target ICP");
+
+    // 4. Valid trade and city: sets up configuration and activates
     const mockCtx = { waitUntil: (_p: any) => {} } as any;
     const validRes = await bootstrapBveltTenant(mockEnv, {
       tenant_id: "client_plumbing_pro",
@@ -2012,6 +2026,25 @@ tests.push({
     assert(validRes.city === "Dallas, TX", "City must match resolved city");
     assert(validRes.niches.length > 0, "Niches must be populated from trade map");
     assert(validRes.niches.includes("property management"), "Plumbing must target property management buyers");
+
+    const tenantInsert = tenantWrites.find(write => write.sql.includes("INSERT INTO tenant_config"));
+    assert(!!tenantInsert, "Bootstrap must persist the tenant configuration");
+    assert(JSON.stringify(JSON.parse(tenantInsert!.args[7])) === JSON.stringify(["US"]), "US city must infer only US, not default US+CA");
+    assert(JSON.parse(tenantInsert!.args[10]).length === 0, "Languages must remain unset unless supplied");
+
+    // Explicit international country and language must be preserved.
+    const internationalRes = await bootstrapBveltTenant(mockEnv, {
+      tenant_id: "client_london",
+      trade: "plumbing",
+      city: "London, UK",
+      country_code: "GB",
+      language: "en",
+      skip_fast_discovery: true
+    }, mockCtx);
+    assert(internationalRes.success === true, "Explicit international market configuration must be accepted");
+    const internationalInsert = tenantWrites.filter(write => write.sql.includes("INSERT INTO tenant_config")).slice(-1)[0];
+    assert(JSON.stringify(JSON.parse(internationalInsert.args[7])) === JSON.stringify(["GB"]), "International country code must be preserved without US/CA defaults");
+    assert(JSON.stringify(JSON.parse(internationalInsert.args[10])) === JSON.stringify(["en"]), "Explicit language must be preserved");
   }
 });
 
