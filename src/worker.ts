@@ -386,6 +386,46 @@ const DEFAULT_FOUNDER_SEGMENTS = (MARKET_UNIVERSE_POLICY.bvelt_compatible_segmen
   .map(segment => String(segment).trim().toLowerCase())
   .filter(Boolean);
 
+const FOUNDER_SEGMENT_DISCOVERY_MAP: Record<string, string[]> = {
+  home_services: ["plumbing","hvac","roofing","landscaping","lawn_care","house_cleaning","pool_cleaning","handyman","pest_control","electrical"],
+  home_property_construction_and_trades: ["roofing","painting","garage_door","appliance_repair","fencing","flooring","general_contractor"],
+  cleaning_facility_and_maintenance: ["cleaning","commercial_cleaning","janitorial","window_cleaning","carpet_cleaning","pressure_washing","tree_service"],
+  automotive_transport_and_mobility: ["auto_repair","auto_body","towing","car_wash","car_rental"],
+  healthcare_dental_veterinary_and_wellness: ["dental_clinic","medical_clinic","optometry"],
+  beauty_fitness_and_personal_services: [],
+  legal_financial_insurance_and_professional_services: ["law_firm","accounting_firm","insurance_agency"],
+  real_estate_property_management_and_hospitality: ["property_management","real_estate","hotel"],
+  education_training_and_child_family_services: ["school","tutoring_center","training_center"],
+  restaurants_food_catering_and_events: ["restaurant","catering","event_venue"],
+  retail_local_specialty_and_equipment: ["hardware_store","equipment_rental","repair_shop"],
+  pet_services_and_animal_care: [],
+  logistics_storage_and_delivery_services: ["moving","storage_facility","delivery_service"],
+  industrial_b2b_manufacturing_and_maintenance: ["industrial_maintenance","manufacturer","machine_shop"],
+  technology_it_and_managed_services: ["it_services","managed_it"],
+  agriculture_landscape_and_outdoor_services: ["landscaping","tree_service","irrigation"],
+  recreation_sports_tourism_and_venues: ["travel_agency","event_venue","sports_club"],
+  other_customer_inquiry_or_appointment_driven_businesses: ["local_service_business"]
+};
+
+export function expandFounderDiscoveryNiches(niches: string[]): string[] {
+  const expanded: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of niches || []) {
+    const label = String(raw || "").trim();
+    if (!label) continue;
+    const key = label.toLowerCase().replace(/[\\s-]+/g, "_");
+    const mapped = FOUNDER_SEGMENT_DISCOVERY_MAP[key];
+    for (const value of (mapped !== undefined ? mapped : [label])) {
+      const clean = String(value || "").trim();
+      const normalized = clean.toLowerCase();
+      if (!clean || seen.has(normalized)) continue;
+      seen.add(normalized);
+      expanded.push(clean);
+    }
+  }
+  return expanded;
+}
+
 export const DEFAULT_FOUNDER_MISSION: MissionConfig = {
   mode: "founder",
   target: "bvelt_customers",
@@ -514,6 +554,35 @@ const OVERPASS_TRADE_TAGS: Record<string, string[]> = {
   handyman: ['craft="handyman"', 'craft="carpenter"', 'craft="joiner"', 'craft="builder"', 'name~"handyman"', 'name~"handy man"', 'shop="doityourself"'],
   roofing: ['craft="roofer"', 'craft="roofing"', 'name~"roof"', 'name~"roofer"', 'shop="roofing"'],
   pest_control: ['craft="pest_control"', 'amenity="pest_control"'],
+  auto_repair: ['shop="car_repair"', 'craft="mechanic"', 'name~"auto repair"', 'name~"mechanic"'],
+  auto_body: ['shop="car_repair"', 'name~"collision repair"', 'name~"auto body"'],
+  towing: ['craft="tow_truck"', 'name~"towing"', 'name~"tow truck"'],
+  car_wash: ['amenity="car_wash"', 'shop="car_repair"', 'name~"car wash"'],
+  car_rental: ['amenity="car_rental"', 'shop="car_rental"', 'name~"car rental"'],
+  dental_clinic: ['amenity="dentist"', 'healthcare="dentist"', 'name~"dental"', 'name~"dentist"'],
+  medical_clinic: ['amenity="clinic"', 'healthcare="clinic"', 'name~"medical clinic"', 'name~"medical center"'],
+  optometry: ['healthcare="optometrist"', 'shop="optician"', 'name~"optometry"', 'name~"eye care"'],
+  law_firm: ['office="lawyer"', 'name~"law firm"', 'name~"attorney"', 'name~"law office"'],
+  accounting_firm: ['office="accountant"', 'name~"accounting"', 'name~"accountant"', 'name~"tax service"'],
+  tutoring_center: ['office="educational_institution"', 'name~"tutoring"', 'name~"tutor"'],
+  training_center: ['office="educational_institution"', 'name~"training center"', 'name~"training academy"'],
+  catering: ['craft="caterer"', 'office="catering"', 'name~"catering"'],
+  event_venue: ['amenity="events_venue"', 'leisure="venue"', 'name~"event venue"', 'name~"wedding venue"'],
+  hardware_store: ['shop="hardware"', 'shop="trade"', 'name~"hardware"', 'name~"building supply"'],
+  equipment_rental: ['shop="tool_hire"', 'name~"equipment rental"', 'name~"tool rental"'],
+  repair_shop: ['craft="repair"', 'shop="repair"', 'name~"repair shop"', 'name~"repair service"'],
+  storage_facility: ['shop="self_storage"', 'name~"self storage"', 'name~"storage facility"'],
+  delivery_service: ['office="logistics"', 'name~"delivery"', 'name~"courier"', 'name~"logistics"'],
+  industrial_maintenance: ['industrial="factory"', 'craft="industrial_maintenance"', 'name~"industrial maintenance"'],
+  manufacturer: ['industrial="factory"', 'industrial="manufacture"', 'name~"manufacturer"', 'name~"manufacturing"'],
+  machine_shop: ['craft="metal_construction"', 'name~"machine shop"', 'name~"machining"'],
+  it_services: ['office="it"', 'office="company"', 'name~"IT services"', 'name~"computer services"'],
+  managed_it: ['office="it"', 'name~"managed IT"', 'name~"IT support"'],
+  tree_service: ['craft="arborist"', 'name~"tree service"', 'name~"arborist"'],
+  irrigation: ['craft="irrigation"', 'name~"irrigation"', 'name~"sprinkler system"'],
+  sports_club: ['leisure="sports_centre"', 'club="sport"', 'name~"sports club"'],
+  travel_agency: ['shop="travel_agency"', 'office="travel_agent"', 'tourism="information"', 'name~"travel agency"'],
+  local_service_business: ['craft="contractor"', 'amenity="trade"', 'office="company"'],
   "property management": [
     'office="property_management"', 'amenity="property_management"',
     'name~"property management"', 'name~"property manager"', 'name~"prop management"',
@@ -7352,6 +7421,8 @@ export async function getPriorityTargets(
         config.min_score = parsedMin;
       }
     }
+    // Convert broad market segments to searchable categories; preserve custom niches.
+    config.niches = expandFounderDiscoveryNiches(config.niches);
   }
 
   // Seed Today's Daily Mission
@@ -8326,7 +8397,21 @@ export function mapTradeToBizDataCategory(trade: string): string | null {
     "painting": "painter",
     "moving": "moving_company",
     "handyman": "general_contractor",
-    "real_estate": "real_estate_agency"
+    "real_estate": "real_estate_agency",
+    "auto_repair": "auto_repair",
+    "auto_body": "car_repair",
+    "dental_clinic": "dentist",
+    "medical_clinic": "doctor",
+    "law_firm": "attorney",
+    "accounting_firm": "accounting",
+    "hotel": "lodging",
+    "tutoring_center": "school",
+    "training_center": "school",
+    "catering": "restaurant",
+    "moving": "moving_company",
+    "hardware_store": "hardware_store",
+    "car_wash": "car_wash",
+    "car_rental": "car_rental"
   };
 
   const mapped = mapping[norm];
@@ -8667,6 +8752,17 @@ const GEOAPIFY_PROFILES: Array<{ match: RegExp; categories: string; name?: RegEx
   { match: /handyman|repair|appliance/, categories: "service,office,commercial", name: /handyman|repair|appliance|fix/i },
   { match: /moving|junk|haul/, categories: "service,office,commercial", name: /moving|mover|junk|haul|relocat/i },
   { match: /general contractor|construction|builder/, categories: "service,office,commercial", name: /construction|contractor|builder|remodel|build/i },
+  { match: /auto|car_repair|towing/, categories: "service,office,commercial", name: /auto|car repair|mechanic|towing|tow truck|collision/i },
+  { match: /dental|medical|optometry/, categories: "service,office,commercial", name: /dental|dentist|clinic|medical|optometry|optometrist|eye care/i },
+  { match: /law_firm|accounting|insurance/, categories: "office,commercial", name: /law|attorney|accounting|accountant|insurance|tax/i },
+  { match: /tutoring|training|school/, categories: "education", name: /school|tutor|training|academy|learning/i },
+  { match: /restaurant|catering|event_venue/, categories: "catering", name: /restaurant|catering|event|venue|banquet|wedding/i },
+  { match: /hardware|equipment|repair_shop/, categories: "service,office,commercial", name: /hardware|equipment|rental|repair|supply/i },
+  { match: /moving|storage|delivery/, categories: "service,office,commercial", name: /moving|mover|storage|delivery|courier|logistics/i },
+  { match: /industrial|manufacturer|machine_shop/, categories: "service,office,commercial", name: /industrial|manufactur|machine|fabrication|machining/i },
+  { match: /it_services|managed_it/, categories: "office,commercial", name: /IT services|managed IT|computer services|IT support/i },
+  { match: /travel_agency|sports_club/, categories: "sport,leisure", name: /travel|tour|sports club|athletic|venue/i },
+  { match: /local_service_business/, categories: "service,office,commercial" },
 ];
 
 export async function fetchGeoapifyBusinesses(
@@ -8862,7 +8958,7 @@ export async function fetchLocalBusinessesWithDiagnostics(
   mode: 'founder' | 'tenant' = 'founder'
 ): Promise<{ businesses: any[]; diagnostics: DiscoveryDiagnostics }> {
   const tagScope = (customOsmTags || []).map(tag => String(tag).trim().toLowerCase()).filter(Boolean).sort().join("_").slice(0, 120);
-  const cacheKey = `radar_cache_${mode}_${city.replace(/[^a-z0-9]/gi, "_")}_${trade}_${tagScope}_v4`.toLowerCase();
+  const cacheKey = `radar_cache_${mode}_${city.replace(/[^a-z0-9]/gi, "_")}_${trade}_${tagScope}_v5`.toLowerCase();
   
   if (env.RADAR_DB) {
     try {
@@ -9088,7 +9184,7 @@ export async function fetchLocalBusinessesWithDiagnostics(
 
   // Caché en D1: 24 h si hubo resultados; 30 min si salió vacío, con contador de vacíos consecutivos (cooldown de 7 días al llegar a 5)
   if (env.RADAR_DB) {
-    const zeroKey = `radar_zero_streak_${city.replace(/[^a-z0-9]/gi, "_")}_${trade}_v3`.toLowerCase();
+    const zeroKey = `radar_zero_streak_${city.replace(/[^a-z0-9]/gi, "_")}_${trade}_v4`.toLowerCase();
     if (deduped.length > 0) {
       await cachePut(env, zeroKey, "0", 86400 * 30);
       await cachePut(env, cacheKey, JSON.stringify(deduped), 86400);
@@ -10434,7 +10530,7 @@ export async function notifyFounder(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(6000)
+      signal: AbortSignal.timeout(15000)
     });
 
     const data: any = await res.json().catch(() => ({ ok: false, description: `HTTP ${res.status}: Failed to parse JSON` }));
@@ -11856,7 +11952,17 @@ export function checkTradeCoherence(
   const validTrades = new Set([
     'plumbing', 'hvac', 'roofing', 'landscaping', 'lawn_care',
     'electrical', 'painting', 'pool', 'pest_control', 'cleaning',
-    'handyman', 'garage_door', 'construction', 'remodeling'
+    'handyman', 'garage_door', 'construction', 'remodeling',
+    'commercial_cleaning', 'janitorial', 'window_cleaning', 'carpet_cleaning', 'pressure_washing',
+    'tree_service', 'appliance_repair', 'fencing', 'flooring', 'general_contractor',
+    'auto_repair', 'auto_body', 'towing', 'car_wash', 'car_rental',
+    'dental_clinic', 'medical_clinic', 'optometry', 'law_firm', 'accounting_firm',
+    'insurance_agency', 'property_management', 'real_estate', 'hotel',
+    'school', 'tutoring_center', 'training_center', 'restaurant', 'catering', 'event_venue',
+    'hardware_store', 'equipment_rental', 'repair_shop', 'moving', 'storage_facility',
+    'delivery_service', 'industrial_maintenance', 'manufacturer', 'machine_shop',
+    'it_services', 'managed_it', 'irrigation', 'travel_agency', 'sports_club',
+    'local_service_business'
   ]);
 
   if (validTrades.has(normDeclared)) {
@@ -11867,10 +11973,25 @@ export function checkTradeCoherence(
     };
   }
 
+  // Unknown Founder niches stay eligible when a real contact point is present;
+  // downstream AI/ICP checks still reject irrelevant or prohibited businesses.
+  const hasContactEvidence = Boolean(
+    (website && website.trim()) ||
+    /"(?:phone|email)"\\s*:\\s*"[^"]+"/i.test(tags || "")
+  );
+  if (mode !== "tenant" && normDeclared && hasContactEvidence) {
+    return {
+      coherent: true,
+      verifiedTrade: normDeclared,
+      reason: "custom_trade_with_contact_evidence",
+      disqualified: false
+    };
+  }
+
   return {
     coherent: false,
     verifiedTrade: null,
-    reason: `unverified_trade: declared "${declaredTrade}" has no supporting contractor clues`,
+    reason: `unverified_trade: declared "${declaredTrade}" has no supporting business/contact clues`,
     disqualified: mode !== 'tenant'
   };
 }
