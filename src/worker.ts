@@ -1310,11 +1310,12 @@ export default {
 
       // 8. Single Production Prospects Fetching Endpoint
       if ((path === "/prospects" || path === "/api/prospects") && method === "GET") {
-        const limit = url.searchParams.get("limit") || "100";
+        const requestedLimit = Number.parseInt(url.searchParams.get("limit") || "500", 10);
+        const limit = Number.isFinite(requestedLimit) ? Math.min(1000, Math.max(1, requestedLimit)) : 500;
         const status = url.searchParams.get("status");
         const tenantId = url.searchParams.get("tenant_id") || "founder";
         
-        let queryStr = "SELECT * FROM prospects WHERE COALESCE(tenant_id,'founder') = ?";
+        let queryStr = "SELECT * FROM prospects WHERE COALESCE(NULLIF(TRIM(tenant_id),''),'founder') = ?";
         const params: any[] = [tenantId];
         
         if (status) {
@@ -1323,7 +1324,7 @@ export default {
         }
         
         queryStr += " ORDER BY created_at DESC LIMIT ?";
-        params.push(parseInt(limit, 10));
+        params.push(limit);
 
         const results = await env.RADAR_DB.prepare(queryStr).bind(...params).all();
         return Response.json(results.results || [], { headers: corsHeaders });
@@ -1424,14 +1425,25 @@ export default {
                   LEFT JOIN prospects p ON o.prospect_id = p.id
                   WHERE COALESCE(o.strategic_score, 0) >= ?
                     AND COALESCE(NULLIF(TRIM(o.tenant_id), ''), 'founder') = ?
-                  ORDER BY COALESCE(o.strategic_score, 0) DESC, o.created_at DESC LIMIT ?`,
+                  AND lower(COALESCE(o.status, 'open')) = 'open'
+                     AND lower(COALESCE(o.decision_state, '')) != 'closed'
+                     AND (p.id IS NULL OR lower(COALESCE(p.status, '')) NOT IN ('sent','delivered','opened','clicked','bounced','unsubscribed','replied','human_review','discarded','blocked','suppressed','converted','disqualified'))
+                     AND (p.cooldown_until IS NULL OR datetime(p.cooldown_until) <= datetime('now'))
+                   ORDER BY COALESCE(o.strategic_score, 0) DESC, o.created_at DESC LIMIT ?`,
             binds: [minScore, scopeTenant, limit],
           },
           {
             sql: `SELECT * FROM opportunities
                   WHERE COALESCE(strategic_score, 0) >= ?
                     AND COALESCE(NULLIF(TRIM(tenant_id), ''), 'founder') = ?
-                  ORDER BY COALESCE(strategic_score, 0) DESC LIMIT ?`,
+                  AND lower(COALESCE(status, 'open')) = 'open'
+                     AND lower(COALESCE(decision_state, '')) != 'closed'
+                     AND NOT EXISTS (
+                       SELECT 1 FROM prospects p WHERE p.id = opportunities.prospect_id
+                         AND (lower(COALESCE(p.status, '')) IN ('sent','delivered','opened','clicked','bounced','unsubscribed','replied','human_review','discarded','blocked','suppressed','converted','disqualified')
+                           OR (p.cooldown_until IS NOT NULL AND datetime(p.cooldown_until) > datetime('now')))
+                     )
+                   ORDER BY COALESCE(strategic_score, 0) DESC LIMIT ?`,
             binds: [minScore, scopeTenant, limit],
           },
           {
@@ -1442,13 +1454,24 @@ export default {
                   INNER JOIN prospects p ON o.prospect_id = p.id
                   WHERE COALESCE(NULLIF(TRIM(p.tenant_id), ''), 'founder') = ?
                     AND COALESCE(p.score, p.opportunity_score, o.strategic_score, 0) >= ?
-                  ORDER BY COALESCE(o.strategic_score, p.score, 0) DESC LIMIT ?`,
+                  AND lower(COALESCE(o.status, 'open')) = 'open'
+                     AND lower(COALESCE(o.decision_state, '')) != 'closed'
+                     AND lower(COALESCE(p.status, '')) NOT IN ('sent','delivered','opened','clicked','bounced','unsubscribed','replied','human_review','discarded','blocked','suppressed','converted','disqualified')
+                     AND (p.cooldown_until IS NULL OR datetime(p.cooldown_until) <= datetime('now'))
+                   ORDER BY COALESCE(o.strategic_score, p.score, 0) DESC LIMIT ?`,
             binds: [scopeTenant, minScore, limit],
           },
           {
             sql: `SELECT * FROM opportunities
                   WHERE COALESCE(NULLIF(TRIM(tenant_id), ''), 'founder') = ?
-                  ORDER BY rowid DESC LIMIT ?`,
+                  AND lower(COALESCE(status, 'open')) = 'open'
+                     AND lower(COALESCE(decision_state, '')) != 'closed'
+                     AND NOT EXISTS (
+                       SELECT 1 FROM prospects p WHERE p.id = opportunities.prospect_id
+                         AND (lower(COALESCE(p.status, '')) IN ('sent','delivered','opened','clicked','bounced','unsubscribed','replied','human_review','discarded','blocked','suppressed','converted','disqualified')
+                           OR (p.cooldown_until IS NOT NULL AND datetime(p.cooldown_until) > datetime('now')))
+                     )
+                   ORDER BY rowid DESC LIMIT ?`,
             binds: [scopeTenant, limit],
           },
         ];
