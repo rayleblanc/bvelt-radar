@@ -166,18 +166,27 @@ export async function pickTargets(
   }
 ): Promise<{ place: GeoPlace; trade: string; why: string }[]> {
   const count = Math.max(1, Math.min(30, o.count || 5));
-  const trades = (o.trades && o.trades.length > 0 ? o.trades : ["general"])
+  const trades = (o.trades || [])
     .map((t) => String(t).trim())
     .filter(Boolean);
-  const countries = (o.countries && o.countries.length > 0 ? o.countries : ["US", "CA"]).map((c) => c.toUpperCase());
   const isTenantArea = !!o.centerLabel;
 
-  // 1) Centro del tenant: si se pidió y no se puede resolver, NO devolvemos nada
+  // 1) Resolve the configured center before deriving its country.
   let center: GeoPlace | null = null;
   if (isTenantArea) {
     center = findPlace(o.centerLabel as string);
     if (!center) return [];
   }
+
+  // No implicit trade or country defaults. Tenant centers may supply their
+  // country; Founder discovery requires an explicit country scope.
+  const countries = (o.countries && o.countries.length > 0
+    ? o.countries
+    : center ? [center.country] : [])
+    .map((c) => String(c).trim().toUpperCase())
+    .filter(Boolean);
+  if (trades.length === 0 || countries.length === 0) return [];
+
   const maxDist = o.serviceRadiusKm ?? 60;
 
   // Resolve allowedCities into GeoPlace centers (strict configured markets only)
@@ -235,8 +244,7 @@ export async function pickTargets(
   // 3) Pool de lugares
   // Tenant (centerLabel): radio alrededor de la base.
   // allowedCities: solo cuando se pasa explícito (p.ej. tenant multi-ciudad).
-  // Founder sin centro: US+CA nacional (top población + muestra aleatoria 15k+).
-  // Sun Belt NO es filtro duro: es boost de score más abajo (x1.25).
+  // Founder sin centro: solo países configurados; sin fallback geográfico implícito.
   let pool: GeoPlace[];
   if (center) {
     const dLat = maxDist / 111 + 0.05;
@@ -269,7 +277,7 @@ export async function pickTargets(
       }
     }
   } else {
-    // Founder / national: top 150 by population + 150 random places with 15k+ pop (US+CA)
+    // Founder / national: top 150 by population + 150 random places in configured countries
     const eligible = GEO_PLACES.filter((p) => countries.includes(p.country));
     const byPop = [...eligible].sort(POP_DESC);
     const top = byPop.slice(0, 150);
@@ -330,11 +338,6 @@ export async function pickTargets(
       const prior = (st.q + 1) / (st.c + 8);
       let score = Math.log(pop) * fresh * (0.5 + prior);
       if (center) score *= 1 / (1 + dist / 30); // más cerca de la base = mejor
-      // Soft priority (not a hard filter): Sun Belt markets Bvelt sells into first
-      const SUN_BELT = new Set(["FL", "TX", "GA", "TN", "NC", "SC", "AL", "AZ", "NV", "LA"]);
-      if (!isTenantArea && SUN_BELT.has((place.region || "").toUpperCase())) {
-        score *= 1.25;
-      }
       cands.push({ place, trade, score, prior, isNew, dist });
     }
   }
