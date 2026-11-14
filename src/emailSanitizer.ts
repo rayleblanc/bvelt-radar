@@ -23,6 +23,9 @@ const DISPOSABLE_DOMAINS = new Set([
   'fakeinbox.com',
 ]);
 
+const PLACEHOLDER_LOCAL_PARTS = new Set(['example', 'test', 'yourname', 'your_name', 'your-email', 'your_email', 'email', 'name']);
+const PLACEHOLDER_DOMAINS = new Set(['example.com', 'example.org', 'example.net', 'example.test', 'invalid', 'localhost']);
+
 const SYSTEM_LOCAL_PARTS = new Set([
   'noreply',
   'no-reply',
@@ -76,6 +79,10 @@ export function sanitizeEmail(rawEmail: string | null | undefined): SanitizeResu
   // 4. Local part validation
   if (!localPart || localPart.length > 64) {
     return { valid: false, reason: 'invalid_local_part_length' };
+  }
+
+  if (PLACEHOLDER_LOCAL_PARTS.has(localPart) || PLACEHOLDER_DOMAINS.has(domain)) {
+    return { valid: false, reason: 'placeholder_email' };
   }
 
   if (SYSTEM_LOCAL_PARTS.has(localPart)) {
