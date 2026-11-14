@@ -1542,7 +1542,7 @@ tests.push({
                 } else if (sqlLower.includes("select 1 from research_run_candidates")) {
                   const c = candidatesStore.find(x => x.run_id === args[0] && x.mode === args[1] && x.tenant_id === args[2] && x.prospect_id === args[3]);
                   return c ? { 1: 1 } : null;
-                } else if (sqlLower.includes("select id, signals_json from prospects")) {
+                } else if (sqlLower.includes("select id, signals_json, website from prospects") || sqlLower.includes("select id, signals_json from prospects")) {
                   const p = prospectsStore.find(x => x.id === args[0] && x.mode === args[1] && (x.tenant_id || "founder") === args[2]);
                   return p ? { id: p.id, signals_json: p.signals_json } : null;
                 } else if (sqlLower.includes("select id from source_evidence")) {
@@ -1626,7 +1626,7 @@ tests.push({
             source_url: "https://acmeplumbing.com",
             evidence_type: "business_website_profile",
             evidence: { contact_form_observed: true, page_title: "Acme Plumbing Services" },
-            content_hash: "hash_001",
+            content_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             extractor_version: "bvelt-scrapling-1.0.0",
             confidence: 0.78,
             observed_at: new Date().toISOString()
@@ -1693,7 +1693,7 @@ tests.push({
             source_url: "https://acmeplumbing.com",
             evidence_type: "business_website_profile",
             evidence: { contact_form_observed: true },
-            content_hash: "hash_001",
+            content_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             extractor_version: "bvelt-scrapling-1.0.0"
           }
         ]
@@ -2091,6 +2091,7 @@ tests.push({
         id: "p_sync_01",
         mode: "founder",
         tenant_id: "founder",
+        website: "https://testbusiness.com",
         signals_json: JSON.stringify({ existing_fact: true })
       }
     ];
@@ -2201,7 +2202,7 @@ tests.push({
             source_id: "scrapling_test",
             source_url: "https://testbusiness.com",
             evidence_type: "business_profile",
-            content_hash: "hash_sync_123",
+            content_hash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             evidence: {
               page_title: "Test Business Homepage",
               public_business_phones: ["+15551234567"]
@@ -2292,16 +2293,16 @@ tests.push({
     );
     assert(unauthenticated.status === 401, "ROI must reject unauthenticated requests");
 
-    const crossTenant = await worker.fetch(
-      new Request("https://radar.test/api/tenants/roi?tenant_id=tenant_beta", {
-        headers: {
-          "Authorization": "Bearer radar-service-secret",
-          "X-Tenant-Id": "tenant_alpha"
-        }
-      }),
-      env,
-      {} as any
-    );
+    const crossTenantRequest = new Request("https://radar.test/api/tenants/roi?tenant_id=tenant_beta", {
+      headers: {
+        "Authorization": "Bearer radar-service-secret",
+        "X-Tenant-Id": "tenant_alpha"
+      }
+    });
+    const crossTenantAuth = resolveTenantAuthContext(crossTenantRequest, env, "founder-secret", "");
+    assert(crossTenantAuth.authorized, "Radar service fixture must authenticate with its explicit tenant header");
+    assert(!crossTenantAuth.canAccessTenant("tenant_beta"), "Radar service must not access a different tenant");
+    const crossTenant = await worker.fetch(crossTenantRequest, env, {} as any);
     assert(crossTenant.status === 403, `Tenant service credentials must not read another tenant's ROI (received ${crossTenant.status})`);
 
     const scoped = await worker.fetch(
