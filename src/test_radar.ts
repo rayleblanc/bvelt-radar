@@ -2,7 +2,7 @@ declare const process: any;
 
 import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, resolveTenantBuyerSegments, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey, notifyOnce, isVerifiedDeliverableEmail, evaluateFounderOutreachEligibility, buildTechnicalAuditSnapshot, isEmailValidatedForOutreach, isCompletePostalAddress, sendTelegramWithRetry, extractEmailAddress, evaluateResearchEvidenceQuality, classifyReplyText } from './worker';
 import { DEFAULT_FOUNDER_MISSION, MissionConfig } from './worker';
-import { buildResendIdempotencyKey, buildBrandedEmailHtml, resolveBveltSender, inspectOutboundEmailAuth, normalizeOutreachBody } from './emailDispatcher';
+import { buildResendIdempotencyKey, buildBrandedEmailHtml, resolveBveltSender, inspectOutboundEmailAuth, normalizeOutreachBody, normalizeFounderOutreachCopy } from './emailDispatcher';
 import { fetchPermitContractors } from './permitSources';
 import { pickTargets } from './geoFrontier';
 import { isOffIcpName, sanitizeEmail } from './emailSanitizer';
@@ -2753,6 +2753,43 @@ tests.push({
   run: () => {
     assert(!isCompletePostalAddress("123 Main Street, Toronto, ON"), "Street/city/region without postal code or country must not pass");
     assert(isCompletePostalAddress("123 Main Street, Toronto, ON M5V 2T6, Canada"), "Complete Canadian address must pass");
+  }
+});
+
+tests.push({
+  name: "Founder outreach copy rejects unsupported claims and varies each touch",
+  run: () => {
+    const footer = "Rainer, founder of Bvelt\\n123 Main Street, Toronto, ON M5V 2T6, Canada\\nThis is a commercial message. Reply unsubscribe to opt out.";
+    const first = normalizeFounderOutreachCopy(
+      "Free Audit: Stop Losing Calls & Slow Site",
+      "We noticed your website is slow. Most homeowners hang up. Bvelt recovers lost jobs through automated SMS.",
+      "Example Plumbing",
+      footer,
+      1
+    );
+    assert(first.sanitized, "Unsupported claims must trigger safe founder copy");
+    assert(!/free|audit|stop losing|website is slow|hang up|automated sms|recover.*lost jobs/i.test(first.subject + " " + first.body), "Unsupported claims must not reach the provider");
+    assert(first.subject.includes("Example Plumbing"), "Safe subject must be prospect-specific");
+    assert(first.body.includes("123 Main Street") && first.body.includes("unsubscribe"), "Safe fallback must preserve the complete legal footer");
+
+    const second = normalizeFounderOutreachCopy(
+      "Quick audit for Example Plumbing",
+      "A free technical audit can recover lost revenue with automated SMS.",
+      "Example Plumbing",
+      footer,
+      2
+    );
+    assert(second.sanitized && second.subject !== first.subject, "Follow-up must have a distinct touch-specific subject");
+    assert(second.body.includes("estimates") && second.body.includes("unsubscribe"), "Follow-up must use a distinct operational hook and preserve footer");
+
+    const safe = normalizeFounderOutreachCopy(
+      "Estimate follow-up at Example Plumbing",
+      "Hi team, how do you currently keep estimate requests visible when the team is busy?",
+      "Example Plumbing",
+      footer,
+      1
+    );
+    assert(!safe.sanitized && safe.body.includes("123 Main Street"), "Neutral copy should remain intact while gaining the configured footer");
   }
 });
 
