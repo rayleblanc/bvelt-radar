@@ -9034,13 +9034,11 @@ export async function fetchLocalBusinessesWithDiagnostics(
   const allCandidates = [...permitCandidates, ...rawBusinesses];
   const seen = new Set<string>();
   const deduped: any[] = [];
-  const EXTRA_SYNTACTIC_ICP_EXCLUSION = /\b(store|shop|market|pet|nails|hair|grocery|florist|boutique)\b/i;
-
   for (const item of allCandidates) {
     const rawName = String(item.name || "").trim();
     const candTrade = item.trade || trade;
-    const coherence = checkTradeCoherence(rawName, candTrade, item.website);
-    if (isOffIcpName(rawName) || EXTRA_SYNTACTIC_ICP_EXCLUSION.test(rawName) || !coherence.coherent || coherence.disqualified) {
+    const coherence = checkTradeCoherence(rawName, candTrade, item.website, JSON.stringify(item), mode);
+    if (isOffIcpName(rawName, mode === "tenant") || !coherence.coherent || coherence.disqualified) {
       console.log(`[ICP Gate: Discarded] "${rawName}" matched off-ICP/coherence filter in discovery for ${city} - ${candTrade}`);
       continue;
     }
