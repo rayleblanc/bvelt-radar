@@ -17,6 +17,7 @@ import { auditDomainSecurityAndMx, auditWebsitePerformance, auditCityWeatherEmer
 import { pickTargets, findPlace, findNearestPlace, formatPlaceLabel, markSearched, placeKey, radiusKm, haversineKm } from './geoFrontier';
 import { sanitizeEmail, sanitizeProspectEmail, isOffIcpName, hasMxRecords } from './emailSanitizer';
 import { dispatchScraplingResearch } from './research/githubActions';
+import { recordScopedLearningEvent, readScopedLearningStats } from './learningIntegrity';
 import { fetchPermitContractors as fetchMunicipalPermitContractors } from './permitSources';
 
 // Global type declarations for Cloudflare Worker compilation
@@ -2255,23 +2256,39 @@ export default {
           return Response.json({ error: "Invalid outcome value" }, { status: 400, headers: corsHeaders });
         }
 
-        const prospect = await env.RADAR_DB.prepare("SELECT * FROM prospects WHERE id = ?").bind(prospect_id).first() as any;
+        const prospect = await env.RADAR_DB.prepare("SELECT * FROM prospects WHERE id = ? AND mode = 'tenant' AND tenant_id = ?").bind(prospect_id, tenant_id).first() as any;
         if (!prospect) {
-          return Response.json({ error: "Prospect not found" }, { status: 404, headers: corsHeaders });
+          return Response.json({ error: "Prospect not found for this tenant" }, { status: 404, headers: corsHeaders });
         }
 
-        const prospectTenant = prospect.tenant_id || "founder";
-        if (prospectTenant !== tenant_id) {
-          return Response.json({ error: "Prospect does not belong to tenant" }, { status: 403, headers: corsHeaders });
+        const parsedValue = value_usd === undefined || value_usd === null || value_usd === "" ? null : Number(value_usd);
+        if (parsedValue !== null && (!Number.isFinite(parsedValue) || parsedValue < 0)) {
+          return Response.json({ error: "value_usd must be a finite non-negative number" }, { status: 400, headers: corsHeaders });
         }
 
         const timestamp = new Date().toISOString();
-        try {
-          await env.RADAR_DB.prepare(
-            "UPDATE prospects SET tenant_outcome = ?, won_value_usd = COALESCE(?, won_value_usd), updated_at = ? WHERE id = ?"
-          ).bind(outcome, value_usd !== undefined && value_usd !== null ? Number(value_usd) : null, timestamp, prospect_id).run();
-        } catch (e) {
-          console.warn("[Outcome] Failed to update prospects outcome (missing migration?):", e);
+        const outcomeChanged = String(prospect.tenant_outcome || "") !== outcome;
+        await env.RADAR_DB.prepare(
+          "UPDATE prospects SET tenant_outcome = ?, won_value_usd = CASE WHEN ? = 'won' THEN COALESCE(?, won_value_usd) ELSE won_value_usd END, updated_at = ? WHERE id = ? AND mode = 'tenant' AND tenant_id = ?"
+        ).bind(outcome, outcome, parsedValue, timestamp, prospect_id, tenant_id).run();
+
+        if (outcomeChanged) {
+          await recordLearningEvent(
+            env.RADAR_DB,
+            prospect.city,
+            prospect.trade,
+            prospect.variant_id || null,
+            false,
+            {
+              event_type: outcome,
+              outcome,
+              response_type: outcome,
+              prospect_id: String(prospect.id),
+              mode: "tenant",
+              tenant_id: tenant_id,
+              value_usd: parsedValue
+            }
+          );
         }
 
         await sendTenantObservationsToBvelt(env, tenant_id, {
@@ -3900,7 +3917,7 @@ async function handleStats(env: Env, headers: Record<string, string>): Promise<R
   `).first();
 
   // Learning conversion rates (Top winning combinations)
-  const learningStats = await getLearningStats(db);
+  const learningStats = await getLearningStats(db, "founder", "founder");
 
   const today = new Date().toISOString().split('T')[0];
   let budgetRow = await db.prepare("SELECT * FROM daily_budgets WHERE tenant_id = 'founder' AND day = ?").bind(today).first() as any;
@@ -4099,7 +4116,7 @@ async function handleDecision(
     }
 
     // Increment learning table for city, trade, variant
-    await recordLearningEvent(db, prospect.city, prospect.trade, prospect.variant_id, true);
+    await recordLearningEvent(db, prospect.city, prospect.trade, prospect.variant_id, true, { event_type: "sent", prospect_id: id, mode: prospect.mode, tenant_id: prospect.tenant_id || "founder" });
 
     // Mark seed_businesses as used if matched
     if (prospect.name && prospect.city) {
@@ -4130,7 +4147,7 @@ async function handleDecision(
       } catch (e) {}
     }
 
-    await recordLearningEvent(db, prospect.city, prospect.trade, prospect.variant_id, true, { is_win: true, response_type: 'positive' });
+    await recordLearningEvent(db, prospect.city, prospect.trade, prospect.variant_id, false, { event_type: "replied", response_type: "positive", prospect_id: id, mode: prospect.mode, tenant_id: prospect.tenant_id || "founder" });
 
     return Response.json({ success: true, message: `Prospect ${id} marked as REPLIED.`, id }, { headers });
 
@@ -4162,7 +4179,7 @@ async function handleDecision(
       } catch (e) {}
     }
 
-    await recordLearningEvent(db, prospect.city, prospect.trade, prospect.variant_id, true, { is_win: true, response_type: 'converted' });
+    await recordLearningEvent(db, prospect.city, prospect.trade, prospect.variant_id, false, { event_type: "won", response_type: "converted", is_win: true, prospect_id: id, mode: prospect.mode, tenant_id: prospect.tenant_id || "founder" });
 
     return Response.json({ success: true, message: `Prospect ${id} marked as WON/CONVERTED.`, id }, { headers });
 
@@ -4189,7 +4206,7 @@ async function handleDecision(
       }
     }
 
-    await recordLearningEvent(db, prospect.city, prospect.trade, prospect.variant_id, false);
+    await recordLearningEvent(db, prospect.city, prospect.trade, prospect.variant_id, false, { event_type: "discarded", prospect_id: id, mode: prospect.mode, tenant_id: prospect.tenant_id || "founder" });
 
     return Response.json({ success: true, message: `Prospect ${id} discarded with 30-day cooldown.`, id }, { headers });
 
@@ -5859,7 +5876,7 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
 
   const dayOfYear = getDayOfYear(new Date());
   const { missionConfig } = await getPriorityTargets(dayOfYear, env, job.mode, job.tenant_id, overrides, true);
-  const learningStats = await getLearningStats(env.RADAR_DB);
+  const learningStats = await getLearningStats(env.RADAR_DB, job.mode === "tenant" ? "tenant" : "founder", job.tenant_id || "founder");
 
   let parsedMeta: any = {};
   try {
@@ -6935,20 +6952,23 @@ export async function handleProspectEvent(
     prospect.id
   ).run();
 
-  const isPositiveOutcome = ['sent', 'delivered', 'positive', 'question'].includes(classification);
   await recordLearningEvent(
-    db, 
-    prospect.city, 
-    prospect.trade, 
-    prospect.variant_id, 
-    isPositiveOutcome,
+    db,
+    prospect.city,
+    prospect.trade,
+    prospect.variant_id,
+    false,
     {
       score: prospect.score,
       angle: prospect.bvelt_angle,
       market: prospect.city,
       niche: prospect.trade,
       outcome: newOutcome,
-      response_type: classification
+      response_type: classification,
+      event_type: classification,
+      prospect_id: String(prospect.id),
+      mode: prospect.mode,
+      tenant_id: prospect.tenant_id || "founder"
     }
   );
 
@@ -7293,7 +7313,7 @@ export async function getPriorityTargets(
   let learningStats: Record<string, number> = {};
   if (env.RADAR_DB) {
     try {
-      learningStats = await getLearningStats(env.RADAR_DB);
+      learningStats = await getLearningStats(env.RADAR_DB, mode === "tenant" ? "tenant" : "founder", tenantId || "founder");
     } catch (e) {}
   }
 
@@ -11295,10 +11315,10 @@ export function isCooldownActive(cooldownUntil: string | null): boolean {
  * Lightweight Learning Engine: Record Decision & Outcome Events in D1
  */
 async function recordLearningEvent(
-  db: D1Database, 
-  city: string, 
-  trade: string, 
-  variantId: string | null, 
+  db: D1Database,
+  city: string,
+  trade: string,
+  variantId: string | null,
   isSent: boolean,
   details?: {
     score?: number;
@@ -11308,32 +11328,48 @@ async function recordLearningEvent(
     outcome?: string;
     response_type?: string;
     is_win?: boolean;
+    event_type?: string;
+    prospect_id?: string;
+    mode?: string;
+    tenant_id?: string;
+    value_usd?: number | null;
   }
 ): Promise<void> {
-  const timestamp = new Date().toISOString();
-  const isWin = details?.is_win === true || ['positive', 'question', 'booked', 'converted'].includes(details?.response_type || '');
-  const keys = [`city:${city}`, `trade:${trade}`];
+  const mode = details?.mode === "tenant" ? "tenant" : "founder";
+  const tenantId = mode === "tenant" ? String(details?.tenant_id || "") : "founder";
+  if (!details?.prospect_id || (mode === "tenant" && (!tenantId || tenantId === "founder"))) {
+    console.warn("[Learning Integrity] Skipped event without a valid prospect/scope.");
+    return;
+  }
+
+  const eventType = String(details?.event_type || (isSent ? "sent" : details?.outcome || "unknown")).toLowerCase();
+  const occurredAt = new Date().toISOString();
+  const keys = [`city:${city}`, `trade:${String(trade || "").toLowerCase()}`];
   if (variantId) keys.push(`variant:${variantId}`);
   if (details?.angle) keys.push(`angle:${details.angle}`);
-  if (details?.response_type) keys.push(`response:${details.response_type}`);
-  if (details?.outcome) keys.push(`outcome:${details.outcome}`);
+  if (city && trade) keys.push(`pair:${city}|${String(trade).toLowerCase()}`);
 
-  for (const key of keys) {
-    try {
-      const existing = await db.prepare("SELECT * FROM learning_stats WHERE key = ?").bind(key).first() as any;
-      if (existing) {
-        const newSent = (existing.sent_count || 0) + (isSent ? 1 : 0);
-        const newWin = (existing.win_count || 0) + (isWin ? 1 : 0);
-        const newTotal = (existing.total_count || 0) + 1;
-        await db.prepare("UPDATE learning_stats SET sent_count = ?, win_count = ?, total_count = ?, updated_at = ? WHERE key = ?")
-          .bind(newSent, newWin, newTotal, timestamp, key).run();
-      } else {
-        await db.prepare("INSERT INTO learning_stats (key, sent_count, win_count, total_count, updated_at) VALUES (?, ?, ?, 1, ?)")
-          .bind(key, isSent ? 1 : 0, isWin ? 1 : 0, timestamp).run();
+  try {
+    await recordScopedLearningEvent(db, {
+      mode,
+      tenantId,
+      prospectId: String(details.prospect_id),
+      eventType,
+      city,
+      trade,
+      variantId,
+      angle: details?.angle || null,
+      valueUsd: details?.value_usd ?? null,
+      occurredAt,
+      metadata: {
+        score: details?.score,
+        response_type: details?.response_type,
+        outcome: details?.outcome,
+        source: "radar_worker"
       }
-    } catch (e) {
-      console.warn(`Learning event save warning for ${key}: `, e);
-    }
+    });
+  } catch (e) {
+    console.warn("[Learning Integrity] Event persistence warning:", e);
   }
 }
 
@@ -11396,78 +11432,63 @@ function estimateTicketUsd(trade: string): number {
  * Lower threshold (total_count >= 2) so the system starts learning faster.
  * Returns scores in [0, 1] used to re-rank cities, trades and ICP segments.
  */
-async function getLearningStats(db: D1Database): Promise<Record<string, number>> {
+async function getLearningStats(
+  db: D1Database,
+  mode: "founder" | "tenant" = "founder",
+  tenantId: string = "founder"
+): Promise<Record<string, number>> {
   const winRates: Record<string, number> = {};
+  const scopedTenantId = mode === "founder" ? "founder" : tenantId;
+  if (!db || typeof db.prepare !== "function" || (mode === "tenant" && (!scopedTenantId || scopedTenantId === "founder"))) return winRates;
+
   try {
-    if (!db || typeof db.prepare !== "function") return winRates;
+    Object.assign(winRates, await readScopedLearningStats(db, mode, scopedTenantId));
 
-    // 1. Aggregated learning_stats (faster path)
-    try {
-      const prep = db.prepare(
-        "SELECT key, sent_count, win_count, total_count FROM learning_stats WHERE total_count >= 2"
-      );
-      if (prep && typeof prep.all === "function") {
-        const rows = await prep.all() as any;
-        if (rows && rows.results) {
-          for (const r of rows.results) {
-            const wins = typeof r.win_count === "number" ? r.win_count : 0;
-            const total = Math.max(1, r.total_count || 1);
-            // Laplace smoothing so early wins don't dominate
-            winRates[r.key] = (wins + 1) / (total + 2);
-          }
-        }
-      }
-    } catch (_) {}
+    // Backfill signal from prospect rows, strictly within the requested scope.
+    const live = await db.prepare(`
+      SELECT city, trade,
+        SUM(CASE WHEN outcome IN ('won','converted') OR tenant_outcome = 'won' THEN 1 ELSE 0 END) AS wins,
+        SUM(CASE WHEN outcome = 'sent' OR status IN ('sent','delivered','replied','converted','won') OR tenant_outcome IN ('contacted','replied','won','lost') THEN 1 ELSE 0 END) AS sent
+      FROM prospects
+      WHERE mode = ?
+        AND COALESCE(tenant_id, 'founder') = ?
+        AND city IS NOT NULL AND trade IS NOT NULL
+      GROUP BY city, trade
+      HAVING sent >= 2
+    `).bind(mode, scopedTenantId).all() as any;
 
-    // 2. Live outcomes from prospects (fills gaps when learning_stats is sparse)
-    try {
-      const live = await db.prepare(`
-        SELECT city, trade,
-          SUM(CASE WHEN outcome IN ('sent','replied','won','positive','booked') OR tenant_outcome IN ('replied','won') THEN 1 ELSE 0 END) as wins,
-          COUNT(*) as total
-        FROM prospects
-        WHERE city IS NOT NULL AND trade IS NOT NULL
-        GROUP BY city, trade
-        HAVING total >= 2
-      `).all() as any;
-      if (live && live.results) {
-        for (const r of live.results) {
-          const cityKey = `city:${r.city}`;
-          const tradeKey = `trade:${String(r.trade).toLowerCase()}`;
-          const pairKey = `pair:${r.city}|${String(r.trade).toLowerCase()}`;
-          const rate = (Number(r.wins || 0) + 1) / (Number(r.total || 1) + 2);
-          if (winRates[cityKey] === undefined) winRates[cityKey] = rate;
-          else winRates[cityKey] = (winRates[cityKey] + rate) / 2;
-          if (winRates[tradeKey] === undefined) winRates[tradeKey] = rate;
-          else winRates[tradeKey] = (winRates[tradeKey] + rate) / 2;
-          winRates[pairKey] = rate;
-        }
-      }
-    } catch (_) {}
+    for (const row of (live?.results || []) as any[]) {
+      const sent = Math.max(1, Number(row.sent || 0));
+      const wins = Math.min(sent, Number(row.wins || 0));
+      const rate = (wins + 1) / (sent + 2);
+      const cityKey = `city:${row.city}`;
+      const tradeKey = `trade:${String(row.trade).toLowerCase()}`;
+      const pairKey = `pair:${row.city}|${String(row.trade).toLowerCase()}`;
+      if (winRates[cityKey] === undefined) winRates[cityKey] = rate;
+      if (winRates[tradeKey] === undefined) winRates[tradeKey] = rate;
+      if (winRates[pairKey] === undefined) winRates[pairKey] = rate;
+    }
 
-    // 3. geo_coverage wins/replies as geographic signal
-    try {
-      const geo = await db.prepare(`
-        SELECT place_key, trade, SUM(wins) as w, SUM(replies) as r, SUM(qualified) as q, SUM(searches) as s
-        FROM geo_coverage
-        GROUP BY place_key, trade
-        HAVING s >= 1
-      `).all() as any;
-      if (geo && geo.results) {
-        for (const r of geo.results) {
-          const cityName = String(r.place_key || "").split("|")[0];
-          if (!cityName) continue;
-          const successes = Number(r.w || 0) + Number(r.r || 0) * 0.5;
-          const trials = Math.max(1, Number(r.s || 1));
-          const rate = (successes + 1) / (trials + 2);
-          const key = `city:${cityName}`;
-          if (winRates[key] === undefined) winRates[key] = rate;
-          else winRates[key] = Math.max(winRates[key], rate);
-        }
-      }
-    } catch (_) {}
+    // Geographic observations are also scoped; replies are not treated as wins.
+    const geo = await db.prepare(`
+      SELECT place_key, trade, SUM(wins) AS wins, SUM(searches) AS searches
+      FROM geo_coverage
+      WHERE tenant_id = ?
+      GROUP BY place_key, trade
+      HAVING searches >= 2
+    `).bind(scopedTenantId).all() as any;
+
+    for (const row of (geo?.results || []) as any[]) {
+      const cityName = String(row.place_key || "").split("|")[0];
+      if (!cityName) continue;
+      const searches = Math.max(1, Number(row.searches || 0));
+      const wins = Math.min(searches, Number(row.wins || 0));
+      const rate = (wins + 1) / (searches + 2);
+      const key = `city:${cityName}`;
+      if (winRates[key] === undefined) winRates[key] = rate;
+    }
   } catch (e) {
-    // Graceful fallback — empty rates = uniform prior
+    console.warn("[Learning Integrity] Scoped read failed; using uniform prior.", e);
   }
   return winRates;
 }
