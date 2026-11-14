@@ -128,11 +128,14 @@ export async function recordScopedLearningEvent(
         lost_count, contacted_count,
         unknown_count, total_events, updated_at
       )
-      SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+      SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
       WHERE EXISTS (SELECT 1 FROM learning_events WHERE id = ?)
       ON CONFLICT(mode, tenant_id, key) DO UPDATE SET
         sent_count = sent_count + excluded.sent_count,
         delivered_count = delivered_count + excluded.delivered_count,
+        opened_count = opened_count + excluded.opened_count,
+        clicked_count = clicked_count + excluded.clicked_count,
+        bounced_count = bounced_count + excluded.bounced_count,
         replied_count = replied_count + excluded.replied_count,
         qualified_count = qualified_count + excluded.qualified_count,
         booked_count = booked_count + excluded.booked_count,
@@ -153,7 +156,6 @@ export async function recordScopedLearningEvent(
 
   const results = await db.batch(statements);
   return Number(results?.[0]?.meta?.changes || 0) > 0;
-  return true;
 }
 
 export async function readScopedLearningStats(
