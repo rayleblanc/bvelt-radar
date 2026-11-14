@@ -1,6 +1,6 @@
 # 📡 bvelt-radar v2
 
-**bvelt-radar** es un Cloudflare Worker autónomo para prospección B2B y descubrimiento de contratistas y servicios locales en EE. UU. (plumbing, HVAC, landscaping, limpieza, techos) para **Bvelt**.
+**bvelt-radar** es un Cloudflare Worker autónomo para prospección B2B y descubrimiento de negocios de servicios en los mercados y nichos configurados para **Bvelt**.
 
 > ⚠️ **Nota Importante:** La versión v1 **NO envía emails automáticamente**. El sistema busca, califica con algoritmo multi-factor, redacta el copy con psicología de contratista y te lo entrega por Telegram con botones interactivos. Tú decides, copias y envías.
 
@@ -8,7 +8,7 @@
 
 ## 🚀 Novedades v2
 
-1. **Ranking Dinámico Sun Belt:** Rotación determinista diaria de 2-3 ciudades y 2-3 oficios de alta demanda (Tampa, Orlando, Austin, Houston, Charlotte, Nashville, Atlanta, etc.).
+1. **Mercados abiertos:** Founder rota ciudades del catálogo disponible y usa los segmentos amplios de `market-universe.json` como prioridades, no como allowlist. No hay ciudades ni países fijos; los nichos personalizados siguen siendo válidos.
 2. **Scoring Multi-Factor Realista (0-100):** Evalúa web real (+22), email validado (+28), teléfono (+12), handle corporativo (+8), ciudad prioritaria (+10), trade prioritario (+8), datos Overpass (+6), contacto dual (+6) y penalización por supresión (-100).
 3. **Copy con Psicología de Trades (A/B Testing):** 90-110 palabras, 1 frase clara de Bvelt, sin promesas falsas de dinero, footer obligatorio "Reply STOP to opt out" y variantes A/B (`missed_calls` vs `dormant_leads`).
 4. **Bot de Telegram con Botones Interactivos (`InlineKeyboardMarkup`):** Cada prospecto incluye botones `[✅ Mark Sent]`, `[❌ Discard]` y `[🚫 Suppress Domain]`.
@@ -56,12 +56,14 @@ npx wrangler secret put ABSTRACT_API_KEY         # Validación de entregabilidad
 **Variables de Configuración [vars] (No sensibles - en `wrangler.toml` o Dashboard > Variables):**
 ```toml
 [vars]
-FOUNDING_CITIES = "Tampa, FL;Orlando, FL;Austin, TX;Houston, TX;Atlanta, GA;Nashville, TN"
-FOUNDING_TRADES = "landscaping;lawn_care;hvac;plumbing;house_cleaning;pool_cleaning;handyman;roofing;pest_control"
-FOUNDING_COUNTRIES = "US;MX;ES;CO;CA;GB"
-FOUNDING_LANGUAGES = "en;es"
+FOUNDING_CITIES = "City A, Region;City B, Region"
+FOUNDING_TRADES = "trade_one;trade_two"
+FOUNDING_COUNTRIES = "US;CA;GB"
+FOUNDING_LANGUAGES = "en"
 FOUNDING_MIN_SCORE = "50"
 ```
+
+Los valores son ejemplos. `FOUNDING_CITIES` y `FOUNDING_COUNTRIES` son opcionales; si se indican, acotan la búsqueda. `FOUNDING_TRADES` sustituye las prioridades amplias de `market-universe.json`, pero no existe una allowlist de industrias. El catálogo actual de rotación automática cubre US/CA; para otros países configura ciudades explícitas (la geocodificación de esas ciudades usa Nominatim). Los países prioritarios solo elevan el ranking, no excluyen mercados fuera de la lista.
 
 ### 4. Configurar el Webhook de Telegram (Botones Interactivos)
 Para que los botones `[✅ Mark Sent]`, `[❌ Discard]` y `[🚫 Suppress]` funcionen directamente desde Telegram:
@@ -71,8 +73,17 @@ curl -F "url=https://bvelt-radar.TU_SUBDOMINIO.workers.dev/telegram-webhook" \
 ```
 
 ### 5. Desplegar el Worker
+
+En **Cloudflare Workers Builds** configura:
+
+- **Build command:** `npm run build`
+- **Deploy command:** `npm run deploy`
+
+El script de despliegue ejecuta `npx wrangler deploy`. No uses `npm wrangler deploy`.
+
+Para un despliegue manual:
 ```bash
-npx wrangler deploy
+npm run deploy
 ```
 
 ---
@@ -95,7 +106,7 @@ The Worker can optionally enrich prospects with public evidence without changing
 - **Internet Archive freshness**: a weak signal based on the latest available snapshot. It is never treated as proof that a live site is stale.
 - **Municipal permits**: verified Austin and Orlando public datasets plus configurable `PERMIT_SOURCES_JSON`. The Worker does not guess dataset IDs for other cities.
 - **Census ZIP housing age**: optional and only activated with `CENSUS_ENABLED=1`, `CENSUS_API_KEY`, and a discovered ZIP code. Census API queries require an API key as of September 2026.
-- **Tenant isolation**: Tenant mode requires an explicit tenant configuration and no longer invents fallback cities. Its target niches come from `subniches_json` or the configured trade-to-B2B target map.
+- **Tenant isolation**: Tenant mode requires an explicit tenant configuration and never invents cities. Buyer segments are derived from AI ICP expansion first, then explicit `subniches_json` / `allowed_markets_json` / `icp_keywords_json`, with the trade-to-B2B map as a fallback. An unmapped industry remains eligible; discovery waits only when no buyer ICP can be inferred.
 
 ### Intentionally not implemented
 
@@ -139,12 +150,14 @@ After a prospect is enriched and scored, Radar now maintains:
 
 ### Targeting safety
 
-Founder targets can be persisted in D1 through `/api/config`; these targets take precedence over legacy `FOUNDING_CITIES` / `FOUNDING_TRADES`. No production fallback invents a city or trade when configuration is empty. The legacy environment variables remain supported for compatibility.
+Founder targets can be persisted in D1 through `/api/config`; these targets take precedence over legacy `FOUNDING_CITIES` / `FOUNDING_TRADES`. With no explicit city list, Founder rotates through the available gazetteer; with no custom niche list, it seeds broad Bvelt-compatible segments from `market-universe.json`. No fixed city or country is hardcoded, and custom industries are not rejected by a closed allowlist.
 
-### Database upgrade
+### Database migrations
 
-Apply migrations **0001 through 0022** to the existing `bvelt-radar-db`. Never rename or modify historical migrations that have already been applied. Migration 0022 is additive.
+Migration sources currently cover **0001–0029**, including the additive learning and Tenant observation tables. Never rename or modify historical migration files.
+
+The connected production D1 database already contains the newer tables and columns, but its `d1_migrations` history table is absent. **Do not run `wrangler d1 migrations apply` until the existing schema is reconciled with a verified migration baseline**; older files contain non-idempotent `ALTER TABLE` statements.
 
 ### Validation
 
-The Worker and React source pass TypeScript transpilation checks. A complete dependency-backed `npm run build` must still be run in an environment where the package dependencies can be installed; this environment previously could not complete `npm install` because of network/time limits.
+GitHub Actions runs `npm ci`, `npm run build`, `npm run test:radar` and the Sidecar test suite. Cloudflare Workers Builds uses `npm run build` followed by `npm run deploy`.
