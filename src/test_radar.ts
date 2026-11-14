@@ -284,19 +284,22 @@ tests.push({
   run: () => {
     const unsafe = normalizeFounderOutreachCopy(
       "Free Audit: Stop Losing Calls & Slow Site",
-      "Hi team, we noticed your website is slow. We can stop losing calls with a free technical audit. Reply STOP to opt out.",
-      "Example Plumbing"
+      "Hi team, we noticed your website is slow. We can stop losing calls with a free technical audit and automated SMS. Reply STOP to opt out.",
+      "Example Plumbing",
+      "Rainer, founder of Bvelt\\nStreet address, City, Region, Country\\nThis is a commercial message. Reply unsubscribe to opt out."
     );
     assert(unsafe.sanitized, "Unsupported audit and performance claims must trigger safe copy");
-    assert(!/free|audit|stop losing|slow site/i.test(unsafe.subject + " " + unsafe.body), "Unsafe claims must not reach the provider");
+    assert(!/free|audit|stop losing|slow site|automated sms|website is slow/i.test(unsafe.subject + " " + unsafe.body), "Unsupported claims must not reach the provider");
     assert(unsafe.subject.includes("Example Plumbing"), "Safe subject should remain prospect-specific");
-    assert(unsafe.body.includes("Reply STOP to opt out."), "The legal opt-out footer must be preserved");
+    assert(unsafe.body.includes("Reply unsubscribe to opt out."), "The legal opt-out footer must be preserved");
     const safe = normalizeFounderOutreachCopy(
       "Question about your follow-up process",
-      "Hi team, how do you currently follow up with estimate requests? Reply STOP to opt out.",
-      "Example Plumbing"
+      "Hi team, how do you currently follow up with estimate requests?",
+      "Example Plumbing",
+      "Rainer, founder of Bvelt\\nStreet address, City, Region, Country\\nThis is a commercial message. Reply unsubscribe to opt out."
     );
     assert(!safe.sanitized, "Neutral factual copy should remain unchanged");
+    assert(safe.body.includes("Street address"), "The configured legal footer must be appended when missing");
   }
 });
 
