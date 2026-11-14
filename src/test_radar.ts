@@ -138,8 +138,8 @@ tests.push({
     const first = await recordScopedLearningEvent(mockDb, input);
     const retry = await recordScopedLearningEvent(mockDb, input);
     const conflict = await recordScopedLearningEvent(mockDb, { ...input, valueUsd: 500 });
-    assert(first, "First event must be recorded");
-    assert(retry, "An exact retry must be acknowledged");
+    assert(first === "inserted", "First event must be recorded exactly once");
+    assert(retry === "duplicate", "An exact retry must be acknowledged without a second insert");
     assert(!conflict, "A conflicting reuse of an idempotency key must be rejected");
     assert(aggregateChanges === 5, "City, trade, pair, variant and angle aggregates must increment exactly once");
 
