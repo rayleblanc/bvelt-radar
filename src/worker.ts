@@ -2267,7 +2267,6 @@ export default {
         }
 
         const timestamp = new Date().toISOString();
-        const outcomeChanged = String(prospect.tenant_outcome || "") !== outcome;
         await env.RADAR_DB.prepare(
           "UPDATE prospects SET tenant_outcome = ?, won_value_usd = CASE WHEN ? = 'won' THEN COALESCE(?, won_value_usd) ELSE won_value_usd END, updated_at = ? WHERE id = ? AND mode = 'tenant' AND tenant_id = ?"
         ).bind(outcome, outcome, parsedValue, timestamp, prospect_id, tenant_id).run();
@@ -11445,7 +11444,7 @@ async function getLearningStats(
     const live = await db.prepare(`
       SELECT city, trade,
         SUM(CASE WHEN outcome IN ('won','converted') OR tenant_outcome = 'won' THEN 1 ELSE 0 END) AS wins,
-        SUM(CASE WHEN outcome IN ('sent','positive','won','lost','converted') OR status IN ('sent','delivered','replied','converted','won','lost') OR tenant_outcome IN ('replied','won','lost') THEN 1 ELSE 0 END) AS sent
+        SUM(CASE WHEN outcome IN ('sent','positive','booked','won','lost','converted') OR status IN ('sent','delivered','replied','booked','converted','won','lost') OR tenant_outcome IN ('replied','booked','won','lost') THEN 1 ELSE 0 END) AS sent
       FROM prospects
       WHERE mode = ?
         AND COALESCE(tenant_id, 'founder') = ?
