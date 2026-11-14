@@ -4235,7 +4235,7 @@ async function handleDecision(
         touchCount: manualEligibility.nextTouch,
         includeSiteLink: manualEligibility.nextTouch > 1,
         plainTextOnly: true,
-        founderOutreach: String(prospect.mode || "founder").toLowerCase() !== "tenant",
+        founderOutreach: String(prospect.mode || (prospect.tenant_id ? "tenant" : "founder")).toLowerCase() !== "tenant",
         resendApiKey: env.RESEND_API_KEY,
         brevoApiKey: env.BREVO_API_KEY,
         senderName: env.SENDER_NAME
@@ -9546,7 +9546,7 @@ export function evaluateFounderOutreachEligibility(
 }
 
 export async function getFounderOutreachEligibility(db: D1Database, prospect: any, now = Date.now()) {
-  if (String(prospect.mode || "").toLowerCase() === "tenant") {
+  if (String(prospect.mode || "").toLowerCase() === "tenant" || (prospect.tenant_id && prospect.tenant_id !== "founder")) {
     return { allowed: true, reason: "tenant_policy", nextTouch: getOutreachTouch(prospect) };
   }
   const founderScope = prospect.tenant_id || "founder";
@@ -11468,7 +11468,7 @@ export async function sendOrQueueOutreach(prospect: any, runId: string, env: Env
       touchCount: nextTouch,
       includeSiteLink: nextTouch > 1,
       plainTextOnly: true,
-      founderOutreach: String(prospect.mode || "founder").toLowerCase() !== "tenant",
+      founderOutreach: String(prospect.mode || (prospect.tenant_id ? "tenant" : "founder")).toLowerCase() !== "tenant",
       resendApiKey: env.RESEND_API_KEY,
       brevoApiKey: env.BREVO_API_KEY,
       senderName: env.SENDER_NAME
