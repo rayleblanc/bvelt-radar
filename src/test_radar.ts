@@ -2,7 +2,7 @@ declare const process: any;
 
 import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, resolveTenantBuyerSegments, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey, notifyOnce, isVerifiedDeliverableEmail, evaluateFounderOutreachEligibility } from './worker';
 import { DEFAULT_FOUNDER_MISSION, MissionConfig } from './worker';
-import { buildResendIdempotencyKey, buildBrandedEmailHtml, resolveBveltSender, inspectOutboundEmailAuth } from './emailDispatcher';
+import { buildResendIdempotencyKey, buildBrandedEmailHtml, resolveBveltSender, inspectOutboundEmailAuth, normalizeOutreachBody } from './emailDispatcher';
 import { fetchPermitContractors } from './permitSources';
 import { pickTargets } from './geoFrontier';
 import { isOffIcpName, sanitizeEmail } from './emailSanitizer';
@@ -290,6 +290,7 @@ tests.push({
     assert(!resolveBveltSender("Bvelt <onboarding@resend.dev>"), "Resend shared onboarding sender must be rejected");
     assert(!resolveBveltSender("Bvelt <founder@gmail.com>"), "Unaligned external sender must be rejected");
     assert(!resolveBveltSender(""), "Missing sender must fail closed");
+    assert(!normalizeOutreachBody("No action required.", false).includes("bvelt.app"), "Delivery tests must not append promotional links");
   }
 });
 
