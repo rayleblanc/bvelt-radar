@@ -6871,10 +6871,11 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
     const timestamp = new Date().toISOString();
     let slotReserved = false;
     let sendsTodayCount = 1;
+    let effectiveDailyLimit = autoMaxPerDay;
 
     try {
       const governorStatus = await checkSenderGovernor(env);
-      const effectiveDailyLimit = Math.min(autoMaxPerDay, Math.max(0, Number(governorStatus.daily_limit ?? autoMaxPerDay)));
+      effectiveDailyLimit = Math.min(autoMaxPerDay, Math.max(0, Number(governorStatus.daily_limit ?? autoMaxPerDay)));
       const updateRes = governorStatus.allowed && effectiveDailyLimit > 0
         ? await env.RADAR_DB.prepare(`
             UPDATE sender_governor_state
@@ -12092,7 +12093,7 @@ export interface TradeInferenceResult {
   detectedClue?: string;
 }
 
-export export function evaluateResearchEvidenceQuality(businessName: string, facts: any): { allowed: boolean; reason?: string } {
+export function evaluateResearchEvidenceQuality(businessName: string, facts: any): { allowed: boolean; reason?: string } {
   const name = String(businessName || "").trim();
   if (/\b(?:variation|variant)\s*#?\s*\d+\b/i.test(name)) return { allowed: false, reason: "synthetic_variation_name" };
   const title = String(facts && (facts.page_title || facts.title) || "");
