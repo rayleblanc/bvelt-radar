@@ -190,16 +190,20 @@ const NON_BUSINESS_ENTITY_REGEX =
   /\b(church|iglesia|ministry|ministerio|chapel|temple|parish|cathedral)\b/i;
 
 /**
- * Founder-only exclusions are driven by market-universe.json.
- * Tenant mode bypasses Founder exclusions because the tenant's buyer ICP is authoritative.
- * Broad categories such as restaurants, healthcare, education, automotive and retail remain eligible.
+ * Non-business institutions (churches, ministries, etc.) are always excluded.
+ * Founder consumer-category exclusions come from market-universe.json.
+ * Tenant buyer mode bypasses those Founder category exclusions because the
+ * tenant ICP is authoritative for commercial targets (gyms, grocery, etc.).
  */
 export function isOffIcpName(name: string | null | undefined, allowTenantBuyer: boolean = false): boolean {
   if (!name || typeof name !== "string") return true;
   const clean = name.trim().toLowerCase();
   if (!clean) return true;
 
-  if (!allowTenantBuyer && NON_BUSINESS_ENTITY_REGEX.test(clean)) return true;
+  // Churches and other non-business institutions stay excluded in every mode.
+  if (NON_BUSINESS_ENTITY_REGEX.test(clean)) return true;
+
+  // Tenant ICP may intentionally target categories Founder excludes.
   if (allowTenantBuyer) return false;
 
   return FOUNDER_EXCLUSION_RULES.some((rule) =>
