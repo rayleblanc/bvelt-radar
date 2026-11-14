@@ -11,6 +11,7 @@ export interface ScopedLearningEventInput {
   angle?: string | null;
   valueUsd?: number | null;
   occurredAt?: string;
+  idempotencyKey?: string;
   metadata?: Record<string, unknown>;
 }
 
@@ -74,30 +75,10 @@ export async function recordScopedLearningEvent(
   const eventType = String(input.eventType).trim().toLowerCase();
   const delta = learningCounterDelta(eventType);
   const eventId = crypto.randomUUID();
-  const idempotencyKey = `${input.mode}:${tenantId}:${input.prospectId}:${eventType}:${occurredAt}`;
+  const idempotencyKey = input.idempotencyKey
+    ? `${input.mode}:${tenantId}:${input.idempotencyKey}`
+    : `${input.mode}:${tenantId}:${input.prospectId}:${eventType}:${occurredAt}`;
   const metadataJson = JSON.stringify(input.metadata || {});
-
-  const inserted = await db.prepare(`
-    INSERT OR IGNORE INTO learning_events
-      (id, prospect_id, mode, tenant_id, event_type, city, trade, variant_id, angle, value_usd, metadata_json, idempotency_key, occurred_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).bind(
-    eventId,
-    input.prospectId,
-    input.mode,
-    tenantId,
-    eventType,
-    input.city || null,
-    input.trade || null,
-    input.variantId || null,
-    input.angle || null,
-    typeof input.valueUsd === "number" && Number.isFinite(input.valueUsd) ? input.valueUsd : null,
-    metadataJson,
-    idempotencyKey,
-    occurredAt
-  ).run();
-
-  if (inserted?.meta?.changes === 0) return false;
 
   const keys = new Set<string>();
   if (input.city) keys.add(`city:${input.city}`);
@@ -106,13 +87,39 @@ export async function recordScopedLearningEvent(
   if (input.variantId) keys.add(`variant:${input.variantId}`);
   if (input.angle) keys.add(`angle:${input.angle}`);
 
+  const statements = [
+    db.prepare(`
+      INSERT OR IGNORE INTO learning_events
+        (id, prospect_id, mode, tenant_id, event_type, city, trade, variant_id, angle, value_usd, metadata_json, idempotency_key, occurred_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(
+      eventId,
+      input.prospectId,
+      input.mode,
+      tenantId,
+      eventType,
+      input.city || null,
+      input.trade || null,
+      input.variantId || null,
+      input.angle || null,
+      typeof input.valueUsd === "number" && Number.isFinite(input.valueUsd) ? input.valueUsd : null,
+      metadataJson,
+      idempotencyKey,
+      occurredAt
+    )
+  ];
+
+  // Event and derived counters commit together. The generated event ID makes
+  // every aggregate update conditional on this exact insert succeeding.
   for (const key of keys) {
-    await db.prepare(`
+    statements.push(db.prepare(`
       INSERT INTO learning_stats_scoped (
         mode, tenant_id, key, sent_count, delivered_count, replied_count,
         qualified_count, booked_count, won_count, lost_count, contacted_count,
         unknown_count, total_events, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      )
+      SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+      WHERE EXISTS (SELECT 1 FROM learning_events WHERE id = ?)
       ON CONFLICT(mode, tenant_id, key) DO UPDATE SET
         sent_count = sent_count + excluded.sent_count,
         delivered_count = delivered_count + excluded.delivered_count,
@@ -130,10 +137,12 @@ export async function recordScopedLearningEvent(
       delta.sent_count, delta.delivered_count, delta.replied_count,
       delta.qualified_count, delta.booked_count, delta.won_count,
       delta.lost_count, delta.contacted_count, delta.unknown_count,
-      delta.event_count, occurredAt
-    ).run();
+      delta.event_count, occurredAt, eventId
+    ));
   }
 
+  const results = await db.batch(statements);
+  return Number(results?.[0]?.meta?.changes || 0) > 0;
   return true;
 }
 
