@@ -44,3 +44,8 @@ Read `Bvelt_Intelligence_Documento_Maestro_v2.1.md` when it is present in the cu
 - Idempotency conflicts return 409. Unconfirmed persistence returns a retryable failure, never success.
 - Keep `GITHUB_ACTIONS_TOKEN` and all service credentials as encrypted Worker secrets, never plaintext variables.
 - Keep the Founder and Tenant datasets separate in storage, routes, aggregation, and reporting.
+
+27. Founder email dispatch must fail closed unless the sender has a complete physical postal address, the recipient has positive provider-backed verification, and suppression/cooldown/idempotency checks pass. Manual approval never bypasses these controls.
+28. Founder first-touch email is plain text with no URL; follow-ups are capped at three total touches, at least five days apart, with at most one product link. Never invent site-speed metrics, missed-call facts, conversion percentages, free audits, or response-time guarantees.
+29. Resend "delivered" means the receiving server accepted the message, not that it reached the inbox. Verify Gmail folder placement when the connected account exposes it; otherwise state the limitation.
+30. Mirror provider bounce suppressions into Radar D1 and never contact a suppressed address again. Discovery may continue while email dispatch is held for compliance.

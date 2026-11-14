@@ -94,8 +94,13 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch --orphan "deploy-artifacts/${GITHUB_SHA}"
-          git rm -rf . >/dev/null 2>&1 || true
+          git clean -fdx
           cp /tmp/radar-deploy/* .
-          git add .
+          git add manifest.json workerEntry.js.chunk-*.txt
+          if compgen -G "workerEntry.js.map.chunk-*.txt" > /dev/null; then
+            git add workerEntry.js.map.chunk-*.txt
+          fi
+          echo "Staged deployment artifact files:"
+          git diff --cached --stat
           git commit -m "Build Radar deployment bundle ${GITHUB_SHA}"
           git push origin "HEAD:refs/heads/deploy-artifacts/${GITHUB_SHA}"
