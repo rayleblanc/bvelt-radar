@@ -8395,7 +8395,6 @@ export function mapTradeToBizDataCategory(trade: string): string | null {
     "locksmith": "locksmith",
     "painter": "painter",
     "painting": "painter",
-    "moving": "moving_company",
     "handyman": "general_contractor",
     "real_estate": "real_estate_agency",
     "auto_repair": "auto_repair",
