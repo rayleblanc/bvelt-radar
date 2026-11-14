@@ -1503,7 +1503,7 @@ tests.push({
                 } else if (sqlLower.includes("update sidecar_dispatches set status = 'completed'")) {
                   const d = dispatchesStore.find(x => x.run_id === args[2] && x.tenant_id === args[3]);
                   if (d) { d.status = "completed"; d.completed_at = args[0]; d.updated_at = args[1]; }
-                } else if (sqlLower.includes("insert into source_evidence")) {
+                } else if (sqlLower.includes("insert into source_evidence") || sqlLower.includes("insert or ignore into source_evidence")) {
                   evidenceStore.push({
                     id: args[0],
                     run_id: args[1],
@@ -1924,10 +1924,11 @@ tests.push({
     const crossOutcomeReq = new Request("https://radar.bvelt.app/api/prospects/outcome", {
       method: "POST",
       headers: {
-        "Authorization": "Bearer secret_founder_svc_key",
+        "Authorization": "Bearer secret_radar_svc_key",
+        "X-Tenant-Id": "tenant_gamma",
         "Content-Type": "application/json"
       },
-      body: JSON.stringify({ prospect_id: "p_target_01", tenant_id: "tenant_gamma", outcome: "won" })
+      body: JSON.stringify({ prospect_id: "p_target_01", tenant_id: "tenant_alpha", outcome: "won" })
     });
     const resCrossOutcome = await worker.fetch(crossOutcomeReq, mockEnv, {} as any);
     assert(resCrossOutcome.status === 403, "Outcome submission with mismatched prospect tenant must return 403");
@@ -2111,7 +2112,7 @@ tests.push({
           },
           all: async () => ({ results: [] }),
           run: async () => {
-            if (sql.includes("INSERT INTO source_evidence")) {
+            if (sql.includes("INSERT INTO source_evidence") || sql.includes("INSERT OR IGNORE INTO source_evidence")) {
               evidenceStore.push({ id: args[0], run_id: args[1], prospect_id: args[4], content_hash: args[9] });
             }
             if (sql.includes("UPDATE sidecar_dispatches")) {
@@ -2301,7 +2302,7 @@ tests.push({
       env,
       {} as any
     );
-    assert(crossTenant.status === 403, "Tenant service credentials must not read another tenant's ROI");
+    assert(crossTenant.status === 403, `Tenant service credentials must not read another tenant's ROI (received ${crossTenant.status})`);
 
     const scoped = await worker.fetch(
       new Request("https://radar.test/api/tenants/roi?tenant_id=tenant_alpha", {
