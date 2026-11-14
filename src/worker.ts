@@ -4235,16 +4235,17 @@ async function handleDecision(
         touchCount: manualEligibility.nextTouch,
         includeSiteLink: manualEligibility.nextTouch > 1,
         plainTextOnly: true,
+        founderOutreach: String(prospect.mode || "founder").toLowerCase() !== "tenant",
         resendApiKey: env.RESEND_API_KEY,
         brevoApiKey: env.BREVO_API_KEY,
         senderName: env.SENDER_NAME
       });
 
-      if (dispatchOutcome.status === "failed") {
+      if (dispatchOutcome.status !== "dispatched") {
         try {
           await db.prepare(
             "UPDATE prospects SET dispatch_provider = ?, dispatch_status = 'failed', dispatch_error = ?, updated_at = ? WHERE id = ?"
-          ).bind(dispatchOutcome.provider, dispatchOutcome.error || null, timestamp, id).run();
+          ).bind(dispatchOutcome.provider, dispatchOutcome.error || dispatchOutcome.details || 'provider_not_dispatched', timestamp, id).run();
         } catch (e) {}
 
         try {
@@ -4260,7 +4261,7 @@ async function handleDecision(
             dispatchOutcome.provider,
             'failed',
             dispatchOutcome.messageId || null,
-            dispatchOutcome.error || null,
+            dispatchOutcome.error || dispatchOutcome.details || 'provider_not_dispatched',
             (prospect.draft_body || '').substring(0, 150),
             timestamp
           ).run();
@@ -4276,7 +4277,7 @@ async function handleDecision(
           dispatch: {
             status: "failed",
             provider: dispatchOutcome.provider,
-            error: dispatchOutcome.error
+            error: dispatchOutcome.error || dispatchOutcome.details || 'provider_not_dispatched'
           }
         }, { status: 502, headers });
       }
@@ -9548,10 +9549,12 @@ export async function getFounderOutreachEligibility(db: D1Database, prospect: an
   if (String(prospect.mode || "").toLowerCase() === "tenant") {
     return { allowed: true, reason: "tenant_policy", nextTouch: getOutreachTouch(prospect) };
   }
+  const founderScope = prospect.tenant_id || "founder";
+  const recipientEmail = String(prospect.email || "").trim().toLowerCase();
   const [history, idempotency, pending] = await Promise.all([
-    db.prepare("SELECT COUNT(DISTINCT message_id) AS touch_count, MAX(created_at) AS last_send_at FROM email_dispatch_logs WHERE prospect_id = ? AND message_id IS NOT NULL").bind(prospect.id).first(),
-    db.prepare("SELECT COUNT(DISTINCT idempotency_key) AS touch_count, MAX(updated_at) AS last_send_at FROM outreach_idempotency WHERE prospect_id = ? AND status IN ('queued','sent','scheduled','provider_unknown')").bind(prospect.id).first(),
-    db.prepare("SELECT status FROM outreach_idempotency WHERE prospect_id = ? AND status IN ('reserved','queued','scheduled','provider_unknown') ORDER BY updated_at DESC LIMIT 1").bind(prospect.id).first()
+    db.prepare("SELECT COUNT(DISTINCT message_id) AS touch_count, MAX(created_at) AS last_send_at FROM email_dispatch_logs WHERE COALESCE(NULLIF(tenant_id,''),'founder') = ? AND (prospect_id = ? OR lower(recipient_email) = ?) AND message_id IS NOT NULL").bind(founderScope, prospect.id, recipientEmail).first(),
+    db.prepare("SELECT COUNT(DISTINCT idempotency_key) AS touch_count, MAX(updated_at) AS last_send_at FROM outreach_idempotency WHERE COALESCE(NULLIF(tenant_id,''),'founder') = ? AND (prospect_id = ? OR lower(email) = ?) AND status IN ('reserved','queued','sent','scheduled','provider_unknown')").bind(founderScope, prospect.id, recipientEmail).first(),
+    db.prepare("SELECT status FROM outreach_idempotency WHERE COALESCE(NULLIF(tenant_id,''),'founder') = ? AND (prospect_id = ? OR lower(email) = ?) AND status IN ('reserved','queued','scheduled','provider_unknown') ORDER BY updated_at DESC LIMIT 1").bind(founderScope, prospect.id, recipientEmail).first()
   ]) as any[];
   if (pending) return { allowed: false, reason: "outreach_" + String(pending.status || "pending") + "_pending", nextTouch: 0 };
   const state = String(prospect.status || "").toLowerCase();
@@ -11408,36 +11411,50 @@ export async function sendOrQueueOutreach(prospect: any, runId: string, env: Env
   const sequenceId = hasHunter ? env.HUNTER_SEQUENCE_ID!.trim() : (hasResend ? 'resend_live' : 'brevo_live');
   const idempotencyKey = buildOutreachIdempotencyKey(tenantId, prospect.id, sequenceId, nextTouch);
 
-  // 10. Idempotency Check
+  // 10. Idempotency Check — database uncertainty must fail closed.
+  let existingRecord: any = null;
   try {
-    const existingRecord = await env.RADAR_DB.prepare(
+    existingRecord = await env.RADAR_DB.prepare(
       "SELECT * FROM outreach_idempotency WHERE idempotency_key = ?"
     ).bind(idempotencyKey).first() as any;
+  } catch (e) {
+    await releaseBudget(env.RADAR_DB, tenantId, 'outreach_units', 1);
+    console.warn("[Idempotency] Unable to read reservation; provider send blocked.");
+    return { success: false, reason: "idempotency_read_failed" };
+  }
 
-    if (existingRecord) {
-      if (['scheduled', 'queued', 'sent'].includes(existingRecord.status)) {
-        console.log(`[Idempotency] Prospect ${prospect.id} already processed for sequence ${sequenceId}. Skipping resend.`);
-        await releaseBudget(env.RADAR_DB, tenantId, 'outreach_units', 1);
-        return { success: true, reason: "Already accepted by provider (idempotent skip)" };
-      }
-      if (existingRecord.status === 'provider_unknown') {
-        console.warn(`[Idempotency] Prospect ${prospect.id} in provider_unknown state. Reconciling before resend.`);
-        await releaseBudget(env.RADAR_DB, tenantId, 'outreach_units', 1);
-        await env.RADAR_DB.prepare("UPDATE prospects SET status = 'provider_unknown', outcome = 'reconciliation_required', updated_at = ? WHERE id = ?")
-          .bind(new Date().toISOString(), prospect.id).run();
-        return { success: false, reason: "provider_unknown: Reconciliation required before resend" };
-      }
+  if (existingRecord) {
+    if (['reserved', 'scheduled', 'queued', 'sent'].includes(String(existingRecord.status || '').toLowerCase())) {
+      await releaseBudget(env.RADAR_DB, tenantId, 'outreach_units', 1);
+      return { success: false, reason: "idempotency_touch_already_reserved_or_sent" };
     }
-  } catch (e) {}
+    if (String(existingRecord.status || '').toLowerCase() === 'provider_unknown') {
+      await releaseBudget(env.RADAR_DB, tenantId, 'outreach_units', 1);
+      await env.RADAR_DB.prepare("UPDATE prospects SET status = 'provider_unknown', outcome = 'reconciliation_required', updated_at = ? WHERE id = ?")
+        .bind(new Date().toISOString(), prospect.id).run();
+      return { success: false, reason: "provider_unknown: Reconciliation required before resend" };
+    }
+  }
 
-  // Reserve idempotency entry
+  // Atomic per-recipient/per-touch reservation. Concurrent jobs cannot both send.
   const timestamp = new Date().toISOString();
   try {
-    await env.RADAR_DB.prepare(`
-      INSERT OR REPLACE INTO outreach_idempotency (idempotency_key, prospect_id, tenant_id, email, status, created_at, updated_at)
+    const reservation = await env.RADAR_DB.prepare(`
+      INSERT INTO outreach_idempotency (idempotency_key, prospect_id, tenant_id, email, status, created_at, updated_at)
       VALUES (?, ?, ?, ?, 'reserved', ?, ?)
-    `).bind(idempotencyKey, prospect.id, tenantId, prospect.email.toLowerCase().trim(), timestamp, timestamp).run();
-  } catch (e) {}
+      ON CONFLICT(idempotency_key) DO UPDATE SET
+        status = 'reserved', email = excluded.email, updated_at = excluded.updated_at
+      WHERE outreach_idempotency.status = 'failed'
+    `).bind(idempotencyKey, prospect.id, tenantId, prospect.email.toLowerCase().trim(), timestamp, timestamp).run() as any;
+    if (!(Number(reservation?.meta?.changes || 0) > 0)) {
+      await releaseBudget(env.RADAR_DB, tenantId, 'outreach_units', 1);
+      return { success: false, reason: "idempotency_reservation_conflict" };
+    }
+  } catch (e) {
+    await releaseBudget(env.RADAR_DB, tenantId, 'outreach_units', 1);
+    console.warn("[Idempotency] Atomic reservation failed; provider send blocked.");
+    return { success: false, reason: "idempotency_reservation_failed" };
+  }
 
   // 11. Provider Action: Resend / Brevo Direct Outbound Flow
   if (hasResend || hasBrevo) {
@@ -11451,6 +11468,7 @@ export async function sendOrQueueOutreach(prospect: any, runId: string, env: Env
       touchCount: nextTouch,
       includeSiteLink: nextTouch > 1,
       plainTextOnly: true,
+      founderOutreach: String(prospect.mode || "founder").toLowerCase() !== "tenant",
       resendApiKey: env.RESEND_API_KEY,
       brevoApiKey: env.BREVO_API_KEY,
       senderName: env.SENDER_NAME
@@ -11477,12 +11495,39 @@ export async function sendOrQueueOutreach(prospect: any, runId: string, env: Env
         WHERE idempotency_key = ?
       `).bind(dispatch.messageId, timestamp, idempotencyKey).run();
 
+      // Keep the provider message in the audit trail so future eligibility checks
+      // can count every real Founder touch even when signals_json is stale.
+      try {
+        await env.RADAR_DB.prepare(`
+          INSERT INTO email_dispatch_logs
+            (id, prospect_id, tenant_id, recipient_email, subject, provider, status, message_id, error_message, payload_preview, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, 'dispatched', ?, NULL, ?, ?)
+        `).bind(
+          `disp_${crypto.randomUUID()}`,
+          prospect.id,
+          tenantId,
+          prospect.email.toLowerCase().trim(),
+          String(prospect.draft_subject || 'Bvelt outreach').slice(0, 240),
+          dispatch.provider,
+          dispatch.messageId,
+          String(prospect.draft_body || '').slice(0, 150),
+          timestamp
+        ).run();
+      } catch (logError) {
+        // The successful idempotency row remains the authoritative fallback.
+        console.warn("[Email Dispatch Log] Persist failed; idempotency record retained.");
+      }
+
       return { success: true, reason: `Dispatched via ${dispatch.provider}` };
     } else {
       await releaseBudget(env.RADAR_DB, tenantId, 'outreach_units', 1);
-      await env.RADAR_DB.prepare("UPDATE prospects SET status = 'hold', outcome = ?, updated_at = ? WHERE id = ?")
-        .bind(dispatch.error || 'dispatch_failed', timestamp, prospect.id).run();
-      return { success: false, reason: dispatch.error || 'dispatch_failed' };
+      const ambiguous = /network|fetch|timeout|timed out|abort|socket|connection|reset|econn/i.test(String(dispatch.error || ''));
+      const failureState = ambiguous ? 'provider_unknown' : 'failed';
+      await env.RADAR_DB.prepare("UPDATE outreach_idempotency SET status = ?, updated_at = ? WHERE idempotency_key = ?")
+        .bind(failureState, timestamp, idempotencyKey).run();
+      await env.RADAR_DB.prepare("UPDATE prospects SET status = ?, outcome = ?, updated_at = ? WHERE id = ?")
+        .bind(ambiguous ? 'provider_unknown' : 'hold', ambiguous ? 'provider_reconciliation_required' : (dispatch.error || 'dispatch_failed'), timestamp, prospect.id).run();
+      return { success: false, reason: ambiguous ? "provider_unknown: reconciliation required" : (dispatch.error || 'dispatch_failed') };
     }
   }
 
