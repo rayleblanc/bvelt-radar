@@ -12,7 +12,7 @@
  */
 
 import { getAlerts, tradeForEvent, eventAppliesToTrade, WeatherAlert } from './weatherSignals';
-import { dispatchEmail, normalizeOutreachBody, BVELT_SITE, EmailDispatchResult } from './emailDispatcher';
+import { dispatchEmail, normalizeOutreachBody, BVELT_SITE, EmailDispatchResult, inspectOutboundEmailAuth } from './emailDispatcher';
 import { auditDomainSecurityAndMx, auditWebsitePerformance, auditCityWeatherEmergency } from './openAudits';
 import { pickTargets, findPlace, findNearestPlace, formatPlaceLabel, markSearched, placeKey, radiusKm, haversineKm } from './geoFrontier';
 import { sanitizeEmail, sanitizeProspectEmail, isOffIcpName, hasMxRecords } from './emailSanitizer';
@@ -65,7 +65,8 @@ export type RadarJobType =
   | 'score' 
   | 'approve' 
   | 'outreach' 
-  | 'reply_event';
+  | 'reply_event'
+  | 'technical_audit';
 
 export interface RadarJobMessage {
   run_id: string;
@@ -783,7 +784,7 @@ export default {
           let webhookInfo: any = null;
           try {
             const infoRes = await fetch(`https://api.telegram.org/bot${botToken}/getWebhookInfo`, {
-              signal: AbortSignal.timeout(4000)
+              signal: AbortSignal.timeout(15000)
             });
             webhookInfo = await infoRes.json().catch(() => null);
           } catch (e) {}
@@ -921,7 +922,7 @@ export default {
             // First verify bot token with getMe
             try {
               const meRes = await fetch(`https://api.telegram.org/bot${botToken}/getMe`, {
-                signal: AbortSignal.timeout(4000)
+                signal: AbortSignal.timeout(15000)
               });
               botSelfTest = await meRes.json().catch(() => null);
             } catch (e: any) {
@@ -952,7 +953,7 @@ export default {
 
             try {
               const infoRes = await fetch(`https://api.telegram.org/bot${botToken}/getWebhookInfo`, {
-                signal: AbortSignal.timeout(4000)
+                signal: AbortSignal.timeout(15000)
               });
               webhookInfo = await infoRes.json().catch(() => null);
             } catch (e: any) {
@@ -1008,6 +1009,8 @@ export default {
           recipientName: "Bvelt Founder Test",
           subject: "Bvelt email delivery check",
           body: `Hello,\n\nYou requested an email delivery check from Bvelt Radar. This message confirms that the configured sender can submit email to this mailbox.\n\nNo action is required.\n\nSent at: ${new Date().toISOString()}`,
+          includeSiteLink: false,
+          plainTextOnly: true,
           from: env.OUTBOUND_EMAIL_FROM,
           resendApiKey: env.RESEND_API_KEY,
           brevoApiKey: env.BREVO_API_KEY,
@@ -3798,7 +3801,7 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
             text: `👋 <b>¡Hola desde Bvelt Radar!</b>\n\nTu <b>Telegram Chat ID</b> es:\n<code>${chatId}</code>\n\nPara activar el bot y recibir alertas, agrega esta variable en tus Secretos de Cloudflare:\n<code>TELEGRAM_CHAT_ID = ${chatId}</code>`,
             parse_mode: "HTML"
           }),
-          signal: AbortSignal.timeout(4000)
+          signal: AbortSignal.timeout(15000)
         }).catch(e => console.warn("Error sending setup message:", e));
       }
       return Response.json({ ok: true, notice: "TELEGRAM_CHAT_ID not configured" }, { headers });
@@ -3816,7 +3819,7 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
             text: `⚠️ <b>Chat ID no autorizado</b>\n\nTu Telegram Chat ID actual es: <code>${chatId}</code>\nPero en Cloudflare está configurado: <code>${configuredChatId ? configuredChatId.substring(0, 4) + '...' : 'Ninguno'}</code>\n\nSi este es tu chat personal, actualiza en Cloudflare Dashboard:\n<code>TELEGRAM_CHAT_ID = ${chatId}</code>`,
             parse_mode: "HTML"
           }),
-          signal: AbortSignal.timeout(4000)
+          signal: AbortSignal.timeout(15000)
         }).catch(() => {});
       }
       return Response.json({ ok: true, ignored: "Unauthorized Chat ID" }, { headers });
@@ -3854,7 +3857,7 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
               text: `${actionText} (${prospectId.substring(0, 8)})`,
               show_alert: false,
             }),
-            signal: AbortSignal.timeout(4000)
+            signal: AbortSignal.timeout(15000)
           }).catch(e => console.warn("answerCallbackQuery warning: ", e));
 
           let dispatchInfo = "";
@@ -3875,7 +3878,7 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
               text: `<b>${actionText}</b>: ID <code>${escapeHtml(prospectId)}</code> registrado en D1.${dispatchInfo}`,
               parse_mode: "HTML"
             }),
-            signal: AbortSignal.timeout(4000)
+            signal: AbortSignal.timeout(15000)
           }).catch(e => console.warn("sendMessage confirmation warning: ", e));
         }
       } else {
@@ -3888,7 +3891,7 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ callback_query_id: callbackId, text: "📊 Consultando estado...", show_alert: false }),
-              signal: AbortSignal.timeout(4000)
+              signal: AbortSignal.timeout(15000)
             }).catch(() => {});
 
             const provStatus = env.RESEND_API_KEY ? "✅ Resend (3,000/mes gratis)" : env.BREVO_API_KEY ? "✅ Brevo (300/día gratis)" : "⚠️ Simulado (Falta RESEND_API_KEY)";
@@ -3899,7 +3902,7 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ chat_id: chatId, text: statusMsg, parse_mode: "HTML" }),
-              signal: AbortSignal.timeout(4000)
+              signal: AbortSignal.timeout(15000)
             }).catch(() => {});
 
           } else if (lowerAction === "digest" || lowerAction === "resumen" || lowerAction === "oportunidades") {
@@ -3907,7 +3910,7 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ callback_query_id: callbackId, text: "🔍 Cargando oportunidades...", show_alert: false }),
-              signal: AbortSignal.timeout(4000)
+              signal: AbortSignal.timeout(15000)
             }).catch(() => {});
 
             const topOpps = await env.RADAR_DB.prepare(
@@ -3921,7 +3924,7 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ chat_id: chatId, text: "🔍 No hay prospectos pendientes en cola en este momento.", parse_mode: "HTML" }),
-                signal: AbortSignal.timeout(4000)
+                signal: AbortSignal.timeout(15000)
               }).catch(() => {});
             }
 
@@ -3931,7 +3934,7 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ callback_query_id: callbackId, text: `Acción recibida: ${callbackData}` }),
-              signal: AbortSignal.timeout(4000)
+              signal: AbortSignal.timeout(15000)
             }).catch(() => {});
           }
         }
@@ -3955,6 +3958,8 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
           recipientName: "Bvelt Founder Test",
           subject: "Bvelt email delivery check",
           body: `Hello,\n\nYou requested an email delivery check from Bvelt Radar. Provider: ${env.RESEND_API_KEY ? "Resend" : env.BREVO_API_KEY ? "Brevo" : "simulated"}.\n\nNo action is required.\n\nSent at: ${new Date().toISOString()}`,
+          includeSiteLink: false,
+          plainTextOnly: true,
           from: env.OUTBOUND_EMAIL_FROM,
           resendApiKey: env.RESEND_API_KEY,
           brevoApiKey: env.BREVO_API_KEY,
@@ -3974,9 +3979,23 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ chat_id: chatId, text: replyMsg, parse_mode: "HTML" }),
-          signal: AbortSignal.timeout(4000)
+          signal: AbortSignal.timeout(15000)
         }).catch(() => {});
 
+      } else if (command === "/emailstatus" || command === "emailstatus" || command === "/mailstatus") {
+        const auth = await inspectOutboundEmailAuth(env.OUTBOUND_EMAIL_FROM, env.RESEND_API_KEY);
+        const report = [
+          "<b>📨 Bvelt outbound email authentication</b>",
+          `<b>Sender:</b> <code>${escapeHtml(auth.sender || "invalid")}</code>`,
+          `<b>Resend domain:</b> <code>${escapeHtml(auth.resendDomainStatus)}</code>`,
+          `<b>DKIM:</b> ${auth.dkimPresent ? "present" : "MISSING"}`,
+          `<b>SPF (send subdomain):</b> ${auth.spfPresent ? "present" : "MISSING"}`,
+          `<b>Return-path MX:</b> ${auth.returnPathMxPresent ? "present" : "MISSING"}`,
+          `<b>DMARC:</b> ${auth.dmarcPresent ? escapeHtml(auth.dmarcPolicy) : "MISSING"}`,
+          ...auth.resendRecordStatuses.map(item => `• ${escapeHtml(item)}`),
+          ...auth.errors.map(item => `⚠️ ${escapeHtml(item)}`)
+        ].join("\n");
+        await notifyFounder(env, report);
       } else if (command === "/status" || command === "status" || command === "/estado" || command === "estado") {
         const provStatus = env.RESEND_API_KEY ? "✅ Resend (3,000/mes gratis)" : env.BREVO_API_KEY ? "✅ Brevo (300/día gratis)" : "⚠️ Simulado (Falta RESEND_API_KEY)";
         const webhookStatus = env.TELEGRAM_WEBHOOK_SECRET ? "🔒 Protegido con Secret Token" : "⚡ Activo (validación por Chat ID)";
@@ -3985,7 +4004,7 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ chat_id: chatId, text: statusMsg, parse_mode: "HTML" }),
-          signal: AbortSignal.timeout(4000)
+          signal: AbortSignal.timeout(15000)
         }).catch(() => {});
 
       } else if (command === "/digest" || command === "digest" || command === "/resumen" || command === "resumen") {
@@ -4000,7 +4019,7 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ chat_id: chatId, text: "🔍 No hay prospectos pendientes en cola en este momento.", parse_mode: "HTML" }),
-            signal: AbortSignal.timeout(4000)
+            signal: AbortSignal.timeout(15000)
           }).catch(() => {});
         }
 
@@ -4010,28 +4029,28 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ chat_id: chatId, text: idMsg, parse_mode: "HTML" }),
-          signal: AbortSignal.timeout(4000)
+          signal: AbortSignal.timeout(15000)
         }).catch(() => {});
 
       } else if (command === "/start" || command === "start" || command === "/help" || command === "help" || command === "/ayuda" || command === "ayuda" || command === "hola" || command === "hi" || command === "hey") {
         const provStatus = env.RESEND_API_KEY ? "✅ Resend Activo" : env.BREVO_API_KEY ? "✅ Brevo Activo" : "⚠️ Simulado (Configura RESEND_API_KEY)";
-        const helpMsg = `🤖 <b>Bvelt Radar Founder Bot</b>\n\n¡Bot conectado y listo para interactuar!\n\n<b>Comandos disponibles:</b>\n• /status - Ver cuotas y estado de proveedores\n• /digest - Enviar las 3 mejores oportunidades con botones para aprobar\n• /testmail &lt;correo&gt; - Enviar email de prueba inmediato\n• /id - Ver tu Telegram Chat ID\n• /help - Mostrar este menú\n\n<b>Email Outbound:</b> ${provStatus}`;
+        const helpMsg = `🤖 <b>Bvelt Radar Founder Bot</b>\n\n¡Bot conectado y listo para interactuar!\n\n<b>Comandos disponibles:</b>\n• /status - Ver cuotas y estado de proveedores\n• /digest - Enviar las 3 mejores oportunidades con botones para aprobar\n• /testmail &lt;correo&gt; - Enviar email de prueba inmediato\n• /emailstatus - Comprobar SPF, DKIM, DMARC y Resend\n• /id - Ver tu Telegram Chat ID\n• /help - Mostrar este menú\n\n<b>Email Outbound:</b> ${provStatus}`;
         await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ chat_id: chatId, text: helpMsg, parse_mode: "HTML" }),
-          signal: AbortSignal.timeout(4000)
+          signal: AbortSignal.timeout(15000)
         }).catch(() => {});
 
       } else {
         // Fallback for ANY OTHER free text message so the bot NEVER stays silent
         const snippet = msgText.length > 60 ? msgText.substring(0, 60) + "..." : msgText;
-        const fallbackMsg = `🤖 <b>Bvelt Radar Founder Bot</b>\n\nRecibí tu mensaje: <i>"${escapeHtml(snippet)}"</i>\n\n<b>Comandos disponibles:</b>\n• /status - Ver estado del sistema\n• /digest - Ver oportunidades pendientes de aprobación\n• /testmail &lt;correo&gt; - Probar envío de email\n• /help - Ayuda y comandos\n• /id - Ver tu Telegram Chat ID`;
+        const fallbackMsg = `🤖 <b>Bvelt Radar Founder Bot</b>\n\nRecibí tu mensaje: <i>"${escapeHtml(snippet)}"</i>\n\n<b>Comandos disponibles:</b>\n• /status - Ver estado del sistema\n• /digest - Ver oportunidades pendientes de aprobación\n• /testmail &lt;correo&gt; - Probar envío de email\n• /emailstatus - Diagnóstico de autenticación de correo\n• /help - Ayuda y comandos\n• /id - Ver tu Telegram Chat ID`;
         await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ chat_id: chatId, text: fallbackMsg, parse_mode: "HTML" }),
-          signal: AbortSignal.timeout(4000)
+          signal: AbortSignal.timeout(15000)
         }).catch(() => {});
       }
     }
@@ -4481,6 +4500,9 @@ export async function processQueueJob(job: RadarJobMessage, env: Env): Promise<v
         break;
       case 'enrich':
         await handleEnrichJob(job, env);
+        break;
+      case 'technical_audit':
+        await handleTechnicalAuditJob(job, env);
         break;
       case 'verify':
       case 'score':
@@ -5884,61 +5906,10 @@ async function handleEnrichJob(job: RadarJobMessage, env: Env): Promise<void> {
 
   let emailCandidate = prospect.email || websiteEmail;
   const domain = prospect.website && isRealWebsite(prospect.website) ? getDomain(prospect.website) : null;
-  let hasValidMx = false;
-
-  // Free Technical Audits: DoH (DMARC/SPF/MX), PageSpeed / Mobile Latency, Open-Meteo Weather
-  let dmarcAudit: any = null;
-  let webAudit: any = null;
-  let weatherAudit: any = null;
-
-  if (domain) {
-    try {
-      dmarcAudit = await auditDomainSecurityAndMx(domain);
-      if (dmarcAudit?.hasCustomMx) hasValidMx = true;
-    } catch (e) {}
-  }
-
-  if (prospect.website && isRealWebsite(prospect.website)) {
-    try {
-      webAudit = await auditWebsitePerformance(prospect.website, env.PAGESPEED_API_KEY);
-    } catch (e) {}
-    // Free fallback when PageSpeed key missing or failed (local-outreach style evidence)
-    if (!webAudit) {
-      try {
-        const probe = await probeWebsiteHealth(prospect.website);
-        webAudit = {
-          mobileScore: null,
-          fcpSeconds: probe.isSlow ? 3.5 : null,
-          latencyMs: probe.ms,
-          isSlow: probe.isSlow,
-          parked: probe.parked,
-          reachable: probe.ok,
-        };
-        if (probe.parked || !probe.ok) {
-          // treat as no real website for scoring/templates
-          try {
-            const sig = typeof signals === 'object' && signals ? signals : {};
-            (sig as any).no_own_website = true;
-          } catch {}
-        }
-      } catch (e) {}
-    }
-  }
-
-  if (prospect.city) {
-    try {
-      weatherAudit = await auditCityWeatherEmergency(prospect.city);
-    } catch (e) {}
-  }
-
-  // Step b: DNS MX via Cloudflare DNS-over-HTTPS fallback
-  if (domain && !hasValidMx) {
-    hasValidMx = await checkDomainMxRecords(domain);
-  }
 
   // Step c: Hunter Domain Search BEFORE guessing patterns (bounce killer)
   // Prefer Hunter / scrape over inventing contact@
-  if (domain && hasValidMx && env.HUNTER_API_KEY) {
+  if (domain && env.HUNTER_API_KEY) {
     try {
       const reserved = await reserveBudget(env.RADAR_DB, tenantId, 'hunter_units', 1);
       if (reserved) {
@@ -5955,49 +5926,21 @@ async function handleEnrichJob(job: RadarJobMessage, env: Env): Promise<void> {
   }
 
   // Step d: NEVER invent contact@ (primary bounce driver in Resend metrics).
-  let emailSource: 'scrape' | 'hunter' | 'pattern' | 'existing' | 'none' = 'none';
+  let emailSource: 'scrape' | 'hunter' | 'existing' | 'none' = 'none';
   if (prospect.email && emailCandidate === prospect.email) emailSource = 'existing';
   else if (websiteEmail && emailCandidate === websiteEmail) emailSource = 'scrape';
   else if (emailCandidate) emailSource = 'hunter'; // filled by Hunter step above
-  if (!emailCandidate && domain && hasValidMx) {
-    emailCandidate = `info@${domain}`;
-    emailSource = 'pattern';
-  }
-
-  // Step e: Deliverability gate — Abstract when available; pattern emails MUST validate
+  // Provider-backed verification is mandatory; unknown mailboxes are retained for retry but never marked valid.
   let isEmailValidated = false;
   let emailQuality = 0;
   if (emailCandidate) {
-    if (env.ABSTRACT_API_KEY) {
-      try {
-        const ver = await verifyEmail(emailCandidate, env);
-        emailQuality = Number(ver.quality_score || 0);
-        // Stricter: undeliverable/disposable out; pattern needs quality >= 0.7
-        const minQ = emailSource === 'pattern' ? 0.72 : 0.55;
-        if (!ver.valid || emailQuality < minQ || ver.deliverability === 'UNDELIVERABLE') {
-          emailCandidate = null;
-          isEmailValidated = false;
-        } else {
-          isEmailValidated = true;
-        }
-      } catch (e: any) {
-        // API failure: keep scrape/hunter emails, DROP pattern guesses (bounce risk)
-        if (emailSource === 'pattern') {
-          emailCandidate = null;
-          isEmailValidated = false;
-        } else {
-          isEmailValidated = emailSource === 'hunter' || emailSource === 'scrape' || emailSource === 'existing';
-        }
-      }
+    const verification = await verifyEmail(emailCandidate, env);
+    emailQuality = Number(verification.quality_score || 0);
+    if (verification.valid) {
+      isEmailValidated = true;
     } else {
-      // No Abstract: reject pattern guesses entirely; accept scrape/hunter/existing only
-      if (emailSource === 'pattern') {
-        emailCandidate = null;
-        isEmailValidated = false;
-      } else {
-        isEmailValidated = true;
-        emailQuality = emailSource === 'hunter' ? 0.75 : 0.65;
-      }
+      const temporary = ["UNKNOWN", "UNVERIFIED", "UNVERIFIED_PASSED"].includes(String(verification.deliverability || "").toUpperCase());
+      if (!temporary) emailCandidate = null;
     }
   }
 
@@ -6016,15 +5959,7 @@ async function handleEnrichJob(job: RadarJobMessage, env: Env): Promise<void> {
     email_quality: emailQuality,
     permits_90d: effectivePermits,
     signals,
-    technical_audits: {
-      pagespeed_score: webAudit?.mobileScore || null,
-      fcp_seconds: webAudit?.fcpSeconds || null,
-      latency_ms: webAudit?.latencyMs || null,
-      is_slow_mobile: webAudit?.isSlow || false,
-      has_dmarc: dmarcAudit?.hasDmarc ?? false,
-      has_spf: dmarcAudit?.hasSpf ?? false,
-      weather_alert: weatherAudit?.weatherSignal || null
-    }
+    technical_audits: buildTechnicalAuditSnapshot(null, null, null)
   };
 
   await env.RADAR_DB.prepare(`
@@ -6039,18 +5974,108 @@ async function handleEnrichJob(job: RadarJobMessage, env: Env): Promise<void> {
     prospect_id
   ).run();
 
+  await enqueueJob(env, {
+    run_id: job.run_id,
+    job_id: `technical_${prospect_id}`,
+    type: 'technical_audit',
+    mode: job.mode,
+    tenant_id: job.tenant_id,
+    payload: { prospect_id, overrides, permits_90d: effectivePermits }
+  });
+}
+
+export function buildTechnicalAuditSnapshot(webAudit: any, dmarcAudit: any, weatherAudit: any) {
+  return {
+    pagespeed_score: webAudit?.mobileScore ?? null,
+    fcp_seconds: webAudit?.fcpSeconds ?? null,
+    latency_ms: webAudit?.latencyMs ?? null,
+    is_slow_mobile: webAudit ? Boolean(webAudit.isSlow) : null,
+    has_dmarc: dmarcAudit ? Boolean(dmarcAudit.hasDmarc) : null,
+    has_spf: dmarcAudit ? Boolean(dmarcAudit.hasSpf) : null,
+    weather_alert: weatherAudit?.weatherSignal ?? null
+  };
+}
+
+async function handleTechnicalAuditJob(job: RadarJobMessage, env: Env): Promise<void> {
+  const { prospect_id, overrides, permits_90d } = job.payload;
+  const prospect = await env.RADAR_DB.prepare("SELECT id, website, city FROM prospects WHERE id = ?")
+    .bind(prospect_id).first() as any;
+  if (!prospect) return;
+
+  const website = prospect.website && isRealWebsite(prospect.website) ? prospect.website : null;
+  const domain = website ? getDomain(website) : null;
+  let dmarcAudit: any = null;
+  let webAudit: any = null;
+  let weatherAudit: any = null;
+  let probe: any = null;
+
+  if (domain) {
+    try { dmarcAudit = await auditDomainSecurityAndMx(domain); }
+    catch (error: any) { console.warn("[Technical Audit] DNS audit unavailable:", error?.message || error); }
+  }
+  if (website) {
+    try { webAudit = await auditWebsitePerformance(website, env.PAGESPEED_API_KEY); }
+    catch (error: any) { console.warn("[Technical Audit] PageSpeed unavailable:", error?.message || error); }
+    try { probe = await probeWebsiteHealth(website); }
+    catch (error: any) { console.warn("[Technical Audit] Website probe unavailable:", error?.message || error); }
+    if (!webAudit && probe) {
+      webAudit = {
+        mobileScore: null,
+        fcpSeconds: probe.isSlow ? 3.5 : null,
+        latencyMs: probe.ms,
+        isSlow: probe.isSlow,
+        parked: probe.parked,
+        reachable: probe.ok
+      };
+    }
+  }
+  if (prospect.city) {
+    try { weatherAudit = await auditCityWeatherEmergency(prospect.city); }
+    catch (error: any) { console.warn("[Technical Audit] Weather unavailable:", error?.message || error); }
+  }
+
+  const snapshot = buildTechnicalAuditSnapshot(webAudit, dmarcAudit, weatherAudit);
+  const noOwnWebsite = website ? (probe ? Boolean(probe.parked || !probe.ok) : null) : true;
   try {
-    await env.RADAR_DB.prepare(`
-      UPDATE prospects
-      SET pagespeed_score = ?, dns_has_dmarc = ?, weather_context = ?
-      WHERE id = ?
-    `).bind(
-      webAudit?.mobileScore || null,
-      dmarcAudit ? (dmarcAudit.hasDmarc ? 1 : 0) : null,
-      weatherAudit?.weatherSignal || null,
-      prospect_id
-    ).run();
-  } catch (e) {}
+    if (noOwnWebsite === null) {
+      await env.RADAR_DB.prepare(`
+        UPDATE prospects
+        SET pagespeed_score = COALESCE(?, pagespeed_score),
+            dns_has_dmarc = COALESCE(?, dns_has_dmarc),
+            weather_context = COALESCE(?, weather_context),
+            signals_json = json_set(COALESCE(signals_json, '{}'), '$.technical_audits', json(?)),
+            updated_at = ?
+        WHERE id = ?
+      `).bind(
+        webAudit?.mobileScore ?? null,
+        dmarcAudit ? (dmarcAudit.hasDmarc ? 1 : 0) : null,
+        weatherAudit?.weatherSignal ?? null,
+        JSON.stringify(snapshot),
+        new Date().toISOString(),
+        prospect_id
+      ).run();
+    } else {
+      await env.RADAR_DB.prepare(`
+        UPDATE prospects
+        SET pagespeed_score = COALESCE(?, pagespeed_score),
+            dns_has_dmarc = COALESCE(?, dns_has_dmarc),
+            weather_context = COALESCE(?, weather_context),
+            signals_json = json_set(COALESCE(signals_json, '{}'), '$.technical_audits', json(?), '$.no_own_website', ?),
+            updated_at = ?
+        WHERE id = ?
+      `).bind(
+        webAudit?.mobileScore ?? null,
+        dmarcAudit ? (dmarcAudit.hasDmarc ? 1 : 0) : null,
+        weatherAudit?.weatherSignal ?? null,
+        JSON.stringify(snapshot),
+        noOwnWebsite ? 1 : 0,
+        new Date().toISOString(),
+        prospect_id
+      ).run();
+    }
+  } catch (error: any) {
+    console.warn("[Technical Audit] Persist failed; scoring continues with available evidence:", error?.message || error);
+  }
 
   await enqueueJob(env, {
     run_id: job.run_id,
@@ -6058,7 +6083,7 @@ async function handleEnrichJob(job: RadarJobMessage, env: Env): Promise<void> {
     type: 'score',
     mode: job.mode,
     tenant_id: job.tenant_id,
-    payload: { prospect_id, overrides, permits_90d: effectivePermits }
+    payload: { prospect_id, overrides, permits_90d }
   });
 }
 
@@ -6535,7 +6560,7 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
           `• High-converting contractor profile match\n\n` +
           `🔎 <b>Evidence:</b>\n` +
           (evidenceSummary ? `• ${escapeHtml(evidenceSummary)}\n` : "• Standard verified active presence\n") +
-          `• Smart crawl completed across up to 5 same-domain pages\n\n` +
+          `• Smart crawl completed across up to 3 same-domain pages\n\n` +
           `💡 <b>Recommended Angle:</b>\n` +
           `• ${escapeHtml(bveltAngle.replace(/_/g, " "))}\n\n` +
           `🔗 <b>Personalized Demo Link:</b>\n` +
@@ -7020,7 +7045,7 @@ export async function handleProspectEvent(
               text: `👀 *PROSPECT CLICKED DEMO / LINK!*\n\n*Business:* ${escapeMarkdown(prospect.name)}\n*City:* ${escapeMarkdown(prospect.city)}\n*Trade:* ${escapeMarkdown(prospect.trade)}\n*Email:* ${escapeMarkdown(prospect.email || "N/A")}\n\n🔥 _El contratista hizo click en el enlace / demo de Bvelt._`,
               parse_mode: "Markdown"
             }),
-            signal: AbortSignal.timeout(4000)
+            signal: AbortSignal.timeout(15000)
           });
         } catch (e) {}
       }
@@ -7078,7 +7103,7 @@ export async function handleProspectEvent(
               text: `🔥 *POSITIVE RESPONSE DETECTED!*\n\n*Business:* ${escapeMarkdown(prospect.name)}\n*City:* ${escapeMarkdown(prospect.city)}\n*Trade:* ${escapeMarkdown(prospect.trade)}\n*Email:* ${escapeMarkdown(prospect.email || "N/A")}\n\n*Message:* "${escapeMarkdown(params.content || "Interested")}"\n\n⚠️ _Automation STOPPED. Requires human follow-up._`,
               parse_mode: "Markdown"
             }),
-            signal: AbortSignal.timeout(4000)
+            signal: AbortSignal.timeout(15000)
           });
         } catch (e) {}
       }
@@ -7098,7 +7123,7 @@ export async function handleProspectEvent(
               text: `❓ *PROSPECT QUESTION DETECTED!*\n\n*Business:* ${escapeMarkdown(prospect.name)}\n*City:* ${escapeMarkdown(prospect.city)}\n*Trade:* ${escapeMarkdown(prospect.trade)}\n*Email:* ${escapeMarkdown(prospect.email || "N/A")}\n\n*Question:* "${escapeMarkdown(params.content || "Inquiry")}"\n\n⚠️ _Automation STOPPED. Requires human answer._`,
               parse_mode: "Markdown"
             }),
-            signal: AbortSignal.timeout(4000)
+            signal: AbortSignal.timeout(15000)
           });
         } catch (e) {}
       }
@@ -7135,7 +7160,7 @@ export async function handleProspectEvent(
     SET status = ?,
         outcome = ?,
         response_type = ?,
-        last_reply_content = ?,
+        last_reply_content = COALESCE(?, last_reply_content),
         last_reply_at = COALESCE(?, last_reply_at),
         cooldown_until = ?,
         updated_at = ?
@@ -9480,17 +9505,20 @@ export async function getFounderOutreachEligibility(db: D1Database, prospect: an
   if (String(prospect.mode || "").toLowerCase() === "tenant") {
     return { allowed: true, reason: "tenant_policy", nextTouch: getOutreachTouch(prospect) };
   }
-  const history = await db.prepare(
-    "SELECT COUNT(DISTINCT message_id) AS touch_count, MAX(created_at) AS last_send_at FROM email_dispatch_logs WHERE prospect_id = ? AND message_id IS NOT NULL"
-  ).bind(prospect.id).first() as any;
+  const [history, idempotency] = await Promise.all([
+    db.prepare("SELECT COUNT(DISTINCT message_id) AS touch_count, MAX(created_at) AS last_send_at FROM email_dispatch_logs WHERE prospect_id = ? AND message_id IS NOT NULL").bind(prospect.id).first(),
+    db.prepare("SELECT COUNT(DISTINCT idempotency_key) AS touch_count, MAX(updated_at) AS last_send_at FROM outreach_idempotency WHERE prospect_id = ? AND status IN ('queued','sent','scheduled','provider_unknown')").bind(prospect.id).first()
+  ]) as any[];
   const state = String(prospect.status || "").toLowerCase();
-  const fallbackTouch = prospect.last_contact_at && ["sent", "delivered", "opened", "clicked", "scheduled"].includes(state) ? 1 : 0;
-  const touches = Math.max(Number(history?.touch_count || 0), fallbackTouch);
+  const fallbackTouch = prospect.last_contact_at ? 1 : 0;
+  const touches = Math.max(Number(history?.touch_count || 0), Number(idempotency?.touch_count || 0), fallbackTouch);
+  const sendTimes = [history?.last_send_at, idempotency?.last_send_at].filter(Boolean);
+  const lastSendAt = sendTimes.sort((a, b) => Date.parse(String(b)) - Date.parse(String(a)))[0] || prospect.last_contact_at || null;
   return evaluateFounderOutreachEligibility(
     state,
     prospect.last_reply_content || null,
     touches,
-    history?.last_send_at || null,
+    lastSendAt,
     prospect.last_contact_at || null,
     prospect.cooldown_until || null,
     now
@@ -10699,7 +10727,12 @@ export function formatProspectTelegramMessage(prospect: any, env?: Env): string 
 
   let warning = "";
   if (env && !env.SENDER_POSTAL_ADDRESS) {
-    warning = `⚠ <b>Falta dirección postal: no enviar</b>\n\n`;
+    warning += `⚠ <b>Falta dirección postal: no enviar</b>\n\n`;
+  }
+  let emailVerified = false;
+  try { emailVerified = JSON.parse(prospect.signals_json || "{}").is_email_validated === true; } catch {}
+  if (prospect.email && !emailVerified) {
+    warning += `⚠ <b>Email sin verificación positiva: envío bloqueado</b>\n\n`;
   }
 
   let msg = `<b>📡 Bvelt Radar: Prospecto Calificado</b> ${scoreEmoji}\n\n`;
@@ -10748,7 +10781,7 @@ async function dispatchInteractiveTelegramAlert(
 }
 
 /**
- * Website Scraper for contact info & revenue-leak signals detection (5s timeout, up to 5 same-domain pages in preferred order)
+ * Website Scraper for contact info & revenue-leak signals detection (5s timeout, up to 3 same-domain pages in preferred order)
  */
 async function scrapeWebsiteContact(url: string): Promise<{ 
   email: string | null; 
@@ -10784,7 +10817,7 @@ async function scrapeWebsiteContact(url: string): Promise<{
   const visitedUrls = new Set<string>();
   let pagesFetched = 0;
 
-  while (crawlQueue.length > 0 && pagesFetched < 5) {
+  while (crawlQueue.length > 0 && pagesFetched < 3) {
     // Sort crawl queue by priority
     crawlQueue.sort((a, b) => a.priority - b.priority);
     const nextItem = crawlQueue.shift()!;
@@ -11023,6 +11056,7 @@ export async function verifyEmail(email: string, env: Env): Promise<EmailVerific
   } catch (e) {}
 
   // 4. Abstract API verification using exact variable ABSTRACT_API_KEY
+  let providerFailure = env.ABSTRACT_API_KEY ? "Abstract API verification unavailable" : "ABSTRACT_API_KEY missing";
   if (env.ABSTRACT_API_KEY) {
     try {
       const url = `https://emailvalidation.abstractapi.com/v1/?api_key=${env.ABSTRACT_API_KEY}&email=${encodeURIComponent(normEmail)}`;
@@ -11073,8 +11107,11 @@ export async function verifyEmail(email: string, env: Env): Promise<EmailVerific
 
         return result;
       }
+      providerFailure = `Abstract API HTTP ${res.status}`;
+      console.warn(`[Abstract API Verification Warning] ${providerFailure}`);
     } catch (e: any) {
-      console.warn(`[Abstract API Verification Warning] ${e.message}`);
+      providerFailure = "Abstract API request failed";
+      console.warn("[Abstract API Verification Warning]", e?.message || e);
     }
   }
 
@@ -11086,9 +11123,7 @@ export async function verifyEmail(email: string, env: Env): Promise<EmailVerific
     is_disposable: false,
     is_catchall: false,
     quality_score: 0,
-    reason: env.ABSTRACT_API_KEY
-      ? "Abstract API verification unavailable; outbound send held to protect sender reputation"
-      : "ABSTRACT_API_KEY missing; outbound send held until mailbox verification is available"
+    reason: `${providerFailure}; outbound send held to protect sender reputation`
   };
 }
 

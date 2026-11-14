@@ -1,7 +1,7 @@
 /**
  * Outbound Email Dispatcher for Bvelt Radar
  * Providers: Resend → Brevo → simulated
- * Brand: every real email includes Bvelt icon + CTA https://bvelt.app/
+ * Brand: lightweight text-first email body; no tracking image or injected CTA
  */
 
 import { sanitizeEmail, hasMxRecords } from './emailSanitizer';
@@ -25,6 +25,8 @@ export interface EmailDispatchOptions {
   brevoApiKey?: string;
   senderName?: string;
   logoUrl?: string;
+  includeSiteLink?: boolean;
+  plainTextOnly?: boolean;
 }
 
 export function resolveBveltSender(raw?: string): { email: string; from: string } | null {
@@ -36,6 +38,104 @@ export function resolveBveltSender(raw?: string): { email: string; from: string 
   const parsed = sanitizeEmail(candidate);
   if (!parsed.valid || !parsed.email || parsed.email.split('@')[1] !== 'bvelt.app') return null;
   return { email: parsed.email, from: `${displayName} <${parsed.email}>` };
+}
+
+export interface OutboundEmailAuthDiagnostics {
+  sender: string | null;
+  domain: string | null;
+  resendDomainStatus: string;
+  resendRecordStatuses: string[];
+  dkimPresent: boolean;
+  spfPresent: boolean;
+  dmarcPresent: boolean;
+  dmarcPolicy: string;
+  returnPathMxPresent: boolean;
+  errors: string[];
+}
+
+export async function inspectOutboundEmailAuth(
+  from?: string,
+  resendApiKey?: string,
+  fetcher: typeof fetch = fetch
+): Promise<OutboundEmailAuthDiagnostics> {
+  const sender = resolveBveltSender(from);
+  const base: OutboundEmailAuthDiagnostics = {
+    sender: sender?.email || null,
+    domain: sender?.email.split('@')[1] || null,
+    resendDomainStatus: resendApiKey ? 'unknown' : 'api_key_missing',
+    resendRecordStatuses: [],
+    dkimPresent: false,
+    spfPresent: false,
+    dmarcPresent: false,
+    dmarcPolicy: 'unknown',
+    returnPathMxPresent: false,
+    errors: []
+  };
+  if (!sender) {
+    base.errors.push('OUTBOUND_EMAIL_FROM is missing or is not an @bvelt.app sender.');
+    return base;
+  }
+
+  const domain = base.domain!;
+  const lookup = async (name: string, type: 'TXT' | 'MX'): Promise<any[]> => {
+    try {
+      const url = `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(name)}&type=${type}`;
+      const response = await fetcher(url, {
+        headers: { Accept: 'application/dns-json' },
+        signal: AbortSignal.timeout(5000)
+      });
+      if (!response.ok) return [];
+      const data: any = await response.json();
+      return Array.isArray(data?.Answer) ? data.Answer : [];
+    } catch {
+      return [];
+    }
+  };
+
+  const [dmarc, dkim, spf, returnMx] = await Promise.all([
+    lookup(`_dmarc.${domain}`, 'TXT'),
+    lookup(`resend._domainkey.${domain}`, 'TXT'),
+    lookup(`send.${domain}`, 'TXT'),
+    lookup(`send.${domain}`, 'MX')
+  ]);
+  const dmarcText = dmarc.map(x => String(x.data || '').replace(/^"|"$/g, '')).find(x => /v=DMARC1/i.test(x)) || '';
+  const spfText = spf.map(x => String(x.data || '').replace(/^"|"$/g, '')).find(x => /v=spf1/i.test(x)) || '';
+  base.dmarcPresent = !!dmarcText;
+  base.dmarcPolicy = dmarcText.match(/(?:^|;)\s*p=([a-z]+)/i)?.[1]?.toLowerCase() || 'unknown';
+  base.dkimPresent = dkim.some(x => /p=[A-Za-z0-9+/=]+/.test(String(x.data || '')));
+  base.spfPresent = !!spfText;
+  base.returnPathMxPresent = returnMx.some(x => /amazonses|resend/i.test(String(x.data || '')));
+
+  if (resendApiKey?.trim()) {
+    try {
+      const response = await fetcher('https://api.resend.com/domains', {
+        headers: { Authorization: `Bearer ${resendApiKey.trim()}`, Accept: 'application/json' },
+        signal: AbortSignal.timeout(8000)
+      });
+      if (!response.ok) {
+        base.resendDomainStatus = `api_http_${response.status}`;
+      } else {
+        const payload: any = await response.json();
+        const domains = Array.isArray(payload?.data) ? payload.data : [];
+        const match = domains.find((item: any) => String(item?.name || '').toLowerCase() === domain.toLowerCase());
+        base.resendDomainStatus = match ? String(match.status || 'unknown').toLowerCase() : 'domain_not_found';
+        base.resendRecordStatuses = Array.isArray(match?.records)
+          ? match.records.map((record: any) => `${String(record.type || 'DNS')} ${String(record.name || '')}: ${String(record.status || 'unknown')}`.trim()).slice(0, 8)
+          : [];
+      }
+    } catch {
+      base.resendDomainStatus = 'api_unreachable';
+      base.errors.push('Resend domain verification endpoint could not be reached.');
+    }
+  }
+
+  if (!base.dkimPresent) base.errors.push('Resend DKIM TXT record was not found by public DNS lookup.');
+  if (!base.spfPresent) base.errors.push('SPF TXT record was not found on the configured send subdomain.');
+  if (!base.dmarcPresent) base.errors.push('DMARC TXT record was not found.');
+  if (!base.returnPathMxPresent) base.errors.push('Custom return-path MX record was not found.');
+  if (base.dmarcPolicy === 'none') base.errors.push('DMARC is monitoring-only (p=none); alignment is not enforced.');
+  if (base.resendDomainStatus !== 'verified') base.errors.push(`Resend domain status is ${base.resendDomainStatus}, not verified.`);
+  return base;
 }
 
 export function buildResendIdempotencyKey(prospectId: string, touchCount = 1): string {
@@ -52,12 +152,12 @@ export interface EmailDispatchResult {
   details?: string;
 }
 
-export function normalizeOutreachBody(body: string): string {
+export function normalizeOutreachBody(body: string, includeSiteLink = true): string {
   let b = (body || '').trim();
   b = b.replace(/https?:\/\/bvelt\.app\/demo\?[^\s)\]>"]+/gi, BVELT_SITE);
   b = b.replace(/https?:\/\/bvelt\.app\/demo\b/gi, BVELT_SITE);
   b = b.replace(/https?:\/\/[a-z0-9.-]*workers\.dev\/demo[^\s)\]>"]*/gi, BVELT_SITE);
-  if (!/bvelt\.app/i.test(b)) {
+  if (includeSiteLink && !/bvelt\.app/i.test(b)) {
     b = `${b}\n\n${BVELT_SITE}`;
   }
   return b.trim();
@@ -130,9 +230,9 @@ export async function dispatchEmail(options: EmailDispatchOptions): Promise<Emai
   }
 
   const subject = (options.subject || 'Quick question from Bvelt').trim();
-  const body = normalizeOutreachBody(options.body || '');
+  const body = normalizeOutreachBody(options.body || '', options.includeSiteLink !== false);
   const senderName = options.senderName || 'Rainer — Bvelt';
-  const html = buildBrandedEmailHtml(body, options.logoUrl);
+  const html = options.plainTextOnly ? undefined : buildBrandedEmailHtml(body, options.logoUrl);
 
   if (options.resendApiKey && options.resendApiKey.trim()) {
     try {
@@ -143,7 +243,7 @@ export async function dispatchEmail(options: EmailDispatchOptions): Promise<Emai
         to: [to],
         subject,
         text: body,
-        html,
+        ...(html ? { html } : {}),
         headers: { 'X-Entity-Ref-ID': options.prospectId || `lead_${Date.now()}` },
       };
       if (options.replyTo && options.replyTo.includes('@')) {
@@ -207,7 +307,7 @@ export async function dispatchEmail(options: EmailDispatchOptions): Promise<Emai
           to: [{ email: to, name: options.recipientName || to }],
           subject,
           textContent: body,
-          htmlContent: html,
+          ...(html ? { htmlContent: html } : {}),
         }),
       });
       const data: any = await res.json().catch(() => ({}));
