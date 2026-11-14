@@ -25,6 +25,19 @@ export interface EmailDispatchOptions {
   brevoApiKey?: string;
   senderName?: string;
   logoUrl?: string;
+  includeSiteLink?: boolean;
+  plainTextOnly?: boolean;
+}
+
+export function resolveBveltSender(raw?: string): { email: string; from: string } | null {
+  const value = String(raw || '').trim();
+  if (!value) return null;
+  const match = value.match(/^(.*?)\s*<([^<>]+)>$/);
+  const displayName = match?.[1]?.trim().replace(/[<>\r\n]/g, '') || 'Bvelt';
+  const candidate = (match?.[2] || value).trim();
+  const parsed = sanitizeEmail(candidate);
+  if (!parsed.valid || !parsed.email || parsed.email.split('@')[1] !== 'bvelt.app') return null;
+  return { email: parsed.email, from: `${displayName} <${parsed.email}>` };
 }
 
 export function buildResendIdempotencyKey(prospectId: string, touchCount = 1): string {
@@ -41,12 +54,12 @@ export interface EmailDispatchResult {
   details?: string;
 }
 
-export function normalizeOutreachBody(body: string): string {
+export function normalizeOutreachBody(body: string, includeSiteLink = true): string {
   let b = (body || '').trim();
   b = b.replace(/https?:\/\/bvelt\.app\/demo\?[^\s)\]>"]+/gi, BVELT_SITE);
   b = b.replace(/https?:\/\/bvelt\.app\/demo\b/gi, BVELT_SITE);
   b = b.replace(/https?:\/\/[a-z0-9.-]*workers\.dev\/demo[^\s)\]>"]*/gi, BVELT_SITE);
-  if (!/bvelt\.app/i.test(b)) {
+  if (includeSiteLink && !/bvelt\.app/i.test(b)) {
     b = `${b}\n\n${BVELT_SITE}`;
   }
   return b.trim();
@@ -106,24 +119,27 @@ export async function dispatchEmail(options: EmailDispatchOptions): Promise<Emai
     };
   }
 
+  const sender = resolveBveltSender(options.from);
+  const provider = options.resendApiKey?.trim() ? 'resend' : options.brevoApiKey?.trim() ? 'brevo' : 'simulated';
+  if (provider !== 'simulated' && !sender) {
+    return { success: false, provider, messageId: '', status: 'failed', error: 'Sender must be an authenticated @bvelt.app address; delivery was blocked.' };
+  }
+
   const subject = (options.subject || 'Quick question from Bvelt').trim();
-  const body = normalizeOutreachBody(options.body || '');
+  const body = normalizeOutreachBody(options.body || '', options.includeSiteLink !== false);
   const senderName = options.senderName || 'Rainer — Bvelt';
-  const html = buildBrandedEmailHtml(body, options.logoUrl);
+  const html = options.plainTextOnly ? undefined : buildBrandedEmailHtml(body, options.logoUrl);
 
   if (options.resendApiKey && options.resendApiKey.trim()) {
     try {
-      const fromAddress =
-        options.from && options.from.includes('@')
-          ? options.from.trim()
-          : `${senderName} <onboarding@resend.dev>`;
+      const fromAddress = sender!.from;
 
       const payload: Record<string, unknown> = {
         from: fromAddress,
         to: [to],
         subject,
         text: body,
-        html,
+        ...(html ? { html } : {}),
         headers: { 'X-Entity-Ref-ID': options.prospectId || `lead_${Date.now()}` },
       };
       if (options.replyTo && options.replyTo.includes('@')) {
@@ -173,10 +189,7 @@ export async function dispatchEmail(options: EmailDispatchOptions): Promise<Emai
 
   if (options.brevoApiKey && options.brevoApiKey.trim()) {
     try {
-      const fromEmail =
-        options.from && options.from.includes('@')
-          ? options.from.replace(/.*</, '').replace(/>.*/, '').trim()
-          : 'noreply@bvelt.app';
+      const fromEmail = sender!.email;
 
       const res = await fetch('https://api.brevo.com/v3/smtp/email', {
         method: 'POST',
@@ -190,7 +203,7 @@ export async function dispatchEmail(options: EmailDispatchOptions): Promise<Emai
           to: [{ email: to, name: options.recipientName || to }],
           subject,
           textContent: body,
-          htmlContent: html,
+          ...(html ? { htmlContent: html } : {}),
         }),
       });
       const data: any = await res.json().catch(() => ({}));
