@@ -2342,6 +2342,13 @@ export default {
       // (b) GET /api/tenants/roi — full funnel + $ EV for product sales story
       if ((path === "/api/tenants/roi" || path === "/tenants/roi") && method === "GET") {
         const tenantId = url.searchParams.get("tenant_id") || "founder";
+        const auth = resolveTenantAuthContext(request, env, serviceKey, validSessionHash);
+        if (!auth.authorized) {
+          return Response.json({ error: "Unauthorized" }, { status: 401, headers: corsHeaders });
+        }
+        if (!auth.canAccessTenant(tenantId)) {
+          return Response.json({ error: "Forbidden: cross-tenant ROI access denied" }, { status: 403, headers: corsHeaders });
+        }
         try {
           const res = await env.RADAR_DB.prepare(`
             SELECT 
