@@ -1,6 +1,6 @@
 declare const process: any;
 
-import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, resolveTenantBuyerSegments, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence } from './worker';
+import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, resolveTenantBuyerSegments, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey } from './worker';
 import { DEFAULT_FOUNDER_MISSION, MissionConfig } from './worker';
 import { fetchPermitContractors } from './permitSources';
 import { pickTargets } from './geoFrontier';
@@ -199,6 +199,23 @@ tests.push({
       "founder"
     );
     assert(custom.coherent && !custom.disqualified, "Unknown custom niches with contact evidence must pass the initial coherence gate");
+  }
+});
+
+tests.push({
+  name: "Founder follow-ups enforce contact spacing, reply stop, and three-touch cap",
+  run: async () => {
+    const now = Date.parse("2026-11-14T12:00:00.000Z");
+    const fiveDaysAgo = "2026-11-09T12:00:00.000Z";
+    const fourDaysAgo = "2026-11-10T12:00:00.000Z";
+    assert(shouldSendFounderFollowUp("sent", fiveDaysAgo, null, 1, now), "Sent prospects may follow up after five days");
+    assert(shouldSendFounderFollowUp("delivered", fiveDaysAgo, null, 2, now), "Delivered prospects remain eligible for controlled follow-up");
+    assert(!shouldSendFounderFollowUp("delivered", fourDaysAgo, null, 1, now), "Follow-up must wait at least five days");
+    assert(!shouldSendFounderFollowUp("opened", fiveDaysAgo, "2026-11-13T12:00:00.000Z", 1, now), "A reply stops follow-ups");
+    assert(!shouldSendFounderFollowUp("sent", fiveDaysAgo, null, 3, now), "No more than three total touches are allowed");
+    assert(!shouldSendFounderFollowUp("bounced", fiveDaysAgo, null, 1, now), "Bounced prospects are never followed up");
+    assert(resolveOutreachTouchCount(1, 5) === 5, "Historical provider messages must override missing legacy touch metadata");
+    assert(buildOutreachIdempotencyKey("founder", "p1", "resend_live", 1) !== buildOutreachIdempotencyKey("founder", "p1", "resend_live", 2), "Each touch needs its own idempotency key");
   }
 });
 
