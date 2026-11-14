@@ -158,7 +158,8 @@ export function normalizeFounderOutreachCopy(
   subject: string,
   body: string,
   recipientName?: string,
-  legalFooter?: string
+  legalFooter?: string,
+  touchCount = 1
 ): { subject: string; body: string; sanitized: boolean } {
   const unsafeCopy = /\b(?:free|quick|technical)\s+(?:website\s+)?audit\b|\bstop\s+losing\b|\bguarantee(?:d)?\b|\bwe\s+noticed\s+your\s+(?:website|site)\b|\byour\s+(?:website|site)\s+(?:is|seems)\s+slow\b|\bmissed\s+calls\s+are\s+costing\b|\byou(?:'re|\s+are)\s+losing\b|\b(?:mobile\s+)?speed\s+checks?\b|\bover\s+\d+(?:\.\d+)?\s+seconds?\b|\bmost\s+(?:people|customers|homeowners)\s+(?:hang\s+up|leave)\b|\b(?:automatically\s+)?re-?engages?\s+missed\s+leads\b|\brecover(?:s|ed)?\s+lost\s+(?:jobs|revenue|leads)\b|\b(?:automated\s+)?sms\b|\b\d{1,3}\s?%\b/i;
   const sourceSubject = String(subject || '').trim();
@@ -176,19 +177,33 @@ export function normalizeFounderOutreachCopy(
     return { subject: sourceSubject.slice(0, 140), body: normalizedBody, sanitized: false };
   }
 
-  const safeSubject = business
-    ? 'How does ' + business + ' follow up with new enquiries?'
-    : 'How do you follow up with new enquiries?';
+  const touch = Math.max(1, Math.min(3, Math.floor(Number(touchCount) || 1)));
+  const name = business || 'your team';
+  const subjects = [
+    'How does ' + name + ' follow up with enquiries?',
+    'A question about estimate follow-up at ' + name,
+    'Following up on new enquiries at ' + name
+  ];
+  const questions = [
+    'When a call comes in while your team is busy, how do you make sure that person gets a follow-up?',
+    'How do you keep track of estimates that have been sent but still need a response?',
+    'Do you have one place to see which enquiries still need a reply?'
+  ];
+  const followUp = touch === 1
+    ? 'Would a short example be useful?'
+    : touch === 2
+      ? 'Is that already covered by your current process?'
+      : "If this is not a priority, no reply is needed. I'll leave it here.";
   const safeBody = [
     'Hi ' + (business || 'team') + ',',
     '',
-    "I'm Rainer, founder of Bvelt. We help service businesses keep enquiries and estimate follow-ups organized.",
+    "I'm Rainer, founder of Bvelt. We help service businesses keep incoming enquiries and estimate follow-ups organized.",
     '',
-    'How do you currently follow up when a call goes unanswered or an estimate is still open?',
-    'Would a short example be useful?',
+    questions[touch - 1],
+    followUp,
     footer
   ].filter(Boolean).join('\n\n');
-  return { subject: safeSubject.slice(0, 140), body: safeBody, sanitized: true };
+  return { subject: subjects[touch - 1].slice(0, 140), body: safeBody, sanitized: true };
 }
 export function normalizeOutreachBody(body: string, includeSiteLink = true): string {
   let b = (body || '').trim();
@@ -273,7 +288,7 @@ export async function dispatchEmail(options: EmailDispatchOptions): Promise<Emai
 
   const normalizedBody = normalizeOutreachBody(options.body || '', options.includeSiteLink !== false);
   const founderCopy = options.founderOutreach
-    ? normalizeFounderOutreachCopy(options.subject || 'Question about customer follow-up', normalizedBody, options.recipientName, options.legalFooter)
+    ? normalizeFounderOutreachCopy(options.subject || 'Question about customer follow-up', normalizedBody, options.recipientName, options.legalFooter, options.touchCount || 1)
     : { subject: String(options.subject || 'Quick question from Bvelt').trim(), body: normalizedBody, sanitized: false };
   const subject = founderCopy.subject;
   const body = founderCopy.body;
