@@ -7256,14 +7256,32 @@ export async function getPriorityTargets(
           config.min_score = Number(tenantConfig.minimum_score ?? 50);
           config.max_daily_outreach = 0;
 
-          // Prefer an AI-generated ICP of likely recurring buyers. Use the
-          // curated map only for recognized trades; unknown trades fail closed.
-          let expandedBuyerSegments: Array<{ label: string }> = [];
+          // AI expansion is primary. Explicit ICP markets/keywords and the
+          // curated map are fallbacks; the trade map is not an industry allowlist.
+          const parseTenantList = (value: any): any[] => {
+            try {
+              const parsed = typeof value === "string" ? JSON.parse(value || "[]") : value;
+              return Array.isArray(parsed) ? parsed : [];
+            } catch {
+              return [];
+            }
+          };
+          const explicitBuyerSegments = [
+            ...parseTenantList(tenantConfig.subniches_json),
+            ...parseTenantList(tenantConfig.allowed_markets_json),
+            ...parseTenantList(tenantConfig.icp_keywords_json)
+          ];
+          let expandedBuyerSegments: Array<string | { label?: string }> = [...explicitBuyerSegments];
           if (!skipPicks) {
             const expanded = await expandTenantIcp(env, tenantConfig);
-            if (expanded?.segments?.length) expandedBuyerSegments = expanded.segments;
+            if (expanded?.segments?.length) {
+              expandedBuyerSegments = [...expanded.segments, ...explicitBuyerSegments];
+            }
           }
-          config.niches = resolveTenantBuyerSegments(tenantConfig.niche || "", expandedBuyerSegments);
+          config.niches = resolveTenantBuyerSegments(
+            tenantConfig.niche || tenantConfig.industry || "",
+            expandedBuyerSegments
+          );
         } catch (e) {
           console.error("Error parsing tenant config: ", e);
         }
@@ -9172,7 +9190,22 @@ export async function expandTenantIcp(
   const modelList = modelsStr.split(",").map(m => m.trim()).filter(Boolean);
   const modelsToTry = modelList.slice(0, 2);
 
-  const prompt = `Negocio local: ${tc.tenant_name || ""}, industria ${tc.industry || ""}, nicho ${tc.niche || ""}, ICP ${tc.icp_description || ""}. Devuelve SOLO JSON {segments:[{label,osm_tags,keywords,why}]}, máximo 6 segmentos de CLIENTES que le compran a este negocio, ordenados por probabilidad de compra recurrente. osm_tags: 1 a 3 etiquetas OSM válidas como office=estate_agent o amenity=restaurant. Sin texto extra.`;
+  const readList = (value: any): string[] => {
+    try {
+      const parsed = typeof value === "string" ? JSON.parse(value || "[]") : value;
+      return Array.isArray(parsed) ? parsed.map((item: any) => String(item?.label || item || "").trim()).filter(Boolean) : [];
+    } catch {
+      return [];
+    }
+  };
+  const services = readList(tc.services_json);
+  const serviceAreas = readList(tc.service_areas_json);
+  const countries = readList(tc.countries_json);
+  const languages = readList(tc.languages_json);
+  const keywords = readList(tc.icp_keywords_json);
+  const allowedMarkets = readList(tc.allowed_markets_json);
+  const prompt = `Negocio: ${tc.tenant_name || ""}. Industria: ${tc.industry || ""}. Nicho propio: ${tc.niche || ""}. Servicios: ${services.join(", ")}. Zonas: ${serviceAreas.join(", ")}. Países: ${countries.join(", ")}. Idiomas: ${languages.join(", ")}. ICP: ${tc.icp_description || ""}. Keywords ICP: ${keywords.join(", ")}. Mercados indicados: ${allowedMarkets.join(", ")}.
+Genera hasta 6 segmentos de CLIENTES que compran a este negocio; no devuelvas competidores ni empresas del mismo oficio. No limites el resultado a un mapa cerrado de industrias: usa el perfil completo y deduce compradores B2B o consumidores según el modelo de negocio. Si el ICP no permite una inferencia fiable, devuelve segments vacío. Devuelve SOLO JSON {segments:[{label,osm_tags,keywords,why}]}, ordenado por probabilidad de compra recurrente. osm_tags: 1 a 3 etiquetas OSM válidas como office=estate_agent o amenity=restaurant. Sin texto extra.`;
 
   let geminiResult: any = null;
   for (const model of modelsToTry) {
