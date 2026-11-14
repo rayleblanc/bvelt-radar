@@ -94,7 +94,7 @@ function normalizeValueUsd(value: unknown): number | null {
 export async function recordScopedLearningEvent(
   db: any,
   input: ScopedLearningEventInput
-): Promise<boolean> {
+): Promise<"inserted" | "duplicate" | false> {
   if (!db || !input.prospectId || !input.eventType) return false;
 
   try {
@@ -199,7 +199,7 @@ export async function recordScopedLearningEvent(
     }
 
     const results = await db.batch(statements);
-    if (Number(results?.[0]?.meta?.changes || 0) > 0) return true;
+    if (Number(results?.[0]?.meta?.changes || 0) > 0) return "inserted";
 
     const existing = await db
       .prepare(
@@ -233,7 +233,7 @@ export async function recordScopedLearningEvent(
     if (existing.occurred_at != null && String(existing.occurred_at) !== String(occurredAt)) {
       return false;
     }
-    return true;
+    return "duplicate";
   } catch (err: any) {
     console.warn("[learningIntegrity] recordScopedLearningEvent skipped:", err?.message || err);
     return false;

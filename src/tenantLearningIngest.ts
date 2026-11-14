@@ -70,9 +70,13 @@ export async function handleTenantLearningIngest(
         idempotencyKey: `bvelt-outcome:${idempotencyKey}`,
       };
 
-      const inserted = await recordScopedLearningEvent(env.RADAR_DB, input);
-      if (inserted) {
+      const result = await recordScopedLearningEvent(env.RADAR_DB, input);
+      if (result === "inserted") {
         insertedCount++;
+        continue;
+      }
+      if (result === "duplicate") {
+        duplicateCount++;
         continue;
       }
 
