@@ -192,7 +192,32 @@ export async function recordScopedLearningEvent(
     }
 
     const results = await db.batch(statements);
-    return Number(results?.[0]?.meta?.changes || 0) > 0;
+    if (Number(results?.[0]?.meta?.changes || 0) > 0) return true;
+
+    // A retry after a lost HTTP response is successful only when the stored
+    // event matches this exact tenant-scoped outcome. Conflicting reuse of an
+    // idempotency key is rejected and never changes the aggregates.
+    const existing = await db
+      .prepare(
+        `SELECT prospect_id, mode, tenant_id, event_type, city, trade, value_usd
+         FROM learning_events WHERE idempotency_key = ? LIMIT 1`
+      )
+      .bind(idempotencyKey)
+      .first();
+    const expectedValue =
+      typeof input.valueUsd === "number" && Number.isFinite(input.valueUsd)
+        ? input.valueUsd
+        : null;
+    return Boolean(
+      existing &&
+      String(existing.prospect_id) === String(input.prospectId) &&
+      String(existing.mode) === input.mode &&
+      String(existing.tenant_id) === tenantId &&
+      String(existing.event_type) === eventType &&
+      (existing.city || null) === (input.city || null) &&
+      (existing.trade || null) === (input.trade || null) &&
+      (existing.value_usd ?? null) === expectedValue
+    );
   } catch (err: any) {
     // Tables may not exist until migrations 0023/0024 are applied.
     // Never take down outreach / decision paths for learning storage failures.
