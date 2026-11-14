@@ -4299,10 +4299,12 @@ async function handleDecision(
       });
 
       if (dispatchOutcome.status !== "dispatched") {
+        const ambiguous = /network|fetch|timeout|timed out|abort|socket|connection|reset|econn/i.test(String(dispatchOutcome.error || ""));
+        const failureState = ambiguous ? "provider_unknown" : "failed";
         try {
           await db.prepare(
-            "UPDATE prospects SET dispatch_provider = ?, dispatch_status = 'failed', dispatch_error = ?, updated_at = ? WHERE id = ?"
-          ).bind(dispatchOutcome.provider, dispatchOutcome.error || null, timestamp, id).run();
+            "UPDATE prospects SET status = ?, outcome = ?, dispatch_provider = ?, dispatch_status = ?, dispatch_error = ?, updated_at = ? WHERE id = ?"
+          ).bind(ambiguous ? "provider_unknown" : "hold", ambiguous ? "provider_reconciliation_required" : "dispatch_failed", dispatchOutcome.provider, failureState, dispatchOutcome.error || null, timestamp, id).run();
         } catch (e) {}
 
         try {
@@ -4316,7 +4318,7 @@ async function handleDecision(
             prospect.email,
             prospect.draft_subject || 'Outreach',
             dispatchOutcome.provider,
-            'failed',
+            failureState,
             dispatchOutcome.messageId || null,
             dispatchOutcome.error || null,
             (prospect.draft_body || '').substring(0, 150),
@@ -4324,15 +4326,15 @@ async function handleDecision(
           ).run();
         } catch (e) {}
         try {
-          await db.prepare("UPDATE outreach_idempotency SET status = 'failed', updated_at = ? WHERE idempotency_key = ?")
-            .bind(timestamp, manualIdempotencyKey).run();
+          await db.prepare("UPDATE outreach_idempotency SET status = ?, updated_at = ? WHERE idempotency_key = ?")
+            .bind(failureState, timestamp, manualIdempotencyKey).run();
         } catch (e) {}
 
         return Response.json({
           success: false,
           id,
           dispatch: {
-            status: "failed",
+            status: failureState,
             provider: dispatchOutcome.provider,
             error: dispatchOutcome.error
           }
