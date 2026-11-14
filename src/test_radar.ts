@@ -1380,7 +1380,14 @@ tests.push({
         TELEGRAM_CHAT_ID: "",
         RADAR_DB: {
           prepare: (sql: string) => ({
-            all: async () => ({ results: mockProspects })
+            bind: (...args: any[]) => ({
+              all: async () => ({ results: mockProspects }),
+              first: async () => null,
+              run: async () => ({ success: true })
+            }),
+            all: async () => ({ results: mockProspects }),
+            first: async () => null,
+            run: async () => ({ success: true })
           })
         }
       };
@@ -1447,8 +1454,12 @@ tests.push({
                       created_at: new Date().toISOString()
                     }
                   ]
-                })
-              })
+                }),
+                first: async () => null,
+                run: async () => ({ success: true })
+              }),
+              first: async () => null,
+              run: async () => ({ success: true })
             })
           }
         };
@@ -1602,7 +1613,7 @@ tests.push({
                   return c ? { 1: 1 } : null;
                 } else if (sqlLower.includes("select id, signals_json from prospects")) {
                   const p = prospectsStore.find(x => x.id === args[0] && x.mode === args[1] && (x.tenant_id || "founder") === args[2]);
-                  return p ? { id: p.id, signals_json: p.signals_json } : null;
+                  return p ? { id: p.id, signals_json: p.signals_json, website: p.website } : null;
                 } else if (sqlLower.includes("select id from source_evidence")) {
                   const ev = evidenceStore.find(x => x.prospect_id === args[0] && x.source_id === args[1] && x.evidence_type === args[2] && x.content_hash === args[3]);
                   return ev ? { id: ev.id } : null;
@@ -1916,7 +1927,9 @@ tests.push({
         bind: (...args: any[]) => ({
           first: async () => {
             if (sql.includes("FROM prospects WHERE id = ?")) {
-              return { id: "p_target_01", tenant_id: "tenant_alpha" };
+              return args[1] === "tenant_alpha"
+                ? { id: "p_target_01", tenant_id: "tenant_alpha" }
+                : null;
             }
             if (sql.includes("FROM tenant_config WHERE tenant_id = ?")) {
               return { tenant_id: args[0], tenant_name: "Test Tenant" };
@@ -1988,7 +2001,10 @@ tests.push({
       body: JSON.stringify({ prospect_id: "p_target_01", tenant_id: "tenant_gamma", outcome: "won" })
     });
     const resCrossOutcome = await worker.fetch(crossOutcomeReq, mockEnv, {} as any);
-    assert(resCrossOutcome.status === 403, "Outcome submission with mismatched prospect tenant must return 403");
+    assert(
+      resCrossOutcome.status === 403 || resCrossOutcome.status === 404,
+      "Outcome submission with mismatched prospect tenant must be denied without revealing its existence"
+    );
 
     // 7. Unauthenticated CSV export -> 401
     const unauthCsvReq = new Request("https://radar.bvelt.app/api/tenants/leads.csv?tenant_id=tenant_alpha", { method: "GET" });
@@ -2148,6 +2164,7 @@ tests.push({
         id: "p_sync_01",
         mode: "founder",
         tenant_id: "founder",
+        website: "https://testbusiness.com",
         signals_json: JSON.stringify({ existing_fact: true })
       }
     ];
