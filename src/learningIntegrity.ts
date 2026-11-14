@@ -190,7 +190,36 @@ export async function recordScopedLearningEvent(
     }
 
     const results = await db.batch(statements);
-    return Number(results?.[0]?.meta?.changes || 0) > 0;
+    if (Number(results?.[0]?.meta?.changes || 0) > 0) return true;
+
+    // A retry after a lost response is acknowledged only when the existing
+    // event matches this exact scoped payload. Reusing a key for another
+    // outcome or value is rejected without changing any aggregate.
+    const existing = await db
+      .prepare(
+        `SELECT prospect_id, mode, tenant_id, event_type, city, trade, variant_id, angle, value_usd, metadata_json, occurred_at
+         FROM learning_events WHERE idempotency_key = ? LIMIT 1`
+      )
+      .bind(idempotencyKey)
+      .first();
+    const expectedValue =
+      typeof input.valueUsd === "number" && Number.isFinite(input.valueUsd)
+        ? input.valueUsd
+        : null;
+    return Boolean(
+      existing &&
+      String(existing.prospect_id) === String(input.prospectId) &&
+      String(existing.mode) === input.mode &&
+      String(existing.tenant_id) === tenantId &&
+      String(existing.event_type) === eventType &&
+      (existing.city || null) === (input.city || null) &&
+      (existing.trade || null) === (input.trade || null) &&
+      (existing.variant_id || null) === (input.variantId || null) &&
+      (existing.angle || null) === (input.angle || null) &&
+      (existing.value_usd ?? null) === expectedValue &&
+      String(existing.metadata_json || "{}") === metadataJson &&
+      String(existing.occurred_at || "") === String(occurredAt)
+    );
   } catch (err: any) {
     // Tables may not exist until migrations 0023/0024 are applied.
     // Never take down outreach / decision paths for learning storage failures.
@@ -212,18 +241,51 @@ export async function readScopedLearningStats(
     const rows = await db
       .prepare(
         `
-    SELECT key, sent_count, replied_count, booked_count, won_count, lost_count
-    FROM learning_stats_scoped
-    WHERE mode = ? AND tenant_id = ? AND sent_count >= 2
+    WITH scoped_events AS (
+      SELECT prospect_id, event_type, city, trade, variant_id, angle
+      FROM learning_events
+      WHERE mode = ? AND tenant_id = ?
+        AND event_type IN (
+          'sent', 'delivered', 'opened', 'clicked', 'bounced',
+          'contacted', 'replied', 'positive', 'question', 'negative',
+          'not_now', 'unsubscribe', 'out_of_office',
+          'booked', 'won', 'converted', 'lost'
+        )
+    ),
+    dimensions AS (
+      SELECT prospect_id, event_type, 'city:' || city AS key
+      FROM scoped_events WHERE city IS NOT NULL AND TRIM(city) <> ''
+      UNION ALL
+      SELECT prospect_id, event_type, 'trade:' || LOWER(TRIM(trade)) AS key
+      FROM scoped_events WHERE trade IS NOT NULL AND TRIM(trade) <> ''
+      UNION ALL
+      SELECT prospect_id, event_type, 'pair:' || city || '|' || LOWER(TRIM(trade)) AS key
+      FROM scoped_events
+      WHERE city IS NOT NULL AND TRIM(city) <> ''
+        AND trade IS NOT NULL AND TRIM(trade) <> ''
+      UNION ALL
+      SELECT prospect_id, event_type, 'variant:' || variant_id AS key
+      FROM scoped_events WHERE variant_id IS NOT NULL AND TRIM(variant_id) <> ''
+      UNION ALL
+      SELECT prospect_id, event_type, 'angle:' || angle AS key
+      FROM scoped_events WHERE angle IS NOT NULL AND TRIM(angle) <> ''
+    )
+    SELECT
+      key,
+      COUNT(DISTINCT prospect_id) AS contacted_count,
+      COUNT(DISTINCT CASE WHEN event_type IN ('won', 'converted') THEN prospect_id END) AS won_count
+    FROM dimensions
+    GROUP BY key
+    HAVING COUNT(DISTINCT prospect_id) >= 2
   `
       )
       .bind(mode, tenantId)
       .all();
 
     for (const row of (rows?.results || []) as any[]) {
-      const sent = Math.max(1, Number(row.sent_count || 0));
-      const won = Math.min(sent, Number(row.won_count || 0));
-      rates[String(row.key)] = (won + 1) / (sent + 2);
+      const contacted = Math.max(1, Number(row.contacted_count || 0));
+      const won = Math.min(contacted, Number(row.won_count || 0));
+      rates[String(row.key)] = (won + 1) / (contacted + 2);
     }
   } catch (err: any) {
     console.warn("[learningIntegrity] readScopedLearningStats skipped:", err?.message || err);
