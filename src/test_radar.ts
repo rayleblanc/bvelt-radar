@@ -53,27 +53,36 @@ tests.push({
 });
 
 tests.push({
-  name: "Learning Integrity: idempotent retries never increment scoped aggregates twice",
+  name: "Learning Integrity: idempotent retries confirm the same event without double-counting",
   run: async () => {
-    const insertedKeys = new Set<string>();
+    const inserted = new Map<string, any>();
     const aggregates = new Map<string, number>();
     const mockDb: any = {
       prepare: (sql: string) => ({
-        bind: (...args: any[]) => ({ sql, args })
+        bind: (...args: any[]) => ({
+          sql,
+          args,
+          first: async () => {
+            if (!/FROM learning_events WHERE idempotency_key/i.test(sql)) return null;
+            return inserted.get(String(args[0])) || null;
+          }
+        })
       }),
       batch: async (statements: any[]) => {
         const event = statements[0];
-        const idempotencyKey = String(event.args[11]);
-        const inserted = !insertedKeys.has(idempotencyKey);
-        if (inserted) insertedKeys.add(idempotencyKey);
-        let previousChanges = inserted ? 1 : 0;
+        const args = event.args;
+        const key = String(args[11]);
+        const isNew = !inserted.has(key);
+        if (isNew) inserted.set(key, {
+          prospect_id: args[1], mode: args[2], tenant_id: args[3],
+          event_type: args[4], city: args[5], trade: args[6], value_usd: args[9]
+        });
+        let previousChanges = isNew ? 1 : 0;
         const results = [{ meta: { changes: previousChanges } }];
-
         for (const statement of statements.slice(1)) {
-          const guarded = /WHERE changes\(\) = 1/i.test(statement.sql);
-          const applied = guarded ? previousChanges === 1 : true;
-          const key = String(statement.args[2]);
-          if (applied) aggregates.set(key, (aggregates.get(key) || 0) + Number(statement.args[15] || 0));
+          const applied = /WHERE changes\\(\\) = 1/i.test(statement.sql) && previousChanges === 1;
+          const keyName = String(statement.args[2]);
+          if (applied) aggregates.set(keyName, (aggregates.get(keyName) || 0) + Number(statement.args[15] || 0));
           previousChanges = applied ? 1 : 0;
           results.push({ meta: { changes: previousChanges } });
         }
@@ -88,6 +97,7 @@ tests.push({
       eventType: "won",
       city: "Toronto, ON",
       trade: "plumbing",
+      valueUsd: 250,
       occurredAt: "2026-11-13T12:00:00.000Z",
       idempotencyKey: "tenant-outcome:prospect_123:won"
     };
@@ -96,11 +106,13 @@ tests.push({
     const afterFirst = Array.from(aggregates.values()).reduce((sum, value) => sum + value, 0);
     const retry = await recordScopedLearningEvent(mockDb, input);
     const afterRetry = Array.from(aggregates.values()).reduce((sum, value) => sum + value, 0);
+    const conflict = await recordScopedLearningEvent(mockDb, { ...input, valueUsd: 500 });
 
     assert(first, "First event must be recorded");
-    assert(!retry, "Duplicate event must report no new insert");
-    assert(afterFirst === 3, "First event must increment city/trade/pair keys once");
-    assert(afterRetry === afterFirst, "Duplicate retry must not increment any aggregate");
+    assert(retry, "An exact retry must be acknowledged");
+    assert(!conflict, "Reusing an idempotency key with conflicting value must be rejected");
+    assert(afterFirst === 3, "First event must increment city/trade/pair aggregates once");
+    assert(afterRetry === afterFirst, "An exact retry must not increment aggregates");
   }
 });
 
