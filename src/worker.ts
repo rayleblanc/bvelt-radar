@@ -2251,7 +2251,7 @@ export default {
           return Response.json({ error: "Forbidden: cross-tenant outcome submission denied" }, { status: 403, headers: corsHeaders });
         }
 
-        const validOutcomes = ["contacted", "replied", "won", "lost"];
+        const validOutcomes = ["contacted", "replied", "booked", "won", "lost"];
         if (!validOutcomes.includes(outcome)) {
           return Response.json({ error: "Invalid outcome value" }, { status: 400, headers: corsHeaders });
         }
@@ -2267,9 +2267,30 @@ export default {
         }
 
         const timestamp = new Date().toISOString();
+        const outcomeChanged = String(prospect.tenant_outcome || "") !== outcome;
         await env.RADAR_DB.prepare(
           "UPDATE prospects SET tenant_outcome = ?, won_value_usd = CASE WHEN ? = 'won' THEN COALESCE(?, won_value_usd) ELSE won_value_usd END, updated_at = ? WHERE id = ? AND mode = 'tenant' AND tenant_id = ?"
         ).bind(outcome, outcome, parsedValue, timestamp, prospect_id, tenant_id).run();
+
+        // Any reply, booking, sale or loss proves the prospect was contacted.
+        // Reuse the same key as an explicit "contacted" action so retries and
+        // later stage changes never count the same contact twice.
+        if (outcome !== "contacted") {
+          await recordLearningEvent(
+            env.RADAR_DB,
+            prospect.city,
+            prospect.trade,
+            prospect.variant_id || null,
+            false,
+            {
+              event_type: "contacted",
+              prospect_id: String(prospect.id),
+              mode: "tenant",
+              tenant_id: tenant_id,
+              idempotency_key: `tenant-outcome:${prospect.id}:contacted`
+            }
+          );
+        }
 
         await recordLearningEvent(
           env.RADAR_DB,
@@ -2293,15 +2314,22 @@ export default {
           prospectIds: [String(prospect_id)]
         }).catch((error) => console.warn("[Tenant Bvelt Sync] Outcome sync failed:", error));
 
-        if ((outcome === "replied" || outcome === "won") && prospect.city && prospect.trade) {
+        if (outcomeChanged && prospect.city && prospect.trade) {
           try {
             const place = findPlace(prospect.city);
             if (place) {
               const placeKeyStr = placeKey(place);
-              const col = outcome === "replied" ? "replies" : "wins";
-              await env.RADAR_DB.prepare(
-                `UPDATE geo_coverage SET ${col} = ${col} + 1 WHERE tenant_id = ? AND place_key = ? AND trade = ?`
-              ).bind(tenant_id, placeKeyStr, prospect.trade.toLowerCase()).run();
+              if (prospect.tenant_outcome === "won" && outcome !== "won") {
+                await env.RADAR_DB.prepare(
+                  "UPDATE geo_coverage SET wins = MAX(0, wins - 1) WHERE tenant_id = ? AND place_key = ? AND trade = ?"
+                ).bind(tenant_id, placeKeyStr, prospect.trade.toLowerCase()).run();
+              }
+              if (outcome === "replied" || outcome === "booked" || outcome === "won") {
+                const col = outcome === "won" ? "wins" : "replies";
+                await env.RADAR_DB.prepare(
+                  `UPDATE geo_coverage SET ${col} = ${col} + 1 WHERE tenant_id = ? AND place_key = ? AND trade = ?`
+                ).bind(tenant_id, placeKeyStr, prospect.trade.toLowerCase()).run();
+              }
             }
           } catch (e) {
             // ignore if row doesn't exist
@@ -2320,9 +2348,13 @@ export default {
               COUNT(*) as total,
               SUM(CASE WHEN status IN ('scouted','qualified','scored','enriched') THEN 1 ELSE 0 END) as pipeline,
               SUM(CASE WHEN status IN ('sent','queued','approved','notified') THEN 1 ELSE 0 END) as outreach,
-              SUM(CASE WHEN status IN ('replied','won') OR tenant_outcome IN ('replied','won') THEN 1 ELSE 0 END) as replied,
+              SUM(CASE WHEN status IN ('sent','queued','approved','notified','replied','booked','converted','won','lost')
+                         OR tenant_outcome IN ('contacted','replied','booked','won','lost') THEN 1 ELSE 0 END) as conversion_denominator,
+              SUM(CASE WHEN status IN ('replied','booked') OR tenant_outcome IN ('replied','booked') THEN 1 ELSE 0 END) as replied,
+              SUM(CASE WHEN status = 'booked' OR tenant_outcome = 'booked' THEN 1 ELSE 0 END) as booked,
               SUM(CASE WHEN status = 'won' OR tenant_outcome = 'won' THEN 1 ELSE 0 END) as won,
-              SUM(CASE WHEN COALESCE(tenant_outcome,'') = 'contacted' THEN 1 ELSE 0 END) as contacted,
+              SUM(CASE WHEN status = 'lost' OR tenant_outcome = 'lost' THEN 1 ELSE 0 END) as lost,
+              SUM(CASE WHEN tenant_outcome IN ('contacted','replied','booked','won','lost') THEN 1 ELSE 0 END) as contacted,
               SUM(COALESCE(won_value_usd, 0)) as won_value_usd_total,
               SUM(COALESCE(expected_value, opportunity_score, score, 0)) as pipeline_ev_raw,
               AVG(COALESCE(score, opportunity_score, 0)) as avg_score
@@ -2333,20 +2365,26 @@ export default {
 
           const total = Number(res?.total || 0);
           const outreach = Number(res?.outreach || 0);
+          const conversionDenominator = Number(res?.conversion_denominator || 0);
           const replied = Number(res?.replied || 0);
+          const booked = Number(res?.booked || 0);
           const won = Number(res?.won || 0);
+          const lost = Number(res?.lost || 0);
           const pipelineEv = Math.round(Number(res?.pipeline_ev_raw || 0));
-          const replyRate = outreach > 0 ? Math.round((replied / outreach) * 1000) / 10 : 0;
-          const winRate = outreach > 0 ? Math.round((won / outreach) * 1000) / 10 : 0;
+          const replyRate = conversionDenominator > 0 ? Math.round((replied / conversionDenominator) * 1000) / 10 : 0;
+          const winRate = conversionDenominator > 0 ? Math.round((won / conversionDenominator) * 1000) / 10 : 0;
 
           return Response.json({
             tenant_id: tenantId,
             total,
             pipeline: Number(res?.pipeline || 0),
             outreach,
+            conversion_denominator: conversionDenominator,
             contacted: Number(res?.contacted || 0),
             replied,
+            booked,
             won,
+            lost,
             won_value_usd_total: Number(res?.won_value_usd_total || 0),
             pipeline_ev_usd: pipelineEv,
             avg_score: Math.round(Number(res?.avg_score || 0)),
@@ -2355,8 +2393,9 @@ export default {
           }, { headers: corsHeaders });
         } catch (e: any) {
           return Response.json({
-            tenant_id: tenantId, total: 0, pipeline: 0, outreach: 0, contacted: 0,
-            replied: 0, won: 0, won_value_usd_total: 0, pipeline_ev_usd: 0,
+            tenant_id: tenantId, total: 0, pipeline: 0, outreach: 0,
+            conversion_denominator: 0, contacted: 0, replied: 0, booked: 0,
+            won: 0, lost: 0, won_value_usd_total: 0, pipeline_ev_usd: 0,
             avg_score: 0, reply_rate_pct: 0, win_rate_pct: 0
           }, { headers: corsHeaders });
         }
@@ -11491,7 +11530,9 @@ async function getLearningStats(
     const live = await db.prepare(`
       SELECT city, trade,
         SUM(CASE WHEN outcome IN ('won','converted') OR tenant_outcome = 'won' THEN 1 ELSE 0 END) AS wins,
-        SUM(CASE WHEN outcome IN ('sent','positive','booked','won','lost','converted') OR status IN ('sent','delivered','replied','booked','converted','won','lost') OR tenant_outcome IN ('replied','booked','won','lost') THEN 1 ELSE 0 END) AS sent
+        SUM(CASE WHEN outcome IN ('sent','positive','booked','won','lost','converted')
+                  OR status IN ('sent','delivered','replied','booked','converted','won','lost','contacted')
+                  OR tenant_outcome IN ('contacted','replied','booked','won','lost') THEN 1 ELSE 0 END) AS sent
       FROM prospects
       WHERE mode = ?
         AND COALESCE(tenant_id, 'founder') = ?
