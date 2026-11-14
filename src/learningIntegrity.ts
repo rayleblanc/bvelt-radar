@@ -80,6 +80,17 @@ function normalizeScope(mode: LearningMode, tenantId: string): string {
   return value;
 }
 
+function normalizeNullable(value: unknown): string | null {
+  if (value === undefined || value === null || value === "") return null;
+  return String(value);
+}
+
+function normalizeValueUsd(value: unknown): number | null {
+  if (value === undefined || value === null || value === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
 export async function recordScopedLearningEvent(
   db: any,
   input: ScopedLearningEventInput
@@ -134,8 +145,6 @@ export async function recordScopedLearningEvent(
         ),
     ];
 
-    // Event and derived counters commit together. Aggregate updates only apply
-    // if this exact event row was inserted (idempotent retries no-op cleanly).
     for (const key of keys) {
       statements.push(
         db
@@ -192,9 +201,6 @@ export async function recordScopedLearningEvent(
     const results = await db.batch(statements);
     if (Number(results?.[0]?.meta?.changes || 0) > 0) return true;
 
-    // A retry after a lost response is acknowledged only when the existing
-    // event matches this exact scoped payload. Reusing a key for another
-    // outcome or value is rejected without changing any aggregate.
     const existing = await db
       .prepare(
         `SELECT prospect_id, mode, tenant_id, event_type, city, trade, variant_id, angle, value_usd, metadata_json, occurred_at
@@ -202,27 +208,33 @@ export async function recordScopedLearningEvent(
       )
       .bind(idempotencyKey)
       .first();
+    if (!existing) return false;
+
     const expectedValue =
       typeof input.valueUsd === "number" && Number.isFinite(input.valueUsd)
         ? input.valueUsd
         : null;
-    return Boolean(
-      existing &&
+    const sameCore =
       String(existing.prospect_id) === String(input.prospectId) &&
       String(existing.mode) === input.mode &&
       String(existing.tenant_id) === tenantId &&
       String(existing.event_type) === eventType &&
-      (existing.city || null) === (input.city || null) &&
-      (existing.trade || null) === (input.trade || null) &&
-      (existing.variant_id || null) === (input.variantId || null) &&
-      (existing.angle || null) === (input.angle || null) &&
-      (existing.value_usd ?? null) === expectedValue &&
-      String(existing.metadata_json || "{}") === metadataJson &&
-      String(existing.occurred_at || "") === String(occurredAt)
-    );
+      normalizeNullable(existing.city) === normalizeNullable(input.city) &&
+      normalizeNullable(existing.trade) === normalizeNullable(input.trade) &&
+      normalizeNullable(existing.variant_id) === normalizeNullable(input.variantId) &&
+      normalizeNullable(existing.angle) === normalizeNullable(input.angle) &&
+      normalizeValueUsd(existing.value_usd) === expectedValue;
+
+    if (!sameCore) return false;
+
+    if (existing.metadata_json != null && String(existing.metadata_json) !== metadataJson) {
+      return false;
+    }
+    if (existing.occurred_at != null && String(existing.occurred_at) !== String(occurredAt)) {
+      return false;
+    }
+    return true;
   } catch (err: any) {
-    // Tables may not exist until migrations 0023/0024 are applied.
-    // Never take down outreach / decision paths for learning storage failures.
     console.warn("[learningIntegrity] recordScopedLearningEvent skipped:", err?.message || err);
     return false;
   }
