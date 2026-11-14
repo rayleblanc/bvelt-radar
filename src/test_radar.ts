@@ -1386,7 +1386,14 @@ tests.push({
         TELEGRAM_CHAT_ID: "",
         RADAR_DB: {
           prepare: (sql: string) => ({
-            all: async () => ({ results: mockProspects })
+            bind: (...args: any[]) => ({
+              all: async () => ({ results: mockProspects }),
+              first: async () => null,
+              run: async () => ({ success: true, meta: { changes: 1 } })
+            }),
+            all: async () => ({ results: mockProspects }),
+            first: async () => null,
+            run: async () => ({ success: true, meta: { changes: 1 } })
           })
         }
       };
@@ -1922,7 +1929,9 @@ tests.push({
         bind: (...args: any[]) => ({
           first: async () => {
             if (sql.includes("FROM prospects WHERE id = ?")) {
-              return { id: "p_target_01", tenant_id: "tenant_alpha" };
+              return args[1] === "tenant_alpha"
+                ? { id: "p_target_01", tenant_id: "tenant_alpha" }
+                : null;
             }
             if (sql.includes("FROM tenant_config WHERE tenant_id = ?")) {
               return { tenant_id: args[0], tenant_name: "Test Tenant" };
@@ -1994,7 +2003,10 @@ tests.push({
       body: JSON.stringify({ prospect_id: "p_target_01", tenant_id: "tenant_gamma", outcome: "won" })
     });
     const resCrossOutcome = await worker.fetch(crossOutcomeReq, mockEnv, {} as any);
-    assert(resCrossOutcome.status === 403, "Outcome submission with mismatched prospect tenant must return 403");
+    assert(
+      resCrossOutcome.status === 403 || resCrossOutcome.status === 404,
+      "Outcome submission with mismatched prospect tenant must be denied without revealing its existence"
+    );
 
     // 7. Unauthenticated CSV export -> 401
     const unauthCsvReq = new Request("https://radar.bvelt.app/api/tenants/leads.csv?tenant_id=tenant_alpha", { method: "GET" });
@@ -2195,7 +2207,7 @@ tests.push({
               const p = prospectsStore.find(item => item.id === args[2]);
               if (p) p.signals_json = args[0];
             }
-            return { success: true };
+            return { success: true, meta: { changes: 1 } };
           }
         })
       })
