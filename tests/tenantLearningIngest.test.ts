@@ -125,3 +125,54 @@ describe("handleTenantLearningIngest", () => {
     assert.equal(res.status, 400);
   });
 });
+
+
+  it("reports an exact retry as deduplicated, not newly inserted", async () => {
+    const existing = {
+      prospect_id: "p1",
+      mode: "tenant",
+      tenant_id: "bvelt_tenant_alpha",
+      event_type: "won",
+      city: null,
+      trade: null,
+      variant_id: null,
+      angle: null,
+      value_usd: null,
+      metadata_json: "{}",
+      occurred_at: "2026-11-14T12:00:00.000Z",
+    };
+    const env: any = {
+      RADAR_SERVICE_KEY: "test-service-key",
+      RADAR_DB: {
+        prepare: (sql: string) => ({
+          bind: () => ({
+            first: async () => sql.includes("SELECT prospect_id, mode, tenant_id")
+              ? existing
+              : null,
+            run: async () => ({ meta: { changes: 0 } }),
+            all: async () => ({ results: [] }),
+          }),
+        }),
+        batch: async () => [{ meta: { changes: 0 } }],
+      },
+    };
+    const res = await handleTenantLearningIngest(jsonRequest({
+      mode: "tenant",
+      tenant_id: "bvelt_tenant_alpha",
+      items: [{
+        prospect_id: "p1",
+        event_type: "won",
+        idempotency_key: "bvelt-outcome:retry-1",
+        occurred_at: "2026-11-14T12:00:00.000Z",
+      }],
+    }), env, {});
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), {
+      ok: true,
+      mode: "tenant",
+      tenant_id: "bvelt_tenant_alpha",
+      accepted: 1,
+      inserted: 0,
+      deduplicated: 1,
+    });
+  });
