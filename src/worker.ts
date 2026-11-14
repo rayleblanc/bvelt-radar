@@ -4873,56 +4873,39 @@ export function tenantBuyerNameFits(name: string, nicheOrTrade: string): boolean
   const n = name.toLowerCase();
   const niche = (nicheOrTrade || "").toLowerCase();
 
-  // Hard reject obvious non-buyers for property/commercial ICP
-  if (/wig|scuba|diving|fence|metal fabricat|iron works|moving|attorney|lawyer|law office|criminal|church|ministry|school district|university|college\b|museum|florist|nursery\b|auto (repair|body|parts)|plumbing parts|marketing firm/i.test(n)) {
-    return false;
+  const propertyNiche = /property|management|manager|hoa|condo|apartment|realty|real estate|facility|building management|community management|office park|industrial park|warehouse/.test(niche);
+  const hotelNiche = /hotel|hospitality|lodging|extended stay|senior living|assisted living|nursing home/.test(niche);
+
+  if (propertyNiche) {
+    return /property|management|manager|hoa|condo|apartment|realty|real estate|facility|building management|community management|office park|industrial park|warehouse/i.test(n);
+  }
+  if (hotelNiche) {
+    return /hotel|inn|suites|lodge|motel|resort|senior living|assisted living|nursing home/i.test(n);
   }
 
-  if (/property|management|manager|hoa|condo|apartment|realty|real estate|property mgmt|prop management|facility|building management|community management|hotel|motel|inn\b|resort|hospitality|extended stay|senior living|assisted living|nursing home|office park|industrial park|warehouse/i.test(n)) {
-    return true;
-  }
-
-  // Soft allow if niche is hotel/hospitality and name has lodging cues
-  if (/hotel|hospitality|extended/.test(niche) && /hotel|inn|suites|lodge|motel|resort/i.test(n)) {
-    return true;
-  }
-
-  // Default: for strict property management search, reject weak names
-  if (/property management|property manager|hoa|real estate/.test(niche)) {
-    return false;
-  }
-
-  return true; // other niches: allow through, Clef will refine
+  // Other buyer categories stay open; the tenant's ICP and evidence refine them.
+  return true;
 }
 
 export function isNonBusinessEntity(name: string, website: string | undefined, mode: string): boolean {
-  if (website) {
+  if (website && mode !== "tenant") {
     try {
       const parsedUrl = new URL(website.startsWith("http") ? website : `http://${website}`);
-      const hostname = parsedUrl.hostname.toLowerCase();
-      if (hostname.endsWith(".edu") || hostname.endsWith(".gov")) {
-        return true;
-      }
+      if (parsedUrl.hostname.toLowerCase().endsWith(".gov")) return true;
     } catch {
       const lowerWeb = website.toLowerCase();
-      if (lowerWeb.endsWith(".edu") || lowerWeb.endsWith(".gov") || lowerWeb.includes(".edu/") || lowerWeb.includes(".gov/")) {
-        return true;
-      }
+      if (lowerWeb.endsWith(".gov") || lowerWeb.includes(".gov/")) return true;
     }
   }
 
   if (name) {
     const lowerName = name.toLowerCase();
-    const commonPattern = /\b(extension|university|college|school district|county|city of|library|museum|foundation|chamber of commerce)\b/;
-    if (commonPattern.test(lowerName)) {
-      return true;
-    }
+    const publicAgencyPattern = /\b(police department|fire department|city government|county government|government agency|public authority)\b/;
+    if (publicAgencyPattern.test(lowerName)) return true;
 
     if (mode !== "tenant") {
-      const nonTenantPattern = /\b(church|ministry|association|hoa|homeowners)\b/;
-      if (nonTenantPattern.test(lowerName)) {
-        return true;
-      }
+      const founderNonBuyerPattern = /\b(church|ministry|association|hoa|homeowners)\b/;
+      if (founderNonBuyerPattern.test(lowerName)) return true;
     }
   }
 
