@@ -4178,6 +4178,7 @@ async function handleDecision(
 
     // Execute Outbound Email Dispatch
     let dispatchOutcome: any = { success: true, provider: 'simulated', status: 'simulated', messageId: `sim_${id.substring(0, 8)}` };
+    let manualIdempotencyKey: string | null = null;
     if (prospect.email && prospect.email.includes('@')) {
       const manualEligibility = await getFounderOutreachEligibility(db, prospect);
       if (!manualEligibility.allowed) {
@@ -4191,7 +4192,7 @@ async function handleDecision(
         return Response.json({ success: false, blocked: true, reason: "email_not_provider_verified", id }, { status: 409, headers });
       }
       const manualSequenceId = env.RESEND_API_KEY ? "resend_live" : env.BREVO_API_KEY ? "brevo_live" : "manual_simulated";
-      const manualIdempotencyKey = buildOutreachIdempotencyKey(prospect.tenant_id || "founder", prospect.id, manualSequenceId, manualEligibility.nextTouch);
+      manualIdempotencyKey = buildOutreachIdempotencyKey(prospect.tenant_id || "founder", prospect.id, manualSequenceId, manualEligibility.nextTouch);
       const existingManual = await db.prepare("SELECT status FROM outreach_idempotency WHERE idempotency_key = ?").bind(manualIdempotencyKey).first() as any;
       if (existingManual && ["reserved", "sent", "scheduled", "queued", "provider_unknown"].includes(String(existingManual.status || "").toLowerCase())) {
         return Response.json({ success: false, blocked: true, reason: "already_processed_for_this_touch", id }, { status: 409, headers });
@@ -4279,7 +4280,7 @@ async function handleDecision(
       }
     }
 
-    if (prospect.email && prospect.email.includes('@')) {
+    if (manualIdempotencyKey) {
       try {
         await db.prepare("UPDATE outreach_idempotency SET status = 'sent', provider_reference = ?, updated_at = ? WHERE idempotency_key = ?")
           .bind(dispatchOutcome.messageId || null, timestamp, manualIdempotencyKey).run();
