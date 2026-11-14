@@ -99,40 +99,6 @@ export async function recordScopedLearningEvent(
 
   if (inserted?.meta?.changes === 0) return false;
 
-  const keys = new Set<string>();
-  if (input.city) keys.add(`city:${input.city}`);
-  if (input.trade) keys.add(`trade:${String(input.trade).toLowerCase()}`);
-  if (input.city && input.trade) keys.add(`pair:${input.city}|${String(input.trade).toLowerCase()}`);
-  if (input.variantId) keys.add(`variant:${input.variantId}`);
-  if (input.angle) keys.add(`angle:${input.angle}`);
-
-  for (const key of keys) {
-    await db.prepare(`
-      INSERT INTO learning_stats_scoped (
-        mode, tenant_id, key, sent_count, delivered_count, replied_count,
-        qualified_count, booked_count, won_count, lost_count, contacted_count,
-        unknown_count, total_events, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(mode, tenant_id, key) DO UPDATE SET
-        sent_count = sent_count + excluded.sent_count,
-        delivered_count = delivered_count + excluded.delivered_count,
-        replied_count = replied_count + excluded.replied_count,
-        qualified_count = qualified_count + excluded.qualified_count,
-        booked_count = booked_count + excluded.booked_count,
-        won_count = won_count + excluded.won_count,
-        lost_count = lost_count + excluded.lost_count,
-        contacted_count = contacted_count + excluded.contacted_count,
-        unknown_count = unknown_count + excluded.unknown_count,
-        total_events = total_events + excluded.total_events,
-        updated_at = excluded.updated_at
-    `).bind(
-      input.mode, tenantId, key,
-      delta.sent_count, delta.delivered_count, delta.replied_count,
-      delta.qualified_count, delta.booked_count, delta.won_count,
-      delta.lost_count, delta.contacted_count, delta.unknown_count,
-      delta.event_count, occurredAt
-    ).run();
-  }
 
   return true;
 }
