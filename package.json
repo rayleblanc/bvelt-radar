@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "lint": "tsc --noEmit",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:radar": "npx --yes tsx src/test_radar.ts && npx --yes tsx --test tests/tenantLearningIngest.test.ts",
+    "deploy": "npx wrangler deploy"
   },
   "dependencies": {
     "lucide-react": "0.546.0",
