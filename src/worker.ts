@@ -4195,6 +4195,12 @@ async function handleDecision(
   }
 
   const timestamp = new Date().toISOString();
+  const closeLinkedOpportunities = async () => {
+    try {
+      await db.prepare("UPDATE opportunities SET status = 'closed', decision_state = 'closed', updated_at = ? WHERE prospect_id = ?")
+        .bind(timestamp, id).run();
+    } catch (e) {}
+  };
 
   if (action === "sent" || action === "approve") {
     if (!prospect.email || !String(prospect.email).includes("@")) {
@@ -4426,6 +4432,7 @@ async function handleDecision(
 
     await recordLearningEvent(db, prospect.city, prospect.trade, prospect.variant_id, false, { event_type: "replied", response_type: "positive", prospect_id: id, mode: prospect.mode, tenant_id: prospect.tenant_id || "founder" });
 
+    await closeLinkedOpportunities();
     return Response.json({ success: true, message: `Prospect ${id} marked as REPLIED.`, id }, { headers });
 
   } else if (action === "demo") {
@@ -4441,6 +4448,7 @@ async function handleDecision(
       } catch (e) {}
     }
 
+    await closeLinkedOpportunities();
     return Response.json({ success: true, message: `Prospect ${id} marked as DEMO.`, id }, { headers });
 
   } else if (action === "won" || action === "converted") {
@@ -4458,6 +4466,7 @@ async function handleDecision(
 
     await recordLearningEvent(db, prospect.city, prospect.trade, prospect.variant_id, false, { event_type: "won", response_type: "converted", is_win: true, prospect_id: id, mode: prospect.mode, tenant_id: prospect.tenant_id || "founder" });
 
+    await closeLinkedOpportunities();
     return Response.json({ success: true, message: `Prospect ${id} marked as WON/CONVERTED.`, id }, { headers });
 
   } else if (action === "discard") {
@@ -4485,6 +4494,7 @@ async function handleDecision(
 
     await recordLearningEvent(db, prospect.city, prospect.trade, prospect.variant_id, false, { event_type: "discarded", prospect_id: id, mode: prospect.mode, tenant_id: prospect.tenant_id || "founder" });
 
+    await closeLinkedOpportunities();
     return Response.json({ success: true, message: `Prospect ${id} discarded with 30-day cooldown.`, id }, { headers });
 
   } else if (action === "suppress") {
@@ -4510,6 +4520,7 @@ async function handleDecision(
 
     await recordLearningEvent(db, prospect.city, prospect.trade, prospect.variant_id, false, { event_type: "suppressed", prospect_id: id, mode: prospect.mode, tenant_id: prospect.tenant_id || "founder" });
 
+    await closeLinkedOpportunities();
     return Response.json({ success: true, message: `Prospect ${id} fully suppressed.`, id }, { headers });
   }
 
