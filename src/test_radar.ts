@@ -2,7 +2,8 @@ declare const process: any;
 
 import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, resolveTenantBuyerSegments, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey } from './worker';
 import { DEFAULT_FOUNDER_MISSION, MissionConfig } from './worker';
-import { buildResendIdempotencyKey } from './emailDispatcher';
+import { buildResendIdempotencyKey, resolveBveltSender } from './emailDispatcher';
+import { sanitizeEmail } from './emailSanitizer';
 import { fetchPermitContractors } from './permitSources';
 import { pickTargets } from './geoFrontier';
 import { isOffIcpName } from './emailSanitizer';
@@ -26,6 +27,20 @@ function assert(condition: boolean, message: string) {
     throw new Error(message);
   }
 }
+
+tests.push({
+  name: "Outbound mail rejects placeholder recipients and unaligned sender domains",
+  run: () => {
+    assert(!sanitizeEmail("example@mail.com").valid, "Placeholder local part must be rejected");
+    assert(!sanitizeEmail("owner@example.com").valid, "Reserved example domains must be rejected");
+    assert(sanitizeEmail("owner@realbusiness.com").valid, "Real business email syntax remains eligible");
+    const sender = resolveBveltSender("Bvelt <bvelt@bvelt.app>");
+    assert(sender?.email === "bvelt@bvelt.app", "Authenticated Bvelt sender must be accepted");
+    assert(!resolveBveltSender("Bvelt <onboarding@resend.dev>"), "Resend shared onboarding sender must be rejected");
+    assert(!resolveBveltSender("Bvelt <founder@gmail.com>"), "Unaligned external sender must be rejected");
+    assert(!resolveBveltSender(""), "Missing sender must fail closed");
+  }
+});
 
 tests.push({
   name: "Learning Integrity: sent, delivered, replied and won remain distinct outcomes",
