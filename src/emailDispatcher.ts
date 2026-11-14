@@ -170,7 +170,7 @@ export function normalizeFounderOutreachCopy(
   const safeSubject = business
     ? `Question about customer follow-up at ${business}`
     : 'Question about your customer follow-up process';
-  const footerMatch = sourceBody.match(/(?:^|\n\n)(reply\s+stop[\s\S]*)$/i);
+  const footerMatch = sourceBody.match(/(reply\s+stop[\s\S]*)$/i);
   const footer = footerMatch ? footerMatch[1].trim() : '';
   const safeBody = [
     `Hi ${business || 'team'},`,
