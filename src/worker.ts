@@ -2272,24 +2272,23 @@ export default {
           "UPDATE prospects SET tenant_outcome = ?, won_value_usd = CASE WHEN ? = 'won' THEN COALESCE(?, won_value_usd) ELSE won_value_usd END, updated_at = ? WHERE id = ? AND mode = 'tenant' AND tenant_id = ?"
         ).bind(outcome, outcome, parsedValue, timestamp, prospect_id, tenant_id).run();
 
-        if (outcomeChanged) {
-          await recordLearningEvent(
-            env.RADAR_DB,
-            prospect.city,
-            prospect.trade,
-            prospect.variant_id || null,
-            false,
-            {
-              event_type: outcome,
-              outcome,
-              response_type: outcome,
-              prospect_id: String(prospect.id),
-              mode: "tenant",
-              tenant_id: tenant_id,
-              value_usd: parsedValue
-            }
-          );
-        }
+        await recordLearningEvent(
+          env.RADAR_DB,
+          prospect.city,
+          prospect.trade,
+          prospect.variant_id || null,
+          false,
+          {
+            event_type: outcome,
+            outcome,
+            response_type: outcome,
+            prospect_id: String(prospect.id),
+            mode: "tenant",
+            tenant_id: tenant_id,
+            value_usd: parsedValue,
+            idempotency_key: `tenant-outcome:${prospect.id}:${outcome}`
+          }
+        );
 
         await sendTenantObservationsToBvelt(env, tenant_id, {
           prospectIds: [String(prospect_id)]
@@ -11333,19 +11332,20 @@ async function recordLearningEvent(
     mode?: string;
     tenant_id?: string;
     value_usd?: number | null;
+    idempotency_key?: string;
   }
-): Promise<void> {
+): Promise<boolean> {
   const mode = details?.mode === "tenant" ? "tenant" : "founder";
   const tenantId = mode === "tenant" ? String(details?.tenant_id || "") : "founder";
   if (!details?.prospect_id || (mode === "tenant" && (!tenantId || tenantId === "founder"))) {
     console.warn("[Learning Integrity] Skipped event without a valid prospect/scope.");
-    return;
+    return false;
   }
 
   const eventType = String(details?.event_type || (isSent ? "sent" : details?.outcome || "unknown")).toLowerCase();
   const occurredAt = new Date().toISOString();
   try {
-    await recordScopedLearningEvent(db, {
+    return await recordScopedLearningEvent(db, {
       mode,
       tenantId,
       prospectId: String(details.prospect_id),
@@ -11356,6 +11356,7 @@ async function recordLearningEvent(
       angle: details?.angle || null,
       valueUsd: details?.value_usd ?? null,
       occurredAt,
+      idempotencyKey: details?.idempotency_key || `${String(details.prospect_id)}:${eventType}`,
       metadata: {
         score: details?.score,
         response_type: details?.response_type,
@@ -11365,6 +11366,7 @@ async function recordLearningEvent(
     });
   } catch (e) {
     console.warn("[Learning Integrity] Event persistence warning:", e);
+    return false;
   }
 }
 
@@ -11443,7 +11445,7 @@ async function getLearningStats(
     const live = await db.prepare(`
       SELECT city, trade,
         SUM(CASE WHEN outcome IN ('won','converted') OR tenant_outcome = 'won' THEN 1 ELSE 0 END) AS wins,
-        SUM(CASE WHEN outcome IN ('sent','positive','booked','converted','won') OR status IN ('sent','delivered','replied','converted','won') OR tenant_outcome IN ('contacted','replied','won','lost') THEN 1 ELSE 0 END) AS sent
+        SUM(CASE WHEN outcome IN ('sent','positive','won','lost','converted') OR status IN ('sent','delivered','replied','converted','won','lost') OR tenant_outcome IN ('replied','won','lost') THEN 1 ELSE 0 END) AS sent
       FROM prospects
       WHERE mode = ?
         AND COALESCE(tenant_id, 'founder') = ?
