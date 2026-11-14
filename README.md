@@ -106,7 +106,7 @@ The Worker can optionally enrich prospects with public evidence without changing
 - **Internet Archive freshness**: a weak signal based on the latest available snapshot. It is never treated as proof that a live site is stale.
 - **Municipal permits**: verified Austin and Orlando public datasets plus configurable `PERMIT_SOURCES_JSON`. The Worker does not guess dataset IDs for other cities.
 - **Census ZIP housing age**: optional and only activated with `CENSUS_ENABLED=1`, `CENSUS_API_KEY`, and a discovered ZIP code. Census API queries require an API key as of September 2026.
-- **Tenant isolation**: Tenant mode requires an explicit tenant configuration and no longer invents fallback cities. Its target niches come from `subniches_json` or the configured trade-to-B2B target map.
+- **Tenant isolation**: Tenant mode requires an explicit tenant configuration and never invents cities. Buyer segments are derived from AI ICP expansion first, then explicit `subniches_json` / `allowed_markets_json` / `icp_keywords_json`, with the trade-to-B2B map as a fallback. An unmapped industry remains eligible; discovery waits only when no buyer ICP can be inferred.
 
 ### Intentionally not implemented
 
@@ -150,7 +150,7 @@ After a prospect is enriched and scored, Radar now maintains:
 
 ### Targeting safety
 
-Founder targets can be persisted in D1 through `/api/config`; these targets take precedence over legacy `FOUNDING_CITIES` / `FOUNDING_TRADES`. No production fallback invents a city or trade when configuration is empty. The legacy environment variables remain supported for compatibility.
+Founder targets can be persisted in D1 through `/api/config`; these targets take precedence over legacy `FOUNDING_CITIES` / `FOUNDING_TRADES`. With no explicit city list, Founder rotates through the available gazetteer; with no custom niche list, it seeds broad Bvelt-compatible segments from `market-universe.json`. No fixed city or country is hardcoded, and custom industries are not rejected by a closed allowlist.
 
 ### Database migrations
 
