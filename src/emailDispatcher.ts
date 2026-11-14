@@ -175,7 +175,7 @@ export function normalizeFounderOutreachCopy(
   const safeBody = [
     `Hi ${business || 'team'},`,
     '',
-    "I'm Ray, founder of Bvelt. We build tools that help service businesses follow up with people who contact them or request estimates.",
+    "I'm Rainer, founder of Bvelt. We build tools that help service businesses follow up with people who contact them or request estimates.",
     '',
     'How do you currently handle those follow-ups when your team is busy?',
     footer
