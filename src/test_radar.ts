@@ -148,13 +148,15 @@ tests.push({
 });
 
 tests.push({
-  name: "Founder targeting fails closed without configured markets and niches",
+  name: "Founder uses open market priorities without fixed cities or country allowlists",
   run: async () => {
     const targets = await getPriorityTargets(1, {} as any, "founder", null);
-    assert(targets.activeCities.length === 0, "Founder must not invent default cities");
-    assert(targets.activeTrades.length === 0, "Founder must not invent default trades");
-    assert(targets.missionConfig.countries.length === 0, "Founder must not silently default to US/CA");
-    assert(DEFAULT_FOUNDER_MISSION.geographies.length === 0 && DEFAULT_FOUNDER_MISSION.niches.length === 0, "Default Founder mission must remain neutral");
+    assert(targets.activeCities.length > 0, "Founder should rotate through the available gazetteer");
+    assert(targets.activeTrades.length > 0, "Founder should seed broad Bvelt-compatible segments");
+    assert(targets.missionConfig.geographies.length === 0, "Founder must not hardcode city lists");
+    assert(targets.missionConfig.countries.length === 0, "Priority countries must not become a country allowlist");
+    assert(DEFAULT_FOUNDER_MISSION.niches.includes("home_services"), "Founder seeds broad market-universe segments");
+    assert(DEFAULT_FOUNDER_MISSION.geographies.length === 0, "Default Founder mission must not pin cities");
 
     const picks = await pickTargets({} as any, {
       tenantId: "founder",
@@ -162,7 +164,7 @@ tests.push({
       count: 5,
       countries: []
     });
-    assert(picks.length === 0, "GeoFrontier must return no targets without explicit countries and trades");
+    assert(picks.length === 0, "GeoFrontier must not invent a trade when none is supplied");
   }
 });
 
