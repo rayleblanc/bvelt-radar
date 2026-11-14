@@ -4147,7 +4147,9 @@ async function handleDecision(
       } catch (e) {}
     }
 
-    await recordLearningEvent(db, prospect.city, prospect.trade, prospect.variant_id, false, { event_type: "replied", response_type: "positive", prospect_id: id, mode: prospect.mode, tenant_id: prospect.tenant_id || "founder" });
+    if (prospect.outcome !== "positive") {
+      await recordLearningEvent(db, prospect.city, prospect.trade, prospect.variant_id, false, { event_type: "replied", response_type: "positive", prospect_id: id, mode: prospect.mode, tenant_id: prospect.tenant_id || "founder" });
+    }
 
     return Response.json({ success: true, message: `Prospect ${id} marked as REPLIED.`, id }, { headers });
 
@@ -4179,7 +4181,9 @@ async function handleDecision(
       } catch (e) {}
     }
 
-    await recordLearningEvent(db, prospect.city, prospect.trade, prospect.variant_id, false, { event_type: "won", response_type: "converted", is_win: true, prospect_id: id, mode: prospect.mode, tenant_id: prospect.tenant_id || "founder" });
+    if (prospect.outcome !== "converted" && prospect.outcome !== "won") {
+      await recordLearningEvent(db, prospect.city, prospect.trade, prospect.variant_id, false, { event_type: "won", response_type: "converted", is_win: true, prospect_id: id, mode: prospect.mode, tenant_id: prospect.tenant_id || "founder" });
+    }
 
     return Response.json({ success: true, message: `Prospect ${id} marked as WON/CONVERTED.`, id }, { headers });
 
