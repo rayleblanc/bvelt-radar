@@ -2,7 +2,7 @@ declare const process: any;
 
 import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, resolveTenantBuyerSegments, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey, notifyOnce, isVerifiedDeliverableEmail, evaluateFounderOutreachEligibility, buildTechnicalAuditSnapshot, isEmailValidatedForOutreach, isCompletePostalAddress } from './worker';
 import { DEFAULT_FOUNDER_MISSION, MissionConfig } from './worker';
-import { buildResendIdempotencyKey, buildBrandedEmailHtml, resolveBveltSender, inspectOutboundEmailAuth, normalizeOutreachBody } from './emailDispatcher';
+import { buildResendIdempotencyKey, buildBrandedEmailHtml, resolveBveltSender, inspectOutboundEmailAuth, normalizeOutreachBody, normalizeFounderOutreachCopy } from './emailDispatcher';
 import { fetchPermitContractors } from './permitSources';
 import { pickTargets } from './geoFrontier';
 import { isOffIcpName, sanitizeEmail } from './emailSanitizer';
@@ -276,6 +276,27 @@ tests.push({
     assert(result.dkimPresent && result.spfPresent && result.dmarcPresent && result.returnPathMxPresent, "All expected DNS records must be detected");
     assert(result.dmarcPolicy === "none", "DMARC policy must be parsed");
     assert(!JSON.stringify(result).includes("re_test_secret"), "Diagnostics must never return API credentials");
+  }
+});
+
+tests.push({
+  name: "Founder outbound copy removes unsupported audit and revenue claims",
+  run: () => {
+    const unsafe = normalizeFounderOutreachCopy(
+      "Free Audit: Stop Losing Calls & Slow Site",
+      "Hi team, we noticed your website is slow. We can stop losing calls with a free technical audit. Reply STOP to opt out.",
+      "Example Plumbing"
+    );
+    assert(unsafe.sanitized, "Unsupported audit and performance claims must trigger safe copy");
+    assert(!/free|audit|stop losing|slow site/i.test(unsafe.subject + " " + unsafe.body), "Unsafe claims must not reach the provider");
+    assert(unsafe.subject.includes("Example Plumbing"), "Safe subject should remain prospect-specific");
+    assert(unsafe.body.includes("Reply STOP to opt out."), "The legal opt-out footer must be preserved");
+    const safe = normalizeFounderOutreachCopy(
+      "Question about your follow-up process",
+      "Hi team, how do you currently follow up with estimate requests? Reply STOP to opt out.",
+      "Example Plumbing"
+    );
+    assert(!safe.sanitized, "Neutral factual copy should remain unchanged");
   }
 });
 
