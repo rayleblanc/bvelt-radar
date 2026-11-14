@@ -46,7 +46,7 @@ export function learningCounterDelta(eventType: string): LearningCounterDelta {
     lost_count: 0,
     contacted_count: 0,
     unknown_count: 0,
-    event_count: 1
+    event_count: 1,
   };
 
   if (event === "sent") delta.sent_count = 1;
@@ -54,13 +54,19 @@ export function learningCounterDelta(eventType: string): LearningCounterDelta {
   else if (event === "opened") delta.opened_count = 1;
   else if (event === "clicked") delta.clicked_count = 1;
   else if (event === "bounced") delta.bounced_count = 1;
-  else if (["replied", "positive", "question", "negative", "not_now", "unsubscribe", "out_of_office"].includes(event)) delta.replied_count = 1;
-  else if (event === "qualified") delta.qualified_count = 1;
+  else if (
+    ["replied", "positive", "question", "negative", "not_now", "unsubscribe", "out_of_office"].includes(
+      event
+    )
+  ) {
+    delta.replied_count = 1;
+  } else if (event === "qualified") delta.qualified_count = 1;
   else if (event === "booked") delta.booked_count = 1;
   else if (["won", "converted"].includes(event)) delta.won_count = 1;
   else if (event === "lost") delta.lost_count = 1;
   else if (event === "contacted") delta.contacted_count = 1;
-  else if (event === "unknown") delta.unknown_count = 1;
+  else if (["unknown", "discarded", "suppressed"].includes(event)) delta.unknown_count = 1;
+  else delta.unknown_count = 1;
 
   return delta;
 }
@@ -78,50 +84,63 @@ export async function recordScopedLearningEvent(
   db: any,
   input: ScopedLearningEventInput
 ): Promise<boolean> {
-  if (!input.prospectId || !input.eventType) return false;
-  const tenantId = normalizeScope(input.mode, input.tenantId);
-  const occurredAt = input.occurredAt || new Date().toISOString();
-  const eventType = String(input.eventType).trim().toLowerCase();
-  const delta = learningCounterDelta(eventType);
-  const eventId = crypto.randomUUID();
-  const idempotencyKey = input.idempotencyKey
-    ? `${input.mode}:${tenantId}:${input.idempotencyKey}`
-    : `${input.mode}:${tenantId}:${input.prospectId}:${eventType}:${occurredAt}`;
-  const metadataJson = JSON.stringify(input.metadata || {});
+  if (!db || !input.prospectId || !input.eventType) return false;
 
-  const keys = new Set<string>();
-  if (input.city) keys.add(`city:${input.city}`);
-  if (input.trade) keys.add(`trade:${String(input.trade).toLowerCase()}`);
-  if (input.city && input.trade) keys.add(`pair:${input.city}|${String(input.trade).toLowerCase()}`);
-  if (input.variantId) keys.add(`variant:${input.variantId}`);
-  if (input.angle) keys.add(`angle:${input.angle}`);
+  try {
+    const tenantId = normalizeScope(input.mode, input.tenantId);
+    const occurredAt = input.occurredAt || new Date().toISOString();
+    const eventType = String(input.eventType).trim().toLowerCase();
+    const delta = learningCounterDelta(eventType);
+    const eventId = crypto.randomUUID();
+    const idempotencyKey = input.idempotencyKey
+      ? `${input.mode}:${tenantId}:${input.idempotencyKey}`
+      : `${input.mode}:${tenantId}:${input.prospectId}:${eventType}:${occurredAt}`;
+    const metadataJson = JSON.stringify(input.metadata || {});
 
-  const statements = [
-    db.prepare(`
+    const keys = new Set<string>();
+    if (input.city) keys.add(`city:${input.city}`);
+    if (input.trade) keys.add(`trade:${String(input.trade).toLowerCase()}`);
+    if (input.city && input.trade) {
+      keys.add(`pair:${input.city}|${String(input.trade).toLowerCase()}`);
+    }
+    if (input.variantId) keys.add(`variant:${input.variantId}`);
+    if (input.angle) keys.add(`angle:${input.angle}`);
+
+    const statements = [
+      db
+        .prepare(
+          `
       INSERT OR IGNORE INTO learning_events
         (id, prospect_id, mode, tenant_id, event_type, city, trade, variant_id, angle, value_usd, metadata_json, idempotency_key, occurred_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).bind(
-      eventId,
-      input.prospectId,
-      input.mode,
-      tenantId,
-      eventType,
-      input.city || null,
-      input.trade || null,
-      input.variantId || null,
-      input.angle || null,
-      typeof input.valueUsd === "number" && Number.isFinite(input.valueUsd) ? input.valueUsd : null,
-      metadataJson,
-      idempotencyKey,
-      occurredAt
-    )
-  ];
+    `
+        )
+        .bind(
+          eventId,
+          input.prospectId,
+          input.mode,
+          tenantId,
+          eventType,
+          input.city || null,
+          input.trade || null,
+          input.variantId || null,
+          input.angle || null,
+          typeof input.valueUsd === "number" && Number.isFinite(input.valueUsd)
+            ? input.valueUsd
+            : null,
+          metadataJson,
+          idempotencyKey,
+          occurredAt
+        ),
+    ];
 
-  // Event and derived counters commit together. The generated event ID makes
-  // every aggregate update conditional on this exact insert succeeding.
-  for (const key of keys) {
-    statements.push(db.prepare(`
+    // Event and derived counters commit together. Aggregate updates only apply
+    // if this exact event row was inserted (idempotent retries no-op cleanly).
+    for (const key of keys) {
+      statements.push(
+        db
+          .prepare(
+            `
       INSERT INTO learning_stats_scoped (
         mode, tenant_id, key, sent_count, delivered_count, opened_count, clicked_count,
         bounced_count, replied_count, qualified_count, booked_count, won_count,
@@ -145,17 +164,39 @@ export async function recordScopedLearningEvent(
         unknown_count = unknown_count + excluded.unknown_count,
         total_events = total_events + excluded.total_events,
         updated_at = excluded.updated_at
-    `).bind(
-      input.mode, tenantId, key,
-      delta.sent_count, delta.delivered_count, delta.opened_count, delta.clicked_count,
-      delta.bounced_count, delta.replied_count, delta.qualified_count, delta.booked_count,
-      delta.won_count, delta.lost_count, delta.contacted_count, delta.unknown_count,
-      delta.event_count, occurredAt, eventId
-    ));
-  }
+    `
+          )
+          .bind(
+            input.mode,
+            tenantId,
+            key,
+            delta.sent_count,
+            delta.delivered_count,
+            delta.opened_count,
+            delta.clicked_count,
+            delta.bounced_count,
+            delta.replied_count,
+            delta.qualified_count,
+            delta.booked_count,
+            delta.won_count,
+            delta.lost_count,
+            delta.contacted_count,
+            delta.unknown_count,
+            delta.event_count,
+            occurredAt,
+            eventId
+          )
+      );
+    }
 
-  const results = await db.batch(statements);
-  return Number(results?.[0]?.meta?.changes || 0) > 0;
+    const results = await db.batch(statements);
+    return Number(results?.[0]?.meta?.changes || 0) > 0;
+  } catch (err: any) {
+    // Tables may not exist until migrations 0023/0024 are applied.
+    // Never take down outreach / decision paths for learning storage failures.
+    console.warn("[learningIntegrity] recordScopedLearningEvent skipped:", err?.message || err);
+    return false;
+  }
 }
 
 export async function readScopedLearningStats(
@@ -163,18 +204,29 @@ export async function readScopedLearningStats(
   mode: LearningMode,
   tenantIdInput: string
 ): Promise<Record<string, number>> {
-  const tenantId = normalizeScope(mode, tenantIdInput);
   const rates: Record<string, number> = {};
-  const rows = await db.prepare(`
+  if (!db) return rates;
+
+  try {
+    const tenantId = normalizeScope(mode, tenantIdInput);
+    const rows = await db
+      .prepare(
+        `
     SELECT key, sent_count, replied_count, booked_count, won_count, lost_count
     FROM learning_stats_scoped
     WHERE mode = ? AND tenant_id = ? AND sent_count >= 2
-  `).bind(mode, tenantId).all();
+  `
+      )
+      .bind(mode, tenantId)
+      .all();
 
-  for (const row of (rows?.results || []) as any[]) {
-    const sent = Math.max(1, Number(row.sent_count || 0));
-    const won = Math.min(sent, Number(row.won_count || 0));
-    rates[String(row.key)] = (won + 1) / (sent + 2);
+    for (const row of (rows?.results || []) as any[]) {
+      const sent = Math.max(1, Number(row.sent_count || 0));
+      const won = Math.min(sent, Number(row.won_count || 0));
+      rates[String(row.key)] = (won + 1) / (sent + 2);
+    }
+  } catch (err: any) {
+    console.warn("[learningIntegrity] readScopedLearningStats skipped:", err?.message || err);
   }
   return rates;
 }
