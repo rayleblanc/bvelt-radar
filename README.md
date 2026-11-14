@@ -71,8 +71,17 @@ curl -F "url=https://bvelt-radar.TU_SUBDOMINIO.workers.dev/telegram-webhook" \
 ```
 
 ### 5. Desplegar el Worker
+
+En **Cloudflare Workers Builds** configura:
+
+- **Build command:** `npm run build`
+- **Deploy command:** `npm run deploy`
+
+El script de despliegue ejecuta `npx wrangler deploy`. No uses `npm wrangler deploy`.
+
+Para un despliegue manual:
 ```bash
-npx wrangler deploy
+npm run deploy
 ```
 
 ---
