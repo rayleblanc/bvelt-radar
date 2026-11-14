@@ -79,6 +79,41 @@ describe("handleTenantLearningIngest", () => {
     assert.equal(res.status, 400);
   });
 
+  it("returns 409 when an idempotency key is reused with a different event", async () => {
+    const env: any = {
+      RADAR_SERVICE_KEY: "test-service-key",
+      RADAR_DB: {
+        prepare: () => ({
+          bind: () => ({
+            first: async () => ({
+              id: "stored-event",
+              prospect_id: "p1",
+              mode: "tenant",
+              tenant_id: "bvelt_tenant_alpha",
+              event_type: "won",
+              city: null,
+              trade: null,
+              variant_id: null,
+              angle: null,
+              value_usd: null,
+              metadata_json: "{}",
+              occurred_at: "2026-11-14T12:00:00.000Z",
+            }),
+          }),
+        }),
+        batch: async () => [{ meta: { changes: 0 } }],
+      },
+    };
+    const req = jsonRequest({
+      mode: "tenant",
+      tenant_id: "bvelt_tenant_alpha",
+      items: [{ prospect_id: "p1", event_type: "lost", idempotency_key: "same-key", occurred_at: "2026-11-14T12:00:00.000Z" }],
+    });
+    const res = await handleTenantLearningIngest(req, env, {});
+    assert.equal(res.status, 409);
+    assert.deepEqual(await res.json(), { ok: false, error: "idempotency_conflict" });
+  });
+
   it("rejects empty items", async () => {
     const env = makeEnv();
     const req = jsonRequest({
