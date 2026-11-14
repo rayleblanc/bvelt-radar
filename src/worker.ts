@@ -3,7 +3,7 @@
  * Autonomous B2B Prospecting & Multi-factor Lead Scoring for Bvelt
  * 
  * Capabilities:
- * - Dynamic Sun Belt & Mid-size Regional Ranking
+ * - Configurable market and niche targeting without implicit geography defaults
  * - Trade-specific Overpass OSM & BizData Scrapers
  * - Multi-Factor 0-100 Scoring with historical conversion learning
  * - Trade Psychology Copywriting (A/B testing: missed_calls vs dormant_leads)
