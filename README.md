@@ -143,7 +143,7 @@ Founder targets can be persisted in D1 through `/api/config`; these targets take
 
 ### Database upgrade
 
-Apply migrations **0001 through 0022** to the existing `bvelt-radar-db`. Never rename or modify historical migrations that have already been applied. Migration 0022 is additive.
+Apply all migrations in order through **0029** to the existing `bvelt-radar-db`. Never rename or modify historical migrations that have already been applied. Migration 0029 adds append-only learning events and Founder/Tenant-scoped learning aggregates; it does not rewrite legacy learning data.
 
 ### Validation
 
