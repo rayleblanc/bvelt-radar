@@ -161,7 +161,7 @@ export async function pickTargets(
     centerLabel?: string;
     serviceRadiusKm?: number;
     countries?: string[];
-    /** Restrict pool to these city labels (e.g. "Tampa, FL"). Prevents national drift to NYC etc. */
+    /** Restrict pool to these city labels (e.g. "City A, Region"). Prevents national drift to NYC etc. */
     allowedCities?: string[];
   }
 ): Promise<{ place: GeoPlace; trade: string; why: string }[]> {
