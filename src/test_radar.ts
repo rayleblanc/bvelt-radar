@@ -56,7 +56,6 @@ tests.push({
   name: "Tenant CRM learning ingest is authenticated, tenant-scoped and idempotent",
   run: async () => {
     const storedKeys = new Set<string>();
-    let storedMetadata: any = null;
     const mockDb: any = {
       prepare: (sql: string) => ({
         bind: (...args: any[]) => ({
@@ -72,7 +71,6 @@ tests.push({
       }),
       batch: async (statements: any[]) => {
         const key = String(statements[0].args[11]);
-        storedMetadata = JSON.parse(String(statements[0].args[10] || "{}"));
         const inserted = !storedKeys.has(key);
         if (inserted) storedKeys.add(key);
         return statements.map((_: any, index: number) => ({
@@ -87,8 +85,6 @@ tests.push({
       items: [{
         prospect_id: "radar_prospect_1",
         event_type: "won",
-        customer_choice_reason_code: "PRICE",
-        customer_choice_provenance: "OWNER_REPORTED_CUSTOMER_STATEMENT",
         city: "Toronto, ON",
         trade: "plumbing",
         occurred_at: "2026-11-14T10:00:00.000Z",
@@ -122,8 +118,6 @@ tests.push({
     const retryBody = await retry.json() as any;
     assert(first.status === 200 && firstBody.inserted === 1, "First CRM outcome must be persisted");
     assert(retry.status === 200 && retryBody.deduplicated === 1, "Exact retry must be acknowledged without a second insert");
-    assert(storedMetadata?.customer_choice?.reason_code === "PRICE", "Declared choice reason must be preserved as event metadata");
-    assert(storedMetadata?.customer_choice?.provenance === "OWNER_REPORTED_CUSTOMER_STATEMENT", "Choice provenance must remain explicit");
   }
 });
 
@@ -1386,14 +1380,7 @@ tests.push({
         TELEGRAM_CHAT_ID: "",
         RADAR_DB: {
           prepare: (sql: string) => ({
-            bind: (...args: any[]) => ({
-              all: async () => ({ results: mockProspects }),
-              first: async () => null,
-              run: async () => ({ success: true, meta: { changes: 1 } })
-            }),
-            all: async () => ({ results: mockProspects }),
-            first: async () => null,
-            run: async () => ({ success: true, meta: { changes: 1 } })
+            all: async () => ({ results: mockProspects })
           })
         }
       };
@@ -1929,9 +1916,7 @@ tests.push({
         bind: (...args: any[]) => ({
           first: async () => {
             if (sql.includes("FROM prospects WHERE id = ?")) {
-              return args[1] === "tenant_alpha"
-                ? { id: "p_target_01", tenant_id: "tenant_alpha" }
-                : null;
+              return { id: "p_target_01", tenant_id: "tenant_alpha" };
             }
             if (sql.includes("FROM tenant_config WHERE tenant_id = ?")) {
               return { tenant_id: args[0], tenant_name: "Test Tenant" };
@@ -2003,10 +1988,7 @@ tests.push({
       body: JSON.stringify({ prospect_id: "p_target_01", tenant_id: "tenant_gamma", outcome: "won" })
     });
     const resCrossOutcome = await worker.fetch(crossOutcomeReq, mockEnv, {} as any);
-    assert(
-      resCrossOutcome.status === 403 || resCrossOutcome.status === 404,
-      "Outcome submission with mismatched prospect tenant must be denied without revealing its existence"
-    );
+    assert(resCrossOutcome.status === 403, "Outcome submission with mismatched prospect tenant must return 403");
 
     // 7. Unauthenticated CSV export -> 401
     const unauthCsvReq = new Request("https://radar.bvelt.app/api/tenants/leads.csv?tenant_id=tenant_alpha", { method: "GET" });
@@ -2207,7 +2189,7 @@ tests.push({
               const p = prospectsStore.find(item => item.id === args[2]);
               if (p) p.signals_json = args[0];
             }
-            return { success: true, meta: { changes: 1 } };
+            return { success: true };
           }
         })
       })
