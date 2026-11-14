@@ -1,6 +1,6 @@
 declare const process: any;
 
-import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, resolveTenantBuyerSegments } from './worker';
+import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, resolveTenantBuyerSegments, tenantBuyerNameFits, isNonBusinessEntity } from './worker';
 import { DEFAULT_FOUNDER_MISSION, MissionConfig } from './worker';
 import { fetchPermitContractors } from './permitSources';
 import { pickTargets } from './geoFrontier';
@@ -2061,6 +2061,19 @@ tests.push({
     const internationalInsert = tenantWrites.filter(write => write.sql.includes("INSERT INTO tenant_config")).slice(-1)[0];
     assert(JSON.stringify(JSON.parse(internationalInsert.args[7])) === JSON.stringify(["GB"]), "International country code must be preserved without US/CA defaults");
     assert(JSON.stringify(JSON.parse(internationalInsert.args[10])) === JSON.stringify(["en"]), "Explicit language must be preserved");
+  }
+});
+
+tests.push({
+  name: "Tenant buyer matching stays open outside mapped property segments",
+  run: () => {
+    assert(tenantBuyerNameFits("Riverside School District", "education buyers"), "Education buyers must remain eligible for Tenant ICP");
+    assert(tenantBuyerNameFits("Northside Auto Repair", "automotive fleet buyers"), "Automotive buyers must remain eligible for Tenant ICP");
+    assert(tenantBuyerNameFits("Local Law Firm", "legal services buyers"), "Legal buyers must remain eligible for Tenant ICP");
+    assert(tenantBuyerNameFits("Downtown Property Management", "commercial property owners"), "Property buyer segment must match property businesses");
+    assert(tenantBuyerNameFits("Harborview Hotel", "property management") === false, "Property-specific ICP must reject unrelated hotel names");
+    assert(isNonBusinessEntity("Riverside University", "https://riverside.edu", "tenant") === false, "Education domains must not be globally rejected");
+    assert(isNonBusinessEntity("Riverside University", "https://riverside.edu", "founder") === false, "Education remains a compatible Founder segment");
   }
 });
 
