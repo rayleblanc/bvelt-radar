@@ -134,8 +134,9 @@ export async function recordScopedLearningEvent(
         ),
     ];
 
-    // Event and derived counters commit together. Aggregate updates only apply
-    // if this exact event row was inserted (idempotent retries no-op cleanly).
+    // D1 batch statements run sequentially: changes() gates each aggregate on the
+    // immediately preceding insert/update. Duplicate INSERT OR IGNORE retries
+    // yield zero and keep the rest of the aggregate chain closed.
     for (const key of keys) {
       statements.push(
         db
@@ -148,7 +149,7 @@ export async function recordScopedLearningEvent(
         unknown_count, total_events, updated_at
       )
       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-      WHERE EXISTS (SELECT 1 FROM learning_events WHERE id = ?)
+      WHERE changes() = 1
       ON CONFLICT(mode, tenant_id, key) DO UPDATE SET
         sent_count = sent_count + excluded.sent_count,
         delivered_count = delivered_count + excluded.delivered_count,
