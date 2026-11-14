@@ -4248,7 +4248,7 @@ async function handleDecision(
         return Response.json({ success: false, blocked: true, reason: "email_not_provider_verified", id }, { status: 409, headers });
       }
       const manualSequenceId = env.RESEND_API_KEY ? "resend_live" : env.BREVO_API_KEY ? "brevo_live" : "manual_simulated";
-      manualIdempotencyKey = buildOutreachIdempotencyKey(prospect.tenant_id || "founder", prospect.id, manualSequenceId, manualEligibility.nextTouch);
+      manualIdempotencyKey = buildRecipientOutreachIdempotencyKey(prospect.tenant_id || "founder", prospect.email, manualSequenceId, manualEligibility.nextTouch);
       const existingManual = await db.prepare("SELECT status FROM outreach_idempotency WHERE idempotency_key = ?").bind(manualIdempotencyKey).first() as any;
       if (existingManual && ["reserved", "sent", "scheduled", "queued", "provider_unknown"].includes(String(existingManual.status || "").toLowerCase())) {
         return Response.json({ success: false, blocked: true, reason: "already_processed_for_this_touch", id }, { status: 409, headers });
@@ -4288,6 +4288,7 @@ async function handleDecision(
         body: typeof safeBody !== 'undefined' ? safeBody : draftBody,
         from: env.OUTBOUND_EMAIL_FROM,
         prospectId: prospect.id,
+        idempotencyKey: manualIdempotencyKey || undefined,
         touchCount: manualEligibility.nextTouch,
         includeSiteLink: manualEligibility.nextTouch > 1,
         plainTextOnly: true,
@@ -9764,6 +9765,12 @@ export function buildOutreachIdempotencyKey(tenantId: string, prospectId: string
   return `idempotency:${tenantId}:${prospectId}:${sequenceId}:touch:${touch}`;
 }
 
+export function buildRecipientOutreachIdempotencyKey(tenantId: string, recipientEmail: string, sequenceId: string, touchCount: number): string {
+  const normalizedEmail = String(recipientEmail || "").trim().toLowerCase();
+  const touch = Math.max(1, Math.floor(Number(touchCount) || 1));
+  return `idempotency:${tenantId}:recipient:${normalizedEmail}:${sequenceId}:touch:${touch}`;
+}
+
 async function generateAICopy(
   prospect: any, 
   variantId: string, 
@@ -11581,8 +11588,8 @@ export async function sendOrQueueOutreach(
     return { success: false, reason: `provider_required: ${missingOutcome}` };
   }
 
-  const sequenceId = hasHunter ? env.HUNTER_SEQUENCE_ID!.trim() : (hasResend ? 'resend_live' : 'brevo_live');
-  const idempotencyKey = buildOutreachIdempotencyKey(tenantId, prospect.id, sequenceId, nextTouch);
+  const sequenceId = hasResend ? 'resend_live' : hasBrevo ? 'brevo_live' : env.HUNTER_SEQUENCE_ID!.trim();
+  const idempotencyKey = buildRecipientOutreachIdempotencyKey(tenantId, prospect.email, sequenceId, nextTouch);
 
   // 10. Idempotency Check — fail closed if D1 cannot confirm the reservation.
   let existingRecord: any = null;
@@ -11636,6 +11643,7 @@ export async function sendOrQueueOutreach(
       body: prospect.draft_body,
       from: env.OUTBOUND_EMAIL_FROM,
       prospectId: prospect.id,
+      idempotencyKey,
       touchCount: nextTouch,
       includeSiteLink: nextTouch > 1,
       plainTextOnly: true,
