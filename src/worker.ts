@@ -1916,13 +1916,13 @@ export default {
                 const inboundId = String(body.data.email_id || "");
                 const apiKey = String((env as any).RESEND_API_KEY || "").trim();
                 if (inboundId && apiKey) {
-                  const inboundRes = await fetch(`https://api.resend.com/emails/${encodeURIComponent(inboundId)}`, {
+                  const inboundRes = await fetch(`https://api.resend.com/emails/receiving/${encodeURIComponent(inboundId)}`, {
                     headers: { Authorization: `Bearer ${apiKey}` },
                     signal: AbortSignal.timeout(8000)
                   });
                   if (inboundRes.ok) {
                     const inboundData: any = await inboundRes.json().catch(() => ({}));
-                    content = inboundData?.text || inboundData?.subject || content;
+                    content = inboundData?.text || inboundData?.html || inboundData?.subject || content;
                     // Opcional: reenviar la respuesta al correo personal del founder (REPLY_FORWARD_TO).
                     const forwardTo = String((env as any).REPLY_FORWARD_TO || "").trim();
                     if (forwardTo) {
@@ -7136,7 +7136,7 @@ export async function handleProspectEvent(
     prospect = await db.prepare("SELECT * FROM prospects WHERE id = ?").bind(params.prospect_id).first();
   }
   if (!prospect && params.email) {
-    prospect = await db.prepare("SELECT * FROM prospects WHERE email = ?").bind(params.email.toLowerCase().trim()).first();
+    prospect = await db.prepare("SELECT * FROM prospects WHERE lower(email) = ?").bind(params.email.toLowerCase().trim()).first();
   }
 
   if (!prospect) {
@@ -7323,6 +7323,25 @@ export async function handleProspectEvent(
       break;
 
     case 'replied':
+      autoStopped = true;
+      newStatus = 'human_review';
+      newOutcome = classification;
+      if (env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID) {
+        try {
+          await sendTelegramWithRetry(
+            `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`,
+            {
+              chat_id: env.TELEGRAM_CHAT_ID,
+              text: `📩 *PROSPECT REPLIED — REVIEW REQUIRED*\\n\\n*Business:* ${escapeMarkdown(prospect.name)}\\n*City:* ${escapeMarkdown(prospect.city)}\\n*Email:* ${escapeMarkdown(prospect.email || "N/A")}\\n\\n*Reply:* "${escapeMarkdown(params.content || "Inbound reply received; body unavailable")}"\\n\\n⚠️ _All automated follow-ups stopped._`,
+              parse_mode: "Markdown"
+            }
+          );
+        } catch (e) {
+          console.warn("[Reply Alert] Telegram notification failed:", (e as any)?.message || e);
+        }
+      }
+      break;
+
     case 'unknown':
     default:
       autoStopped = true;
@@ -7351,6 +7370,13 @@ export async function handleProspectEvent(
     timestamp,
     prospect.id
   ).run();
+
+  if (["bounced", "unsubscribe", "positive", "question", "negative", "replied", "unknown", "failed", "suppressed"].includes(classification)) {
+    try {
+      await db.prepare("UPDATE opportunities SET status = 'closed', decision_state = 'closed', updated_at = ? WHERE prospect_id = ?")
+        .bind(timestamp, prospect.id).run();
+    } catch (e) {}
+  }
 
   await recordLearningEvent(
     db,
