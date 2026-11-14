@@ -20,6 +20,7 @@ export interface EmailDispatchOptions {
   from?: string;
   replyTo?: string;
   prospectId?: string;
+  idempotencyKey?: string;
   touchCount?: number;
   resendApiKey?: string;
   brevoApiKey?: string;
@@ -320,7 +321,7 @@ export async function dispatchEmail(options: EmailDispatchOptions): Promise<Emai
         'Content-Type': 'application/json',
       };
       if (options.prospectId) {
-        reqHeaders['Idempotency-Key'] = buildResendIdempotencyKey(options.prospectId, options.touchCount);
+        reqHeaders['Idempotency-Key'] = buildResendIdempotencyKey(options.idempotencyKey || options.prospectId, options.touchCount);
       }
 
       const res = await fetch('https://api.resend.com/emails', {
