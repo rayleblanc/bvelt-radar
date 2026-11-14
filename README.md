@@ -1,6 +1,6 @@
 # 📡 bvelt-radar v2
 
-**bvelt-radar** es un Cloudflare Worker autónomo para prospección B2B y descubrimiento de contratistas y servicios locales en EE. UU. (plumbing, HVAC, landscaping, limpieza, techos) para **Bvelt**.
+**bvelt-radar** es un Cloudflare Worker autónomo para prospección B2B y descubrimiento de negocios de servicios en los mercados y nichos configurados para **Bvelt**.
 
 > ⚠️ **Nota Importante:** La versión v1 **NO envía emails automáticamente**. El sistema busca, califica con algoritmo multi-factor, redacta el copy con psicología de contratista y te lo entrega por Telegram con botones interactivos. Tú decides, copias y envías.
 
@@ -8,7 +8,7 @@
 
 ## 🚀 Novedades v2
 
-1. **Ranking Dinámico Sun Belt:** Rotación determinista diaria de 2-3 ciudades y 2-3 oficios de alta demanda (Tampa, Orlando, Austin, Houston, Charlotte, Nashville, Atlanta, etc.).
+1. **Mercados configurables:** Founder usa ciudades, países y nichos explícitos. No hay ciudades, países ni oficios predeterminados; si la configuración está vacía, discovery se detiene sin inventar mercados.
 2. **Scoring Multi-Factor Realista (0-100):** Evalúa web real (+22), email validado (+28), teléfono (+12), handle corporativo (+8), ciudad prioritaria (+10), trade prioritario (+8), datos Overpass (+6), contacto dual (+6) y penalización por supresión (-100).
 3. **Copy con Psicología de Trades (A/B Testing):** 90-110 palabras, 1 frase clara de Bvelt, sin promesas falsas de dinero, footer obligatorio "Reply STOP to opt out" y variantes A/B (`missed_calls` vs `dormant_leads`).
 4. **Bot de Telegram con Botones Interactivos (`InlineKeyboardMarkup`):** Cada prospecto incluye botones `[✅ Mark Sent]`, `[❌ Discard]` y `[🚫 Suppress Domain]`.
@@ -56,12 +56,14 @@ npx wrangler secret put ABSTRACT_API_KEY         # Validación de entregabilidad
 **Variables de Configuración [vars] (No sensibles - en `wrangler.toml` o Dashboard > Variables):**
 ```toml
 [vars]
-FOUNDING_CITIES = "Tampa, FL;Orlando, FL;Austin, TX;Houston, TX;Atlanta, GA;Nashville, TN"
-FOUNDING_TRADES = "landscaping;lawn_care;hvac;plumbing;house_cleaning;pool_cleaning;handyman;roofing;pest_control"
-FOUNDING_COUNTRIES = "US;MX;ES;CO;CA;GB"
-FOUNDING_LANGUAGES = "en;es"
+FOUNDING_CITIES = "City A, Region;City B, Region"
+FOUNDING_TRADES = "trade_one;trade_two"
+FOUNDING_COUNTRIES = "US;CA;GB"
+FOUNDING_LANGUAGES = "en"
 FOUNDING_MIN_SCORE = "50"
 ```
+
+Los valores son ejemplos, no defaults. Puedes configurar ciudades explícitas de cualquier mercado. La rotación automática por país depende del catálogo geográfico disponible; si no hay ciudades o nichos configurados, Founder no encola trabajos.
 
 ### 4. Configurar el Webhook de Telegram (Botones Interactivos)
 Para que los botones `[✅ Mark Sent]`, `[❌ Discard]` y `[🚫 Suppress]` funcionen directamente desde Telegram:
@@ -150,10 +152,12 @@ After a prospect is enriched and scored, Radar now maintains:
 
 Founder targets can be persisted in D1 through `/api/config`; these targets take precedence over legacy `FOUNDING_CITIES` / `FOUNDING_TRADES`. No production fallback invents a city or trade when configuration is empty. The legacy environment variables remain supported for compatibility.
 
-### Database upgrade
+### Database migrations
 
-Apply migrations **0001 through 0022** to the existing `bvelt-radar-db`. Never rename or modify historical migrations that have already been applied. Migration 0022 is additive.
+Migration sources currently cover **0001–0029**, including the additive learning and Tenant observation tables. Never rename or modify historical migration files.
+
+The connected production D1 database already contains the newer tables and columns, but its `d1_migrations` history table is absent. **Do not run `wrangler d1 migrations apply` until the existing schema is reconciled with a verified migration baseline**; older files contain non-idempotent `ALTER TABLE` statements.
 
 ### Validation
 
-The Worker and React source pass TypeScript transpilation checks. A complete dependency-backed `npm run build` must still be run in an environment where the package dependencies can be installed; this environment previously could not complete `npm install` because of network/time limits.
+GitHub Actions runs `npm ci`, `npm run build`, `npm run test:radar` and the Sidecar test suite. Cloudflare Workers Builds uses `npm run build` followed by `npm run deploy`.
