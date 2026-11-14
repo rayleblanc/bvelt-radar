@@ -9489,11 +9489,15 @@ export function evaluateFounderOutreachEligibility(
 
 export async function getFounderOutreachEligibility(db: D1Database, prospect: any, now = Date.now()) {
   if (String(prospect.mode || "").toLowerCase() === "tenant") return { allowed: true, reason: "tenant_policy", nextTouch: getOutreachTouch(prospect) };
-  const history = await db.prepare("SELECT COUNT(DISTINCT message_id) AS touch_count, MAX(created_at) AS last_send_at FROM email_dispatch_logs WHERE prospect_id = ? AND message_id IS NOT NULL").bind(prospect.id).first() as any;
+  const [history, idempotency] = await Promise.all([
+    db.prepare("SELECT COUNT(DISTINCT message_id) AS touch_count, MAX(created_at) AS last_send_at FROM email_dispatch_logs WHERE prospect_id = ? AND message_id IS NOT NULL").bind(prospect.id).first(),
+    db.prepare("SELECT COUNT(DISTINCT idempotency_key) AS touch_count, MAX(updated_at) AS last_send_at FROM outreach_idempotency WHERE prospect_id = ? AND status IN ('reserved','queued','sent','scheduled','provider_unknown')").bind(prospect.id).first()
+  ]) as any[];
   const state = String(prospect.status || "").toLowerCase();
   const fallbackTouch = prospect.last_contact_at ? 1 : 0;
-  const touches = Math.max(Number(history?.touch_count || 0), fallbackTouch);
-  return evaluateFounderOutreachEligibility(state, prospect.last_reply_content || null, touches, history?.last_send_at || null, prospect.last_contact_at || null, prospect.cooldown_until || null, now);
+  const touches = Math.max(Number(history?.touch_count || 0), Number(idempotency?.touch_count || 0), fallbackTouch);
+  const lastSendAt = [history?.last_send_at, idempotency?.last_send_at, prospect.last_contact_at].filter(Boolean).sort((a, b) => (Date.parse(String(b)) || 0) - (Date.parse(String(a)) || 0))[0] || null;
+  return evaluateFounderOutreachEligibility(state, prospect.last_reply_content || null, touches, lastSendAt, prospect.last_contact_at || null, prospect.cooldown_until || null, now);
 }
 
 export function shouldSendFounderFollowUp(status: string, lastContactAt: string | null, lastReplyContent: string | null, touchCount: number, now = Date.now()): boolean {
