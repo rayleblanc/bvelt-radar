@@ -2,7 +2,7 @@ declare const process: any;
 
 import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, resolveTenantBuyerSegments, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey, notifyOnce, isVerifiedDeliverableEmail, evaluateFounderOutreachEligibility } from './worker';
 import { DEFAULT_FOUNDER_MISSION, MissionConfig } from './worker';
-import { buildResendIdempotencyKey, buildBrandedEmailHtml, resolveBveltSender } from './emailDispatcher';
+import { buildResendIdempotencyKey, buildBrandedEmailHtml, resolveBveltSender, inspectOutboundEmailAuth } from './emailDispatcher';
 import { fetchPermitContractors } from './permitSources';
 import { pickTargets } from './geoFrontier';
 import { isOffIcpName, sanitizeEmail } from './emailSanitizer';
@@ -252,6 +252,30 @@ tests.push({
       "founder"
     );
     assert(custom.coherent && !custom.disqualified, "Unknown custom niches with contact evidence must pass the initial coherence gate");
+  }
+});
+
+tests.push({
+  name: "Outbound email authentication diagnostics summarize provider and DNS state without exposing keys",
+  run: async () => {
+    const mockFetch: typeof fetch = async (input) => {
+      const url = new URL(String(input));
+      if (url.hostname === "api.resend.com") {
+        return new Response(JSON.stringify({ data: [{ name: "bvelt.app", status: "verified", records: [{ type: "TXT", name: "resend._domainkey", status: "verified" }] }] }), { status: 200 });
+      }
+      const name = url.searchParams.get("name") || "";
+      const type = url.searchParams.get("type") || "";
+      const data = name.startsWith("_dmarc.") ? ['"v=DMARC1; p=none"']
+        : name.startsWith("resend._domainkey.") ? ['"v=DKIM1; p=abc123"']
+        : type === "TXT" ? ['"v=spf1 include:amazonses.com ~all"']
+        : ["feedback-smtp.us-east-1.amazonses.com"];
+      return new Response(JSON.stringify({ Answer: data.map(value => ({ data: value })) }), { status: 200 });
+    };
+    const result = await inspectOutboundEmailAuth("Bvelt <bvelt@bvelt.app>", "re_test_secret", mockFetch);
+    assert(result.resendDomainStatus === "verified", "Resend domain verification must be surfaced");
+    assert(result.dkimPresent && result.spfPresent && result.dmarcPresent && result.returnPathMxPresent, "All expected DNS records must be detected");
+    assert(result.dmarcPolicy === "none", "DMARC policy must be parsed");
+    assert(!JSON.stringify(result).includes("re_test_secret"), "Diagnostics must never return API credentials");
   }
 });
 
