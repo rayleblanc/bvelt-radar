@@ -66,7 +66,8 @@ export type RadarJobType =
   | 'approve' 
   | 'outreach' 
   | 'reply_event'
-  | 'technical_audit';
+  | 'technical_audit'
+  | 'telegram';
 
 export interface RadarJobMessage {
   run_id: string;
@@ -1858,24 +1859,36 @@ export default {
 
         for (const body of rawEvents) {
           let prospectId = body.prospect_id || body.id || null;
-          let email = body.email || null;
+          let email = extractEmailAddress(body.email) || null;
           let eventType = body.event_type || body.event || body.action || null;
           let content = body.content || body.text || body.body || body.notes || null;
+          let providerMessageId: string | null = null;
 
           // Resend webhook format: { type: "email.opened" | "email.clicked" | "email.bounced" | "email.delivered" | "email.incoming", data: { to, from, text, subject } }
           if (body.type && body.data) {
             const resendType = String(body.type).toLowerCase();
+            const data = body.data || {};
+            const headers = Array.isArray(data.headers) ? data.headers : [];
+            const entityHeader = headers.find((header: any) => String(header?.name || "").toLowerCase() === "x-entity-ref-id");
+            if (!prospectId && entityHeader?.value) prospectId = String(entityHeader.value).trim();
+            providerMessageId = String(data.email_id || data.id || "").trim() || null;
             if (resendType.includes("opened") || resendType.includes("open")) eventType = "opened";
             else if (resendType.includes("clicked") || resendType.includes("click")) eventType = "clicked";
-            else if (resendType.includes("bounced") || resendType.includes("bounce")) eventType = "bounced";
+            else if (resendType.includes("bounced") || resendType.includes("bounce")) {
+              const bounceType = String(data.bounce?.type || "").toLowerCase();
+              eventType = bounceType === "permanent" ? "bounced" : "delivery_delayed";
+            }
+            else if (resendType.includes("delivery_delayed") || resendType.includes("delayed")) eventType = "delivery_delayed";
+            else if (resendType.includes("failed")) eventType = "failed";
+            else if (resendType.includes("suppressed")) eventType = "suppressed";
             else if (resendType.includes("delivered")) eventType = "delivered";
             else if (resendType.includes("complained") || resendType.includes("spam")) eventType = "negative";
             else if (resendType.includes("received")) {
               // Resend inbound (email.received): el webhook trae solo metadatos (data.from = remitente, data.email_id).
               // El cuerpo se obtiene con GET /emails/{id} (Received emails API).
               eventType = "replied";
-              const inboundFrom = String(body.data.from || "").trim();
-              if (inboundFrom) email = inboundFrom.toLowerCase();
+              const inboundFrom = extractEmailAddress(data.from);
+              if (inboundFrom) email = inboundFrom;
               try {
                 const inboundId = String(body.data.email_id || "");
                 const apiKey = String((env as any).RESEND_API_KEY || "").trim();
@@ -1919,16 +1932,14 @@ export default {
               content = body.data.text || body.data.html || body.data.subject || content;
             }
 
-            if (Array.isArray(body.data.to) && body.data.to.length > 0) {
-              email = email || body.data.to[0];
-            } else if (typeof body.data.to === "string") {
-              email = email || body.data.to;
+            if (Array.isArray(data.to) && data.to.length > 0) {
+              email = extractEmailAddress(data.to[0]) || email;
+            } else if (typeof data.to === "string") {
+              email = extractEmailAddress(data.to) || email;
             }
 
             if ((resendType.includes("incoming") || resendType.includes("received")) && body.data.from) {
-              const fromStr = String(body.data.from);
-              const extractedFrom = fromStr.includes("<") ? fromStr.replace(/.*<([^>]+)>.*/, "$1") : fromStr;
-              email = extractedFrom.trim();
+              email = extractEmailAddress(data.from) || email;
             }
           }
 
@@ -1956,6 +1967,15 @@ export default {
             content
           }, env);
 
+          if (providerMessageId && eventType !== "replied") {
+            const logStatus = eventType === "negative" ? "complained" : eventType === "delivery_delayed" ? "delayed" : eventType;
+            try {
+              await env.RADAR_DB.prepare("UPDATE email_dispatch_logs SET status = ? WHERE message_id = ?")
+                .bind(logStatus, providerMessageId).run();
+            } catch (logError) {
+              console.warn("[ResendWebhook] Could not reconcile dispatch status:", logError);
+            }
+          }
           results.push(eventResult);
         }
 
@@ -2932,7 +2952,7 @@ export default {
 
           // 2. Verify prospect belongs to the same mode and tenant
           const prospectRow = (await env.RADAR_DB.prepare(`
-            SELECT id, signals_json, website FROM prospects
+            SELECT id, name, status, trade, email, signals_json, website FROM prospects
             WHERE id = ? AND mode = ? AND COALESCE(tenant_id, 'founder') = ?
           `).bind(prospectId, mode, tenantId).first()) as any;
 
@@ -3038,13 +3058,23 @@ export default {
               updated_at: now
             };
 
+            const quality = evaluateResearchEvidenceQuality(String(prospectRow.name || ""), incomingFacts);
+            mergedScrapling.quality_gate = { allowed: quality.allowed, reason: quality.reason || null, checked_at: now };
             signalsObj.scrapling = mergedScrapling;
             if (!signalsObj.signals) signalsObj.signals = {};
             signalsObj.signals.scrapling = mergedScrapling;
-
-            await env.RADAR_DB.prepare(`
-              UPDATE prospects SET signals_json = ?, updated_at = ? WHERE id = ?
-            `).bind(JSON.stringify(signalsObj), now, prospectId).run();
+            const terminalStatus = ["sent", "delivered", "opened", "clicked", "replied", "won", "lost", "bounced", "unsubscribed", "complained"].includes(String(prospectRow.status || "").toLowerCase());
+            if (!quality.allowed && !terminalStatus) {
+              await env.RADAR_DB.prepare(`
+                UPDATE prospects SET signals_json = ?, status = 'disqualified', outcome = ?, email = NULL, updated_at = ?
+                WHERE id = ? AND mode = ? AND COALESCE(tenant_id, 'founder') = ?
+              `).bind(JSON.stringify(signalsObj), `research_quality_rejected:${quality.reason || "non_commercial_profile"}`, now, prospectId, mode, tenantId).run();
+            } else {
+              await env.RADAR_DB.prepare(`
+                UPDATE prospects SET signals_json = ?, updated_at = ?
+                WHERE id = ? AND mode = ? AND COALESCE(tenant_id, 'founder') = ?
+              `).bind(JSON.stringify(signalsObj), now, prospectId, mode, tenantId).run();
+            }
           } catch (syncErr) {
             console.warn(`[ResearchEvidence] signals_json sync warning for prospect ${prospectId}:`, syncErr);
           }
@@ -3552,6 +3582,7 @@ async function handleHealth(env: Env, headers: Record<string, string>, tenantId:
   let pendingJobs = 0;
   let completedJobs = 0;
   let failedJobs = 0;
+  let staleJobs = 0;
   let lastError: string | null = null;
   let lastDiagnostics: any = null;
   const prospectsByStatus: Record<string, number> = {};
@@ -3575,17 +3606,11 @@ async function handleHealth(env: Env, headers: Record<string, string>, tenantId:
           const errList = JSON.parse(todayRun.errors_json);
           if (Array.isArray(errList) && errList.length > 0) {
             lastDiagnostics = errList[errList.length - 1];
-            // Check for telegram outbound errors or successes
-            const tgError = errList.find((e: any) => e.source === 'telegram_outbound' || e.source === 'telegram_outbound_exception');
-            if (tgError) {
-              lastTelegramOk = false;
-            } else if (telegramConfigured) {
-              lastTelegramOk = true;
-            }
+            const telegramEvents = errList.filter((e: any) => String(e.source || "").startsWith("telegram_outbound"));
+            const lastTelegramEvent = telegramEvents.sort((a: any, b: any) => String(a.timestamp || "").localeCompare(String(b.timestamp || ""))).pop();
+            if (lastTelegramEvent) lastTelegramOk = lastTelegramEvent.source === "telegram_outbound_success" ? String(lastTelegramEvent.timestamp || "") : false;
           }
         } catch (e) {}
-      } else if (telegramConfigured) {
-        lastTelegramOk = true;
       }
     } else {
       const latestRun = await db.prepare("SELECT * FROM runs ORDER BY created_at DESC LIMIT 1").first() as any;
@@ -3596,12 +3621,9 @@ async function handleHealth(env: Env, headers: Record<string, string>, tenantId:
             const errList = JSON.parse(latestRun.errors_json);
             if (Array.isArray(errList) && errList.length > 0) {
               lastDiagnostics = errList[errList.length - 1];
-              const tgError = errList.find((e: any) => e.source === 'telegram_outbound' || e.source === 'telegram_outbound_exception');
-              if (tgError) {
-                lastTelegramOk = false;
-              } else if (telegramConfigured) {
-                lastTelegramOk = true;
-              }
+              const telegramEvents = errList.filter((e: any) => String(e.source || "").startsWith("telegram_outbound"));
+              const lastTelegramEvent = telegramEvents.sort((a: any, b: any) => String(a.timestamp || "").localeCompare(String(b.timestamp || ""))).pop();
+              if (lastTelegramEvent) lastTelegramOk = lastTelegramEvent.source === "telegram_outbound_success" ? String(lastTelegramEvent.timestamp || "") : false;
             }
           } catch (e) {}
         }
@@ -3611,17 +3633,7 @@ async function handleHealth(env: Env, headers: Record<string, string>, tenantId:
     console.warn("Health check stats query fallback: ", e);
   }
 
-  // Check latest prospect notification timestamp if available
-  try {
-    const notifiedProspect = await db.prepare(
-      "SELECT updated_at FROM prospects WHERE status IN ('notified', 'sent', 'approved') ORDER BY updated_at DESC LIMIT 1"
-    ).first() as any;
-    if (notifiedProspect && notifiedProspect.updated_at) {
-      lastTelegramOk = notifiedProspect.updated_at;
-    } else if (lastTelegramOk === null && telegramConfigured) {
-      lastTelegramOk = true;
-    }
-  } catch (e) {}
+
 
   // Aggregate prospects counts by status
   try {
@@ -3638,7 +3650,7 @@ async function handleHealth(env: Env, headers: Record<string, string>, tenantId:
   }
 
   try {
-    const jobStats = await db.prepare("SELECT status, COUNT(*) as count FROM queue_jobs GROUP BY status").all();
+    const jobStats = await db.prepare("SELECT status, COUNT(*) as count FROM queue_jobs WHERE created_at >= datetime('now', '-24 hours') GROUP BY status").all();
     if (jobStats.results) {
       for (const r of jobStats.results as any[]) {
         if (r.status === 'pending' || r.status === 'processing') pendingJobs += r.count;
@@ -3646,8 +3658,10 @@ async function handleHealth(env: Env, headers: Record<string, string>, tenantId:
         if (r.status === 'failed') failedJobs += r.count;
       }
     }
-    const lastErrRow = await db.prepare("SELECT error FROM queue_jobs WHERE error IS NOT NULL AND status = 'failed' ORDER BY created_at DESC LIMIT 1").first() as any;
+    const lastErrRow = await db.prepare("SELECT error FROM queue_jobs WHERE error IS NOT NULL AND status = 'failed' AND created_at >= datetime('now', '-7 days') ORDER BY created_at DESC LIMIT 1").first() as any;
     if (lastErrRow) lastError = lastErrRow.error;
+    const staleRow = await db.prepare("SELECT COUNT(*) AS count FROM queue_jobs WHERE status IN ('pending','processing') AND created_at < datetime('now', '-24 hours')").first() as any;
+    if (staleRow) staleJobs = Number(staleRow.count || 0);
   } catch (e) {
     // queue_jobs table initializing
   }
@@ -3710,7 +3724,7 @@ async function handleHealth(env: Env, headers: Record<string, string>, tenantId:
   } catch (e) {}
 
   return Response.json({
-    status: globalPause ? "paused" : circuitBreakerActive ? "paused" : failedJobs > 0 && pendingJobs === 0 ? "degraded" : "healthy",
+    status: globalPause ? "paused" : circuitBreakerActive ? "paused" : (failedJobs > 0 || staleJobs > 0 || lastTelegramOk === false) ? "degraded" : "healthy",
     global_pause: globalPause,
     outreach_pause: outreachPause,
     circuit_breaker: circuitBreakerActive,
@@ -3747,6 +3761,7 @@ async function handleHealth(env: Env, headers: Record<string, string>, tenantId:
       pending_or_processing: pendingJobs,
       completed_jobs: completedJobs,
       failed_jobs: failedJobs,
+      stale_jobs: staleJobs,
       last_error: lastError
     },
     timestamp: new Date().toISOString(),
@@ -4545,6 +4560,9 @@ export async function processQueueJob(job: RadarJobMessage, env: Env): Promise<v
         break;
       case 'technical_audit':
         await handleTechnicalAuditJob(job, env);
+        break;
+      case 'telegram':
+        await handleTelegramNotificationJob(job, env);
         break;
       case 'verify':
       case 'score':
@@ -5638,6 +5656,10 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
       continue;
     }
 
+    const rawCandidateEmail = candidate.email;
+    const candidateEmailCheck = sanitizeEmail(String(rawCandidateEmail || ""));
+    candidate.email = candidateEmailCheck.valid ? candidateEmailCheck.email : null;
+    if (rawCandidateEmail && !candidate.email) candidate.email_rejected_reason = candidateEmailCheck.reason || "invalid_email";
     const identityKey = generateIdentityKey(candidate.email, candidate.website, candidate.phone, candidate.name, candidate.city);
 
     // 2. Composite suppression check
@@ -5946,7 +5968,10 @@ async function handleEnrichJob(job: RadarJobMessage, env: Env): Promise<void> {
     }
   }
 
-  let emailCandidate = prospect.email || websiteEmail;
+  const existingEmailCheck = sanitizeEmail(String(prospect.email || ""));
+  const websiteEmailCheck = sanitizeEmail(String(websiteEmail || ""));
+  let emailCandidate = (existingEmailCheck.valid ? existingEmailCheck.email : null)
+    || (websiteEmailCheck.valid ? websiteEmailCheck.email : null);
   const domain = prospect.website && isRealWebsite(prospect.website) ? getDomain(prospect.website) : null;
 
   // Step c: Hunter Domain Search BEFORE guessing patterns (bounce killer)
@@ -5957,7 +5982,8 @@ async function handleEnrichJob(job: RadarJobMessage, env: Env): Promise<void> {
       if (reserved) {
         const hunterEmail = await fetchHunterEmail(domain, env.HUNTER_API_KEY);
         if (hunterEmail) {
-          emailCandidate = hunterEmail;
+          const hunterEmailCheck = sanitizeEmail(String(hunterEmail || ""));
+          emailCandidate = hunterEmailCheck.valid ? hunterEmailCheck.email : emailCandidate;
           await env.RADAR_DB.prepare("UPDATE runs SET hunter_calls = hunter_calls + 1 WHERE id = ?").bind(job.run_id).run();
           await commitBudget(env.RADAR_DB, tenantId, 'hunter_units', 1);
         } else {
@@ -6006,7 +6032,7 @@ async function handleEnrichJob(job: RadarJobMessage, env: Env): Promise<void> {
 
   await env.RADAR_DB.prepare(`
     UPDATE prospects
-    SET phone = COALESCE(?, phone), email = COALESCE(?, email), signals_json = ?, status = 'enriched', updated_at = ?
+    SET phone = COALESCE(?, phone), email = ?, signals_json = ?, status = 'enriched', updated_at = ?
     WHERE id = ?
   `).bind(
     websitePhone,
@@ -6675,37 +6701,59 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
   const prospect = await env.RADAR_DB.prepare("SELECT * FROM prospects WHERE id = ?").bind(prospect_id).first() as any;
   if (!prospect) return;
 
-  if (isHardRejectedChain(prospect.name)) {
-    await env.RADAR_DB.prepare("UPDATE prospects SET status = 'blocked', outcome = 'hard_rejected_chain', updated_at = ? WHERE id = ?")
+  if (isHardRejectedChain(prospect.name) || isOffIcpName(prospect.name, job.mode === "tenant")) {
+    await env.RADAR_DB.prepare("UPDATE prospects SET status = 'disqualified', outcome = ?, updated_at = ? WHERE id = ?")
+      .bind(isHardRejectedChain(prospect.name) ? "hard_rejected_chain" : "off_icp_name", new Date().toISOString(), prospect_id).run();
+    return;
+  }
+  if ((prospect.score || 0) < 45) {
+    await env.RADAR_DB.prepare("UPDATE prospects SET status = 'disqualified', outcome = 'below_outreach_score', updated_at = ? WHERE id = ?")
       .bind(new Date().toISOString(), prospect_id).run();
     return;
   }
-
-  // Quality gate check
-  if ((prospect.score || 0) < 45 || !prospect.email) {
+  const emailCheck = sanitizeEmail(String(prospect.email || ""));
+  if (!emailCheck.valid || !emailCheck.email) {
+    await env.RADAR_DB.prepare("UPDATE prospects SET status = 'hold', outcome = 'invalid_email_candidate', email = NULL, updated_at = ? WHERE id = ?")
+      .bind(new Date().toISOString(), prospect_id).run();
+    await notifyOnce(env, `invalid_email_${prospect.id}`,
+      `<b>⏸️ Prospecto en espera</b>\n<b>Negocio:</b> ${escapeHtml(String(prospect.name || ""))}\n<b>Motivo:</b> correo inválido o de ejemplo; no se enviará ningún mensaje.`);
     return;
   }
-
-  // Deliverability gate — do not burn Resend reputation on guessed contact@
+  prospect.email = emailCheck.email;
   let signalsMeta: any = {};
   try { signalsMeta = JSON.parse(prospect.signals_json || "{}"); } catch {}
   const emailLocal = String(prospect.email).split("@")[0].toLowerCase();
   const isRiskyLocal = /^(contact|admin|webmaster|mail)$/.test(emailLocal);
   if (!isEmailValidatedForOutreach(signalsMeta) || isRiskyLocal) {
-    console.warn(`[Outreach] Skip ${prospect.id} — email not validated or risky local-part ${emailLocal}`);
-    try {
-      await env.RADAR_DB.prepare(
-        "UPDATE prospects SET outcome = 'skipped_unverified_email', updated_at = ? WHERE id = ?"
-      ).bind(new Date().toISOString(), prospect_id).run();
-    } catch {}
+    console.warn(`[Outreach] Hold ${prospect.id} — email not validated or risky local-part ${emailLocal}`);
+    await env.RADAR_DB.prepare("UPDATE prospects SET status = 'hold', outcome = 'skipped_unverified_email', updated_at = ? WHERE id = ?")
+      .bind(new Date().toISOString(), prospect_id).run();
+    await notifyOnce(env, `unverified_email_${prospect.id}`,
+      `<b>⏸️ Prospecto en HOLD — correo sin verificar</b>\n<b>Negocio:</b> ${escapeHtml(String(prospect.name || ""))}\n<b>Correo:</b> ${escapeHtml(String(prospect.email || "No disponible"))}\n<i>Radar no enviará hasta confirmar que el buzón es entregable.</i>`);
     return;
   }
 
+  if (String(prospect.outcome || "") === "sent_telegram_notification_pending") {
+    const message = formatProspectTelegramMessage({ ...prospect, status: "sent" }, env) +
+      `\n\n⚡ <b>AUTO-SENT</b>\n📅 <b>Time:</b> <code>${new Date().toISOString()}</code>`;
+    await notifyOnce(env, `auto_sent_${prospect.id}`, message);
+    await env.RADAR_DB.prepare("UPDATE prospects SET outcome = 'sent', updated_at = ? WHERE id = ? AND outcome = 'sent_telegram_notification_pending'")
+      .bind(new Date().toISOString(), prospect.id).run();
+    return;
+  }
   let followupAuthorized = false;
   {
     const st = String(prospect.status || "").toLowerCase();
     const touchNow = getOutreachTouch(prospect);
-    if (prospect.draft_body && ['queued', 'notified'].includes(st)) return;
+    if (prospect.draft_body && ['queued', 'notified'].includes(st)) {
+      const message = formatProspectTelegramMessage({ ...prospect, status: "queued" }, env);
+      const buttons = [[
+        { text: "✅ Approve", callback_data: `approve:${prospect.id}` },
+        { text: "❌ Discard", callback_data: `discard:${prospect.id}` }
+      ]];
+      await notifyOnce(env, `approval_${prospect.id}`, message, {}, buttons);
+      return;
+    }
     if (["bounced", "unsubscribed", "complained", "replied", "blocked"].includes(st)) return;
     if (["sent", "delivered", "opened", "clicked"].includes(st)) {
       const history = await env.RADAR_DB.prepare("SELECT COUNT(DISTINCT message_id) AS touch_count FROM email_dispatch_logs WHERE prospect_id = ?").bind(prospect.id).first() as any;
@@ -6779,7 +6827,7 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
         { text: "❌ Discard", callback_data: `discard:${prospect_id}` }
       ]
     ];
-    await notifyFounder(env, holdMsg, inlineButtons);
+    await notifyOnce(env, `trust_hold_${prospect_id}`, holdMsg, {}, inlineButtons);
     return; // DO NOT SEND / DO NOT DISPATCH!
   }
 
@@ -6825,15 +6873,15 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
     let sendsTodayCount = 1;
 
     try {
-      // Ensure sender governor state is reset for today if needed
-      await checkSenderGovernor(env);
-
-      // Atomic D1 slot check & reservation (FOUNDER_AUTO_MAX_PER_DAY, default 8)
-      const updateRes = await env.RADAR_DB.prepare(`
-        UPDATE sender_governor_state
-        SET sends_today = sends_today + 1, updated_at = ?
-        WHERE id = 'global_governor' AND sends_today < ? AND status = 'active' AND last_reset_day = ?
-      `).bind(timestamp, autoMaxPerDay, todayDate).run() as any;
+      const governorStatus = await checkSenderGovernor(env);
+      const effectiveDailyLimit = Math.min(autoMaxPerDay, Math.max(0, Number(governorStatus.daily_limit ?? autoMaxPerDay)));
+      const updateRes = governorStatus.allowed && effectiveDailyLimit > 0
+        ? await env.RADAR_DB.prepare(`
+            UPDATE sender_governor_state
+            SET sends_today = sends_today + 1, updated_at = ?
+            WHERE id = 'global_governor' AND sends_today < ? AND status = 'active' AND last_reset_day = ?
+          `).bind(timestamp, effectiveDailyLimit, todayDate).run() as any
+        : { meta: { changes: 0 } };
 
       if (updateRes && updateRes.meta && updateRes.meta.changes > 0) {
         slotReserved = true;
@@ -6852,21 +6900,26 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
 
     if (slotReserved) {
       // Execute automatic send
-      const sendRes = await sendOrQueueOutreach({ ...prospect, draft_subject: draft.subject, draft_body: draft.body }, job.run_id, env);
+      const sendRes = await sendOrQueueOutreach(
+        { ...prospect, draft_subject: draft.subject, draft_body: draft.body },
+        job.run_id,
+        env,
+        { governorSlotReserved: true }
+      );
 
       if (sendRes.success) {
-        // Update idempotency state to sent
         try {
           await env.RADAR_DB.prepare(
             "UPDATE outreach_idempotency SET status = 'sent', updated_at = ? WHERE idempotency_key = ?"
           ).bind(new Date().toISOString(), idempotencyKey).run();
         } catch (e) {}
-
-         const autoSentMsg = formatProspectTelegramMessage({ ...prospect, draft_subject: draft.subject, draft_body: draft.body, status: 'sent' }, env) +
-          `\n\n⚡ <b>AUTO-SENT (${sendsTodayCount}/${autoMaxPerDay})</b>\n📅 <b>Time:</b> <code>${new Date().toISOString()}</code>\n<i>Outreach enviado automáticamente por Founder Auto-Outreach (5-8 diarios sin aprobación manual).</i>`;
-
-        // Notify Telegram AFTER send WITHOUT requiring approval buttons
-        await notifyFounder(env, autoSentMsg);
+        await env.RADAR_DB.prepare("UPDATE prospects SET outcome = 'sent_telegram_notification_pending', updated_at = ? WHERE id = ?")
+          .bind(new Date().toISOString(), prospect.id).run();
+        const autoSentMsg = formatProspectTelegramMessage({ ...prospect, draft_subject: draft.subject, draft_body: draft.body, status: 'sent' }, env) +
+          `\n\n⚡ <b>AUTO-SENT (${sendsTodayCount}/${effectiveDailyLimit})</b>\n📅 <b>Time:</b> <code>${new Date().toISOString()}</code>\n<i>Envío automático confirmado por Resend.</i>`;
+        await notifyOnce(env, `auto_sent_${prospect.id}`, autoSentMsg);
+        await env.RADAR_DB.prepare("UPDATE prospects SET outcome = 'sent', updated_at = ? WHERE id = ? AND outcome = 'sent_telegram_notification_pending'")
+          .bind(new Date().toISOString(), prospect.id).run();
         return;
       } else {
         console.warn(`[Auto-Outreach] Send blocked or failed: ${sendRes.reason}`);
@@ -6917,7 +6970,7 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
     ]
   ];
 
-  await notifyFounder(env, actionableMsg, inlineButtons);
+  await notifyOnce(env, `approval_${prospect_id}`, actionableMsg, {}, inlineButtons);
 }
 
 /**
@@ -6929,6 +6982,9 @@ export type ReplyClassificationType =
   | 'opened'
   | 'clicked'
   | 'bounced'
+  | 'delivery_delayed'
+  | 'failed'
+  | 'suppressed'
   | 'replied'
   | 'positive'
   | 'negative'
@@ -6938,6 +6994,14 @@ export type ReplyClassificationType =
   | 'out_of_office'
   | 'unknown';
 
+export function extractEmailAddress(value: any): string | null {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  const bracketed = raw.match(/<\s*([^<>]+)\s*>/);
+  const candidate = String(bracketed?.[1] || raw).replace(/^mailto:/i, "").trim().toLowerCase();
+  return /^[a-z0-9.!#$%&'*+/=?^_{}|~-]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(candidate) ? candidate : null;
+}
+
 export function classifyReplyText(rawType?: string, content?: string): ReplyClassificationType {
   const typeLower = (rawType || '').toLowerCase().trim();
   
@@ -6945,7 +7009,10 @@ export function classifyReplyText(rawType?: string, content?: string): ReplyClas
   if (typeLower === 'delivered') return 'delivered';
   if (typeLower === 'opened' || typeLower === 'open' || typeLower === 'email.opened') return 'opened';
   if (typeLower === 'clicked' || typeLower === 'click' || typeLower === 'email.clicked') return 'clicked';
-  if (typeLower === 'bounced' || typeLower === 'bounce' || typeLower === 'hard_bounce' || typeLower === 'soft_bounce') return 'bounced';
+  if (typeLower === 'bounced' || typeLower === 'bounce' || typeLower === 'hard_bounce' || typeLower === 'soft_bounce' || typeLower === 'email.bounced') return 'bounced';
+  if (typeLower === 'delivery_delayed' || typeLower === 'delayed' || typeLower === 'email.delivery_delayed') return 'delivery_delayed';
+  if (typeLower === 'failed' || typeLower === 'email.failed') return 'failed';
+  if (typeLower === 'suppressed' || typeLower === 'email.suppressed') return 'suppressed';
   if (typeLower === 'unsubscribe' || typeLower === 'stop' || typeLower === 'opt_out') return 'unsubscribe';
   if (typeLower === 'out_of_office' || typeLower === 'ooo' || typeLower === 'vacation') return 'out_of_office';
   if (typeLower === 'not_now' || typeLower === 'later') return 'not_now';
@@ -7093,11 +7160,35 @@ export async function handleProspectEvent(
       }
       break;
 
+    case 'delivery_delayed':
+      autoStopped = true;
+      newStatus = 'hold';
+      newOutcome = 'delivery_delayed';
+      await recordNegativeSignal(db, 'bounce', `Transient delivery bounce for ${prospect.name}`);
+      break;
+
+    case 'failed':
+      autoStopped = true;
+      newStatus = 'provider_error';
+      newOutcome = 'provider_failed';
+      await recordNegativeSignal(db, 'error', `Provider delivery failure for ${prospect.name}`);
+      break;
+
+    case 'suppressed':
+      autoStopped = true;
+      newStatus = 'suppressed';
+      newOutcome = 'provider_suppressed';
+      if (prospect.email) {
+        await db.prepare("INSERT OR REPLACE INTO suppression (key, reason, created_at) VALUES (?, ?, ?)")
+          .bind(prospect.email.toLowerCase(), `Provider suppression on ${timestamp}`, timestamp).run();
+      }
+      break;
+
     case 'bounced':
       autoStopped = true;
       newStatus = 'bounced';
       newOutcome = 'bounced';
-      await recordNegativeSignal(db, 'bounce', `Bounced email for ${prospect.name}`);
+      await recordNegativeSignal(db, 'bounce', `Permanent bounced email for ${prospect.name}`);
       if (prospect.email) {
         await db.prepare("INSERT OR REPLACE INTO suppression (key, reason, created_at) VALUES (?, ?, ?)")
           .bind(prospect.email.toLowerCase(), `Bounced on ${timestamp}`, timestamp).run();
@@ -7175,6 +7266,7 @@ export async function handleProspectEvent(
       autoStopped = true;
       newStatus = 'discarded';
       newOutcome = 'negative';
+      await recordNegativeSignal(db, 'complaint', `Complaint/negative response for ${prospect.name}`);
       if (prospect.email) {
         await db.prepare("INSERT OR REPLACE INTO suppression (key, reason, created_at) VALUES (?, ?, ?)")
           .bind(prospect.email.toLowerCase(), `Negative response on ${timestamp}`, timestamp).run();
@@ -10082,14 +10174,17 @@ export function isCompletePostalAddress(value: string | null | undefined): boole
   const parts = normalized.split(/[,;\n]/).map(part => part.trim()).filter(Boolean);
   if (parts.length < 3 || parts.some(part => part.length < 2)) return false;
   const street = parts[0];
-  return (/[A-Za-zÀ-ÿ]/.test(street) && /\d/.test(street))
+  const validStreet = (/[A-Za-zÀ-ÿ]/.test(street) && /\d/.test(street))
     || /\b(?:p\.?\s*o\.?\s*box|post office box)\b/i.test(street);
+  const hasPostalCode = /\b\d{5}(?:-\d{4})?\b|\b[A-Z]\d[A-Z][ -]?\d[A-Z]\d\b/i.test(normalized);
+  const hasCountry = /\b(?:USA|United States|Canada|UK|United Kingdom|Australia|New Zealand|Cuba|Ireland|Germany|France|Spain|Portugal|Italy|Netherlands)\b/i.test(normalized);
+  return validStreet && (hasPostalCode || hasCountry);
 }
 
 export function buildLegalFooter(env: Env): string {
   const senderName = env.SENDER_NAME || "Founder";
   const senderAddress = env.SENDER_POSTAL_ADDRESS || "";
-  return `--\n${senderName}, founder of Bvelt\n${senderAddress}\nThis is a commercial message. If you'd rather not hear from me, reply "unsubscribe" and I'll remove you right away.`;
+  return `--\n${senderName}\n${senderAddress}\nThis is a commercial message. If you'd rather not hear from me, reply "unsubscribe" and I'll remove you right away.`;
 }
 
 /**
@@ -10107,32 +10202,28 @@ export interface NotifyOnceDependencies {
 }
 
 export async function notifyOnce(
-  env: Env,
-  reasonKey: string,
-  text: string,
-  dependencies: NotifyOnceDependencies = {}
+  env: Env, reasonKey: string, text: string, dependencies: NotifyOnceDependencies = {}, inlineButtons?: any[][]
 ): Promise<void> {
   try {
     const day = new Date().toISOString().split("T")[0];
-    const key = `radar_notify_once_${day}_${String(reasonKey).toLowerCase().replace(/[^a-z0-9]+/g, "_").slice(0, 60)}`;
+    const key = "radar_notify_once_" + day + "_" + String(reasonKey).toLowerCase().replace(/[^a-z0-9]+/g, "_").slice(0, 60);
     const readCache = dependencies.cacheGet || cacheGet;
     const writeCache = dependencies.cachePut || cachePut;
     const send = dependencies.send || notifyFounder;
-
-    if (env.RADAR_DB) {
-      const seen = await readCache(env, key);
-      if (seen) return;
+    if (env.RADAR_DB && await readCache(env, key)) return;
+    let delivery: any;
+    if (env.RADAR_QUEUE && !dependencies.send) {
+      const latestRun = await env.RADAR_DB.prepare("SELECT id FROM runs ORDER BY created_at DESC LIMIT 1").first() as any;
+      delivery = await enqueueTelegramNotification(env, String(latestRun && latestRun.id || "telegram_" + day), key, text, inlineButtons);
+    } else {
+      delivery = await send(env, text, inlineButtons);
     }
-
-    const delivery = await send(env, text);
-    if (env.RADAR_DB && delivery.ok) {
-      await writeCache(env, key, "1", 86400);
-    }
+    if (env.RADAR_DB && delivery && delivery.ok) await writeCache(env, key, "1", 86400);
   } catch (e) {
     console.warn("[notifyOnce] failed:", e);
+    if (env.RADAR_QUEUE && !dependencies.send) throw e;
   }
 }
-
 type RadarDigest = {
   verdict: "ok" | "idle" | "blocked";
   headline: string;
@@ -10596,107 +10687,82 @@ export async function sendTenantObservationsToBvelt(
 
 
 
+async function appendTelegramRunEvent(env: Env, event: Record<string, any>): Promise<void> {
+  if (!env.RADAR_DB) return;
+  try {
+    const run = await env.RADAR_DB.prepare("SELECT id, errors_json FROM runs ORDER BY created_at DESC LIMIT 1").first() as any;
+    if (!run || !run.id) return;
+    let events: any[] = [];
+    try { events = JSON.parse(run.errors_json || "[]"); } catch {}
+    events.push(event);
+    await env.RADAR_DB.prepare("UPDATE runs SET errors_json = ? WHERE id = ?").bind(JSON.stringify(events.slice(-100)), run.id).run();
+  } catch {}
+}
+
+export async function sendTelegramWithRetry(
+  url: string, payload: Record<string, any>, fetcher: typeof fetch = fetch,
+  sleep: (ms: number) => Promise<void> = (ms) => new Promise(resolve => setTimeout(resolve, ms)),
+  maxAttempts = 2, timeoutMs = 8000
+): Promise<{ ok: boolean; status: number; data: any; attempts: number; error?: string }> {
+  let lastStatus = 0; let lastData: any = null; let lastError = "";
+  for (let attempt = 1; attempt <= Math.max(1, maxAttempts); attempt++) {
+    try {
+      const response = await fetcher(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), signal: AbortSignal.timeout(timeoutMs) });
+      const data: any = await response.json().catch(() => ({}));
+      lastStatus = response.status; lastData = data;
+      if (response.ok && data && data.ok === true) return { ok: true, status: response.status, data, attempts: attempt };
+      lastError = String(data && data.description || "telegram_http_" + response.status);
+      if (!(response.status === 429 || response.status >= 500) || attempt >= maxAttempts) return { ok: false, status: response.status, data, attempts: attempt, error: lastError };
+      const retryAfter = Number(data && data.parameters && data.parameters.retry_after || 0);
+      await sleep(Math.min(2500, retryAfter > 0 ? retryAfter * 1000 : 350 * attempt));
+    } catch (error: any) {
+      lastStatus = 0; lastData = null; lastError = String(error && error.message || error || "telegram_network_error");
+      if (attempt >= maxAttempts) return { ok: false, status: 0, data: null, attempts: attempt, error: lastError };
+      await sleep(350 * attempt);
+    }
+  }
+  return { ok: false, status: lastStatus, data: lastData, attempts: Math.max(1, maxAttempts), error: lastError };
+}
+
 export async function notifyFounder(
-  env: Env,
-  text: string,
+  env: Env, text: string,
   inlineButtons?: Array<Array<{ text: string; callback_data?: string; url?: string }>>
 ): Promise<{ ok: boolean; description?: string; result?: any }> {
   const rawBotToken = env.TELEGRAM_BOT_TOKEN ? String(env.TELEGRAM_BOT_TOKEN).trim() : "";
   const botToken = rawBotToken.replace(/^["']|["']$/g, "").replace(/^bot/i, "");
   const chatId = env.TELEGRAM_CHAT_ID ? String(env.TELEGRAM_CHAT_ID).trim().replace(/^["']|["']$/g, "") : "";
-
   if (!botToken || !chatId) {
-    const desc = "TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is not configured in environment";
-    console.warn(`[notifyFounder] ${desc}`);
-    return { ok: false, description: desc };
+    const description = "TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is not configured in environment";
+    await appendTelegramRunEvent(env, { source: "telegram_outbound_exception", timestamp: new Date().toISOString(), attempts: 0, description });
+    return { ok: false, description };
   }
-
-  const payload: any = {
-    chat_id: chatId,
-    text,
-    parse_mode: "HTML",
-    disable_web_page_preview: true,
-    link_preview_options: { is_disabled: true }
-  };
-
-  if (inlineButtons && inlineButtons.length > 0) {
-    payload.reply_markup = {
-      inline_keyboard: inlineButtons
-    };
+  const payload: any = { chat_id: chatId, text, parse_mode: "HTML", disable_web_page_preview: true, link_preview_options: { is_disabled: true } };
+  if (inlineButtons && inlineButtons.length > 0) payload.reply_markup = { inline_keyboard: inlineButtons };
+  const result = await sendTelegramWithRetry("https://api.telegram.org/bot" + botToken + "/sendMessage", payload);
+  if (!result.ok) {
+    const description = result.error || String(result.data && result.data.description || "telegram_delivery_failed");
+    await appendTelegramRunEvent(env, { source: result.status === 0 ? "telegram_outbound_exception" : "telegram_outbound", status: result.status, attempts: result.attempts, description: description.slice(0, 240), timestamp: new Date().toISOString() });
+    console.error("[Telegram] Delivery failed after retries:", description);
+    return { ok: false, description };
   }
-
-  try {
-    const res = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(20000)
-    });
-
-    const data: any = await res.json().catch(() => ({ ok: false, description: `HTTP ${res.status}: Failed to parse JSON` }));
-
-    if (!res.ok || !data.ok) {
-      console.error(`[notifyFounder] Telegram API error (${res.status}):`, data);
-
-      if (env.RADAR_DB) {
-        try {
-          const today = new Date().toISOString().split("T")[0];
-          const latestRun = await env.RADAR_DB.prepare(
-            "SELECT id, errors_json FROM runs WHERE day = ? ORDER BY created_at DESC LIMIT 1"
-          ).bind(today).first() as any || await env.RADAR_DB.prepare(
-            "SELECT id, errors_json FROM runs ORDER BY created_at DESC LIMIT 1"
-          ).first() as any;
-
-          if (latestRun) {
-            let errList: any[] = [];
-            try { errList = JSON.parse(latestRun.errors_json || "[]"); } catch (e) {}
-            errList.push({
-              source: "telegram_outbound",
-              status: res.status,
-              description: data.description || "Telegram API rejected sendMessage",
-              chat_id: String(chatId).trim(),
-              timestamp: new Date().toISOString()
-            });
-            await env.RADAR_DB.prepare("UPDATE runs SET errors_json = ? WHERE id = ?")
-              .bind(JSON.stringify(errList), latestRun.id).run();
-          }
-        } catch (dbErr) {
-          console.error("[notifyFounder] Failed to log error to D1 runs:", dbErr);
-        }
-      }
-
-      return { ok: false, description: data.description || `HTTP ${res.status}` };
-    }
-
-    return { ok: true, description: "Sent successfully", result: data.result };
-  } catch (err: any) {
-    console.error("[notifyFounder] Network/Exception error:", err.message);
-    if (env.RADAR_DB) {
-      try {
-        const today = new Date().toISOString().split("T")[0];
-        const latestRun = await env.RADAR_DB.prepare(
-          "SELECT id, errors_json FROM runs WHERE day = ? ORDER BY created_at DESC LIMIT 1"
-        ).bind(today).first() as any;
-        if (latestRun) {
-          let errList: any[] = [];
-          try { errList = JSON.parse(latestRun.errors_json || "[]"); } catch (e) {}
-          errList.push({
-            source: "telegram_outbound_exception",
-            error: err.message,
-            timestamp: new Date().toISOString()
-          });
-          await env.RADAR_DB.prepare("UPDATE runs SET errors_json = ? WHERE id = ?")
-            .bind(JSON.stringify(errList), latestRun.id).run();
-        }
-      } catch (e) {}
-    }
-    return { ok: false, description: err.message };
-  }
+  await appendTelegramRunEvent(env, { source: "telegram_outbound_success", status: result.status, attempts: result.attempts, message_id: result.data && result.data.result && result.data.result.message_id || null, timestamp: new Date().toISOString() });
+  return { ok: true, result: result.data && result.data.result };
 }
 
-/**
- * Format qualified prospect into clean HTML card for Telegram
- */
+export async function enqueueTelegramNotification(env: Env, runId: string, notificationKey: string, text: string, inlineButtons?: any[][]): Promise<{ ok: boolean; queued: boolean }> {
+  const day = new Date().toISOString().split("T")[0];
+  const safeKey = String(notificationKey || "notification").toLowerCase().replace(/[^a-z0-9:_-]+/g, "_").slice(0, 88);
+  await enqueueJob(env, { run_id: String(runId || "telegram_" + day), job_id: ("telegram_" + safeKey + "_" + day).slice(0, 120), type: "telegram", mode: "founder", tenant_id: "founder", payload: { text, inline_buttons: inlineButtons || null } });
+  return { ok: true, queued: true };
+}
+
+async function handleTelegramNotificationJob(job: RadarJobMessage, env: Env): Promise<void> {
+  const text = String(job.payload && job.payload.text || "").trim();
+  if (!text) throw new Error("telegram_notification_text_missing");
+  const buttons = Array.isArray(job.payload && job.payload.inline_buttons) ? job.payload.inline_buttons : undefined;
+  const delivery = await notifyFounder(env, text, buttons);
+  if (!delivery.ok) throw new Error("telegram_delivery_failed:" + String(delivery.description || "unknown").slice(0, 200));
+}
 export function formatProspectTelegramMessage(prospect: any, env?: Env): string {
   const scoreEmoji = (prospect.score || 0) >= 80 ? "🔥" : (prospect.score || 0) >= 60 ? "⚡" : "🔍";
   const draftBody = prospect.draft_body || "";
@@ -11181,6 +11247,26 @@ export async function checkSenderGovernor(env: Env): Promise<SenderGovernorStatu
     } catch (e) {}
   }
 
+  let rollingStats: any = {};
+  try {
+    rollingStats = await db.prepare("SELECT COUNT(*) AS attempts, SUM(CASE WHEN lower(status) IN ('bounced','delayed') THEN 1 ELSE 0 END) AS bounces, SUM(CASE WHEN lower(status) = 'complained' THEN 1 ELSE 0 END) AS complaints FROM email_dispatch_logs WHERE created_at >= datetime('now', '-14 days') AND lower(status) IN ('dispatched','sent','delivered','opened','clicked','bounced','complained','failed','delayed','suppressed')").first() as any;
+  } catch {}
+  const rollingAttempts = Number(rollingStats && rollingStats.attempts || 0);
+  const rollingBounces = Number(rollingStats && rollingStats.bounces || 0);
+  const rollingComplaints = Number(rollingStats && rollingStats.complaints || 0);
+  const rollingBounceRate = rollingAttempts > 0 ? rollingBounces / rollingAttempts : 0;
+  let riskLimit = Number(state.daily_limit || 5);
+  let riskStatus = String(state.status || "active");
+  let riskReason = state.reason || null;
+  if (rollingComplaints > 0) { riskLimit = 0; riskStatus = "throttled"; riskReason = "Complaint in rolling 14-day window; manual review required."; }
+  else if (rollingAttempts >= 10 && rollingBounceRate >= 0.08) { riskLimit = Math.min(riskLimit, 2); riskReason = "14-day bounce rate " + (rollingBounceRate * 100).toFixed(1) + "%; daily cap 2."; }
+  else if (rollingAttempts >= 10 && rollingBounceRate >= 0.04) { riskLimit = Math.min(riskLimit, 3); riskReason = "14-day bounce rate " + (rollingBounceRate * 100).toFixed(1) + "%; daily cap 3."; }
+  else if (rollingAttempts >= 10 && rollingBounceRate >= 0.025) { riskLimit = Math.min(riskLimit, 4); riskReason = "14-day bounce rate " + (rollingBounceRate * 100).toFixed(1) + "%; daily cap 4."; }
+  else if (rollingAttempts >= 10 && rollingBounceRate >= 0.015) { riskLimit = Math.min(riskLimit, 5); riskReason = "14-day bounce rate " + (rollingBounceRate * 100).toFixed(1) + "%; daily cap 5."; }
+  if (riskLimit !== Number(state.daily_limit || 5) || riskStatus !== String(state.status || "active") || riskReason !== (state.reason || null)) {
+    state.daily_limit = riskLimit; state.status = riskStatus; state.reason = riskReason;
+    try { await db.prepare("UPDATE sender_governor_state SET daily_limit = ?, status = ?, reason = ?, updated_at = ? WHERE id = 'global_governor'").bind(riskLimit, riskStatus, riskReason, timestamp).run(); } catch {}
+  }
   if (state.status === 'paused' || state.status === 'throttled') {
     return {
       allowed: false,
@@ -11234,7 +11320,12 @@ export async function recordNegativeSignal(db: D1Database, signalType: 'bounce' 
 /**
  * Autonomous Hunter Sequences Outreach Dispatcher (Truthful State Engine)
  */
-export async function sendOrQueueOutreach(prospect: any, runId: string, env: Env): Promise<{ success: boolean; reason: string }> {
+export async function sendOrQueueOutreach(
+  prospect: any,
+  runId: string,
+  env: Env,
+  options: { governorSlotReserved?: boolean } = {}
+): Promise<{ success: boolean; reason: string }> {
   // 0. Off-ICP and Trade Coherence Gate
   if (isOffIcpName(prospect.name, prospect.mode === 'tenant')) {
     await env.RADAR_DB.prepare("UPDATE prospects SET status = 'disqualified', outcome = 'off_icp_name', updated_at = ? WHERE id = ?")
@@ -11356,7 +11447,9 @@ export async function sendOrQueueOutreach(prospect: any, runId: string, env: Env
     return { success: false, reason: `TRUST_STACK_BLOCKED: ${trustGate.reason}` };
   }
 
-  const governor = await checkSenderGovernor(env);
+  const governor = options.governorSlotReserved
+    ? { allowed: true, daily_limit: 0, sends_today: 0, reason: "slot_reserved" }
+    : await checkSenderGovernor(env);
   if (!governor.allowed) {
     await env.RADAR_DB.prepare("UPDATE prospects SET status = 'held', outcome = 'sender_governor_limit', updated_at = ? WHERE id = ?")
       .bind(new Date().toISOString(), prospect.id).run();
@@ -11457,7 +11550,7 @@ export async function sendOrQueueOutreach(prospect: any, runId: string, env: Env
     });
 
     if (dispatch.success && dispatch.status === 'dispatched') {
-      await incrementSenderSends(env.RADAR_DB);
+      if (!options.governorSlotReserved) await incrementSenderSends(env.RADAR_DB);
       await commitBudget(env.RADAR_DB, tenantId, 'outreach_units', 1);
 
       try {
@@ -11542,7 +11635,7 @@ export async function sendOrQueueOutreach(prospect: any, runId: string, env: Env
         console.warn(`[Hunter API] Failed to call start sequence endpoint: ${startErr.message}`);
       }
 
-      await incrementSenderSends(env.RADAR_DB);
+      if (!options.governorSlotReserved) await incrementSenderSends(env.RADAR_DB);
       await commitBudget(env.RADAR_DB, tenantId, 'outreach_units', 1);
 
       // Increment outreach_count for today's daily mission
@@ -11999,7 +12092,20 @@ export interface TradeInferenceResult {
   detectedClue?: string;
 }
 
-export function inferTradeFromTextDetailed(...textParts: (string | undefined)[]): TradeInferenceResult {
+export export function evaluateResearchEvidenceQuality(businessName: string, facts: any): { allowed: boolean; reason?: string } {
+  const name = String(businessName || "").trim();
+  if (/\b(?:variation|variant)\s*#?\s*\d+\b/i.test(name)) return { allowed: false, reason: "synthetic_variation_name" };
+  const title = String(facts && (facts.page_title || facts.title) || "");
+  const description = String(facts && (facts.meta_description || facts.description) || "");
+  const governmentPage = /\b(department of|county department|city of|government|municipal|civic art|public works|parks and recreation|school district|arts and culture)\b/i.test(title + " " + description);
+  const serviceTerms = Array.isArray(facts && facts.service_terms_observed) ? facts.service_terms_observed.filter(Boolean) : [];
+  const capabilities = facts && facts.observed_capabilities || {};
+  const hasServiceIntent = serviceTerms.length > 0 || Boolean(capabilities.quote_or_estimate_language_observed || capabilities.booking_or_appointment_observed || capabilities.click_to_call_observed || capabilities.whatsapp_link_observed);
+  if (governmentPage && !hasServiceIntent) return { allowed: false, reason: "government_or_public_program_website_without_service_intent" };
+  return { allowed: true };
+}
+
+function inferTradeFromTextDetailed(...textParts: (string | undefined)[]): TradeInferenceResult {
   const combined = textParts.filter(Boolean).join(' ').toLowerCase();
   if (!combined.trim()) {
     return { trade: 'general', confidence: 'none', isNonHomeService: false };
@@ -12010,6 +12116,7 @@ export function inferTradeFromTextDetailed(...textParts: (string | undefined)[])
   // accidentally filtered by Founder-only exclusions.
 
   const tradePatterns: [string, RegExp][] = [
+    ['restaurant', /\b(restaurant|cafe|coffee shop|bistro|diner|sushi|chinese|thai|pizza|pizzeria|mexican|taco|barbecue|bbq|takeout|takeaway|catering|bakery|grill|eatery|food truck|cuisine)\b/i],
     ['lawn_care', /\b(lawn\s*care|lawn\s*mowing|mowing|turf|weed\s*control|aeration|yard\s*care|lawn\s*service)\b/i],
     ['landscaping', /\b(landscap|irrigation|sprinkler|hardscap|tree\s*service|arborist|tree\s*care)\b/i],
     ['plumbing', /\b(plumb|drain|sewer|water\s*heater|pipe|rooter|leak\s*detection)\b/i],

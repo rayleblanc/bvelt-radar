@@ -51,6 +51,7 @@ export interface OutboundEmailAuthDiagnostics {
   dmarcPolicy: string;
   returnPathMxPresent: boolean;
   errors: string[];
+  warnings: string[];
 }
 
 export async function inspectOutboundEmailAuth(
@@ -69,7 +70,8 @@ export async function inspectOutboundEmailAuth(
     dmarcPresent: false,
     dmarcPolicy: 'unknown',
     returnPathMxPresent: false,
-    errors: []
+    errors: [],
+    warnings: []
   };
   if (!sender) {
     base.errors.push('OUTBOUND_EMAIL_FROM is missing or is not an @bvelt.app sender.');
@@ -133,7 +135,7 @@ export async function inspectOutboundEmailAuth(
   if (!base.spfPresent) base.errors.push('SPF TXT record was not found on the configured send subdomain.');
   if (!base.dmarcPresent) base.errors.push('DMARC TXT record was not found.');
   if (!base.returnPathMxPresent) base.errors.push('Custom return-path MX record was not found.');
-  if (base.dmarcPolicy === 'none') base.errors.push('DMARC is monitoring-only (p=none); alignment is not enforced.');
+  if (base.dmarcPolicy === 'none') base.warnings.push('DMARC is in monitoring mode (p=none); receivers are not instructed to quarantine or reject authentication failures.');
   if (base.resendDomainStatus !== 'verified') base.errors.push(`Resend domain status is ${base.resendDomainStatus}, not verified.`);
   return base;
 }

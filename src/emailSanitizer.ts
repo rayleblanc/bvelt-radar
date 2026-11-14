@@ -207,6 +207,9 @@ export function isOffIcpName(name: string | null | undefined, allowTenantBuyer: 
   const clean = name.trim().toLowerCase();
   if (!clean) return true;
 
+  // Synthetic variation labels are generated placeholders, never genuine businesses.
+  if (/\b(?:variation|variant)\s*#?\s*\d+\b/i.test(clean)) return true;
+
   // Churches and other non-business institutions stay excluded in every mode.
   if (NON_BUSINESS_ENTITY_REGEX.test(clean)) return true;
 

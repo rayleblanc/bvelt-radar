@@ -1,6 +1,6 @@
 declare const process: any;
 
-import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, resolveTenantBuyerSegments, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey, notifyOnce, isVerifiedDeliverableEmail, evaluateFounderOutreachEligibility, buildTechnicalAuditSnapshot, isEmailValidatedForOutreach, isCompletePostalAddress } from './worker';
+import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, resolveTenantBuyerSegments, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey, notifyOnce, isVerifiedDeliverableEmail, evaluateFounderOutreachEligibility, buildTechnicalAuditSnapshot, isEmailValidatedForOutreach, isCompletePostalAddress, sendTelegramWithRetry, extractEmailAddress, evaluateResearchEvidenceQuality, classifyReplyText } from './worker';
 import { DEFAULT_FOUNDER_MISSION, MissionConfig } from './worker';
 import { buildResendIdempotencyKey, buildBrandedEmailHtml, resolveBveltSender, inspectOutboundEmailAuth, normalizeOutreachBody } from './emailDispatcher';
 import { fetchPermitContractors } from './permitSources';
@@ -275,6 +275,8 @@ tests.push({
     assert(result.resendDomainStatus === "verified", "Resend domain verification must be surfaced");
     assert(result.dkimPresent && result.spfPresent && result.dmarcPresent && result.returnPathMxPresent, "All expected DNS records must be detected");
     assert(result.dmarcPolicy === "none", "DMARC policy must be parsed");
+    assert(result.warnings.some((warning: string) => warning.includes("monitoring mode")), "DMARC p=none must be surfaced as a warning, not a hard DNS failure");
+    assert(!result.errors.some((error: string) => error.includes("p=none")), "A valid monitoring-mode DMARC record is not a missing authentication record");
     assert(!JSON.stringify(result).includes("re_test_secret"), "Diagnostics must never return API credentials");
   }
 });
@@ -2678,6 +2680,79 @@ tests.push({
     assert(body.conversion_denominator === 5, "ROI must expose the full contacted denominator");
     assert(body.booked === 1 && body.won === 1 && body.lost === 1, "Bookings, wins and losses must remain distinct funnel stages");
     assert(body.reply_rate_pct === 40 && body.win_rate_pct === 20, "Conversion rates must use the unique contacted denominator");
+  }
+});
+
+tests.push({
+  name: "Telegram retries transient failures and records only confirmed success",
+  run: async () => {
+    let calls = 0;
+    const result = await sendTelegramWithRetry(
+      "https://telegram.test/sendMessage",
+      { text: "test" },
+      (async () => {
+        calls++;
+        return calls === 1
+          ? new Response(JSON.stringify({ ok: false, description: "temporary" }), { status: 503 })
+          : new Response(JSON.stringify({ ok: true, result: { message_id: 42 } }), { status: 200 });
+      }) as typeof fetch,
+      async () => undefined,
+      2,
+      100
+    );
+    assert(result.ok && calls === 2, "Telegram must retry a transient 5xx and accept the confirmed success");
+    assert(result.data.result.message_id === 42, "Successful Telegram result must be preserved");
+  }
+});
+
+tests.push({
+  name: "Resend webhook recipient parsing handles display names and evidence quality rejects synthetic/public pages",
+  run: () => {
+    assert(extractEmailAddress("City Plumbing <cityplumbing@comporium.net>") === "cityplumbing@comporium.net", "Display-name recipient must normalize to the bare email address");
+    assert(extractEmailAddress("not an email") === null, "Malformed webhook recipient must not be treated as an email");
+    const synthetic = evaluateResearchEvidenceQuality("California Landscape, Variation 1", {
+      page_title: "LA County Department of Arts and Culture",
+      meta_description: "Civic Art Program"
+    });
+    assert(!synthetic.allowed && synthetic.reason === "synthetic_variation_name", "Synthetic fallback business names must be rejected");
+    const publicPage = evaluateResearchEvidenceQuality("California Landscape", {
+      page_title: "LA County Department of Arts and Culture",
+      meta_description: "Civic Art Program",
+      service_terms_observed: [],
+      observed_capabilities: { contact_form_observed: true }
+    });
+    assert(!publicPage.allowed, "Government program pages without commercial service intent must be rejected");
+    const valid = evaluateResearchEvidenceQuality("Northstar Plumbing", {
+      page_title: "Northstar Plumbing - Drain Repair and Estimates",
+      service_terms_observed: ["plumbing", "drain repair"],
+      observed_capabilities: { quote_or_estimate_language_observed: true }
+    });
+    assert(valid.allowed, "Commercial service evidence must pass the research quality gate");
+  }
+});
+
+tests.push({
+  name: "Founder classification recognizes restaurant evidence and rejects synthetic variations",
+  run: () => {
+    assert(isOffIcpName("California Landscape, Variation 1") === true, "Synthetic variation labels must never enter the Founder prospect pool");
+    const result = checkTradeCoherence(
+      "Sun Garden Chinese",
+      "landscaping",
+      "https://sungardenchinese.example",
+      JSON.stringify({ page_title: "Chinese Restaurant and Takeout" }),
+      "founder"
+    );
+    assert(result.coherent && result.verifiedTrade === "restaurant", "Restaurant evidence must correct a stale landscaping label");
+    assert(classifyReplyText("delivery_delayed", "") === "delivery_delayed", "Transient bounce must remain distinct from permanent bounce");
+    assert(classifyReplyText("email.failed", "") === "failed", "Provider failure must have its own classification");
+  }
+});
+
+tests.push({
+  name: "Postal compliance rejects incomplete address fragments",
+  run: () => {
+    assert(!isCompletePostalAddress("123 Main Street, Toronto, ON"), "Street/city/region without postal code or country must not pass");
+    assert(isCompletePostalAddress("123 Main Street, Toronto, ON M5V 2T6, Canada"), "Complete Canadian address must pass");
   }
 });
 
