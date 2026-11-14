@@ -164,8 +164,9 @@ export function normalizeFounderOutreachCopy(
   const sourceSubject = String(subject || '').trim();
   const sourceBody = String(body || '').trim();
   const business = String(recipientName || '').trim();
-  const footer = String(legalFooter || '').trim();
   const footerStart = sourceBody.search(/(?:^|\n)(?:--\s*$|this is a commercial message|reply\s+(?:stop|unsubscribe)|unsubscribe)/im);
+  const extractedFooter = footerStart >= 0 ? sourceBody.slice(footerStart).replace(/^--\s*\n?/, '').trim() : '';
+  const footer = String(legalFooter || extractedFooter || '').trim();
   const bodyWithoutFooter = footerStart >= 0 ? sourceBody.slice(0, footerStart).trim() : sourceBody;
   const unsafe = unsafeCopy.test(sourceSubject) || unsafeCopy.test(bodyWithoutFooter);
   if (!unsafe) {
