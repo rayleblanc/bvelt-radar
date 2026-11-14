@@ -11325,6 +11325,7 @@ export async function sendOrQueueOutreach(prospect: any, runId: string, env: Env
       body: prospect.draft_body,
       from: env.OUTBOUND_EMAIL_FROM,
       prospectId: prospect.id,
+      touchCount: getOutreachTouch(prospect),
       resendApiKey: env.RESEND_API_KEY,
       brevoApiKey: env.BREVO_API_KEY,
       senderName: env.SENDER_NAME
