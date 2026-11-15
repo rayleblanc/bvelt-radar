@@ -140,10 +140,6 @@ export function sanitizeProspectEmail(email: string | null | undefined): string 
   return result.valid && result.email ? result.email : null;
 }
 
-/**
- * Assess commercial email trust without claiming provider verification.
- * websiteHost optional: when email domain matches business site → business_aligned.
- */
 export function assessEmailTrust(
   rawEmail: string | null | undefined,
   opts?: { websiteHost?: string | null; mxOk?: boolean | null }
@@ -184,9 +180,6 @@ export function assessEmailTrust(
   };
 }
 
-/**
- * Checks if domain has valid MX records via Cloudflare DoH (fail-open).
- */
 export async function hasMxRecords(domainOrEmail: string): Promise<boolean> {
   const domain = domainOrEmail.includes('@')
     ? domainOrEmail.split('@')[1].trim().toLowerCase()
@@ -244,14 +237,13 @@ const FOUNDER_EXCLUSION_RULES: Array<{ category: string; pattern: RegExp }> = [
 /**
  * Institutions and non-commercial entities — always excluded from commercial ICP.
  * Note: dental/medical clinics stay eligible (Bvelt-compatible healthcare segment).
- * Do not add generic "clinic" here or healthcare Founder eligibility breaks.
  */
 const NON_BUSINESS_ENTITY_REGEX =
   /\b(church|iglesia|ministry|ministerio|chapel|temple|parish|cathedral|mosque|synagogue|school|college|university|library|museum|soccer|hockey|baseball|football club|minor (?:soccer|hockey|baseball)|sports? club|recreation centre|recreation center|community centre|community center|hoa\b|homeowners? association|city of\b|town of\b|municipality|charity|non[- ]?profit|ngo\b)\b/i;
 
 /**
- * Detect name vs claimed trade/category incoherence (production findings):
- * restaurant labeled landscaping, sports club as services, wholesale/retail lighting as contractor.
+ * Detect name vs claimed trade/category incoherence.
+ * Prefix matches (landscap*, electric*) — avoid \b after stem so landscaping/electrician work.
  */
 export function isCategoryNameMismatch(
   name: string | null | undefined,
@@ -263,7 +255,7 @@ export function isCategoryNameMismatch(
   if (!n || !c) return false;
 
   const tradeish =
-    /\b(landscap|lawn|garden|electric|electr|plumb|hvac|h\.?v\.?a\.?c|contractor|roofer|roofing|heating|cooling|pest|cleaning|handyman)\b/i.test(
+    /\b(landscap\w*|lawn\w*|garden\w*|electric\w*|electr\w*|plumb\w*|hvac|h\.?v\.?a\.?c|contractor\w*|roofer\w*|roofing|heating|cooling|pest\w*|cleaning|handyman)\b/i.test(
       c
     );
 
@@ -280,22 +272,16 @@ export function isCategoryNameMismatch(
       return true;
     }
   }
-  // "Prestige Lighting" style retailers: lighting in the name, no electrical trade word, claimed as electrician/contractor.
   if (
     /\blighting\b/i.test(n) &&
     !/\b(electric|electrical|electrician|electricians)\b/i.test(n) &&
-    /\b(electric|electrical|electrician|contractor)\b/i.test(c)
+    /\b(electric\w*|contractor\w*)\b/i.test(c)
   ) {
     return true;
   }
   return false;
 }
 
-/**
- * Non-business institutions always excluded.
- * Founder consumer-category exclusions from market-universe.json.
- * Tenant buyer mode bypasses Founder category exclusions; still applies non-business + name/category mismatch.
- */
 export function isOffIcpName(
   name: string | null | undefined,
   allowTenantBuyer: boolean = false,
@@ -318,9 +304,6 @@ export function isOffIcpName(
   );
 }
 
-/**
- * Outreach quality gate: do not let a high score compensate for bad ICP or weak email.
- */
 export function outreachQualityBlocked(input: {
   name?: string | null;
   categoryOrTrade?: string | null;
