@@ -3854,9 +3854,12 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
       if (action && prospectId) {
         // WhatsApp is a manual action: opening wa.me never records a send.
         const isWhatsAppSentAction = action === "wa_sent";
+        const isWhatsAppConfirmedAction = action === "wa_confirmed";
         let decisionJson: any;
-        if (isWhatsAppSentAction) {
-          const result = await recordManualWhatsAppSent(prospectId, env);
+        if (isWhatsAppSentAction || isWhatsAppConfirmedAction) {
+          const result = isWhatsAppSentAction
+            ? await recordManualWhatsAppSent(prospectId, env)
+            : await recordManualWhatsAppConfirmed(prospectId, env);
           decisionJson = { success: result.success, reason: result.reason };
         } else {
           const decisionAction = (action === "approve" || action === "sent") ? "sent" : (action === "discard" ? "discard" : action);
@@ -3870,6 +3873,8 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
         if (botToken) {
           const actionText = isWhatsAppSentAction
             ? (decisionJson?.success ? "✅ Contacto WhatsApp registrado" : "⛔ No se pudo registrar el contacto")
+            : isWhatsAppConfirmedAction
+            ? (decisionJson?.success ? "🟢 WhatsApp confirmado manualmente" : "⛔ No se pudo confirmar WhatsApp")
             : isSendAction
             ? sendFeedback!.title
             : action === "discard"
@@ -3901,7 +3906,7 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               chat_id: chatId,
-              text: `<b>${actionText}</b>: ID <code>${escapeHtml(prospectId)}</code>. ${decisionJson?.success === true ? (isWhatsAppSentAction ? "Se aplicó un cooldown de 30 días al número." : "Estado actualizado.") : escapeHtml(String(decisionJson?.reason || "No se registró la acción."))}${dispatchInfo}`,
+              text: `<b>${actionText}</b>: ID <code>${escapeHtml(prospectId)}</code>. ${decisionJson?.success === true ? (isWhatsAppSentAction ? "Se aplicó un cooldown de 30 días al número." : isWhatsAppConfirmedAction ? "Se guardó la verificación; no se registró ningún envío." : "Estado actualizado.") : escapeHtml(String(decisionJson?.reason || "No se registró la acción."))}${dispatchInfo}`,
               parse_mode: "HTML"
             }),
             signal: AbortSignal.timeout(15000)
@@ -4197,6 +4202,36 @@ export function getTelegramApprovalFeedback(result: any): { title: string; detai
 export function getManualSendPreflightError(prospect: any): string | null {
   const parsed = sanitizeEmail(prospect?.email);
   return parsed.valid && parsed.email ? null : "valid_email_required";
+}
+
+async function recordManualWhatsAppConfirmed(prospectId: string, env: Env): Promise<{ success: boolean; reason: string }> {
+  const db = env.RADAR_DB;
+  const prospect = await db.prepare("SELECT * FROM prospects WHERE id = ? AND COALESCE(tenant_id,'founder') = 'founder'")
+    .bind(prospectId).first() as any;
+  if (!prospect) return { success: false, reason: "prospect_not_found" };
+  if (!extractPhoneDigits(prospect.phone)) return { success: false, reason: "valid_phone_required" };
+  if (String(prospect.outcome || "") !== "whatsapp_manual_ready") {
+    return { success: false, reason: "whatsapp_draft_not_pending" };
+  }
+
+  let metadata: any = {};
+  try { metadata = JSON.parse(prospect.signals_json || "{}"); } catch {}
+  if (!metadata.manual_contact || metadata.manual_contact.channel !== "whatsapp") {
+    return { success: false, reason: "whatsapp_draft_not_found" };
+  }
+  if (metadata.manual_contact.verification === "confirmed_by_founder") {
+    return { success: true, reason: "already_confirmed" };
+  }
+
+  const now = new Date().toISOString();
+  metadata.manual_contact.verification = "confirmed_by_founder";
+  metadata.manual_contact.verified_at = now;
+  await db.prepare("UPDATE prospects SET signals_json = ?, updated_at = ? WHERE id = ?")
+    .bind(JSON.stringify(metadata), now, prospectId).run();
+  await db.prepare(
+    "INSERT INTO prospect_events (prospect_id, event_type, content, created_at) VALUES (?, 'whatsapp_account_confirmed', ?, ?)"
+  ).bind(prospectId, "Founder manually confirmed that the phone opens an active WhatsApp chat; no message-send implied", now).run();
+  return { success: true, reason: "whatsapp_account_confirmed" };
 }
 
 async function recordManualWhatsAppSent(prospectId: string, env: Env): Promise<{ success: boolean; reason: string }> {
@@ -6987,6 +7022,7 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
       `<i>Abrir WhatsApp no confirma que la cuenta exista ni envía el mensaje. La política de WhatsApp Business exige consentimiento explícito para recibir mensajes posteriores: un teléfono publicado no basta. Envía solo si tienes una invitación o consentimiento verificable; si no, usa otro canal permitido.</i>`;
     const buttons = [
       [{ text: "💬 Abrir WhatsApp", url: whatsappUrl }],
+      [{ text: "🟢 Confirmar que existe", callback_data: `wa_confirmed:${prospect.id}` }],
       [
         { text: "✅ Marcar enviado", callback_data: `wa_sent:${prospect.id}` },
         { text: "❌ Descartar", callback_data: `discard:${prospect.id}` }
