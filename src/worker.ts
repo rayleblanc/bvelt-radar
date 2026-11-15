@@ -1,5 +1,1 @@
-/**
- * PLACEHOLDER - will be replaced
- * See commit restore
- */
-export {};
+@/tmp/worker_patched_from_main.ts
