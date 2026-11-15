@@ -49,7 +49,7 @@ tests.push({
 tests.push({
   name: "WhatsApp message conversion strips email footer and limits length",
   run: () => {
-    const body = buildWhatsAppOutreachBody("Hi team,\\n\\nWould a short example help?\\n\\n--\\nRainer\\nAddress\\nUnsubscribe");
+    const body = buildWhatsAppOutreachBody("Hi team,\n\nWould a short example help?\n\n--\nRainer\nAddress\nUnsubscribe");
     assert(body.includes("Would a short example help?"), "Keep core message");
     assert(!body.includes("Unsubscribe") && !body.includes("Address"), "Remove email-only footer");
     assert(buildWhatsAppOutreachBody("x".repeat(1200)).length <= 900, "Keep WhatsApp draft compact");
