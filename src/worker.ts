@@ -6963,10 +6963,10 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
   prospect.email = emailCheck.email;
   let signalsMeta: any = {};
   try { signalsMeta = JSON.parse(prospect.signals_json || "{}"); } catch {}
-  const emailLocal = String(prospect.email).split("@")[0].toLowerCase();
-  const isRiskyLocal = /^(contact|admin|webmaster|mail)$/.test(emailLocal);
-  if (!isEmailValidatedForOutreach(signalsMeta) || isRiskyLocal) {
-    console.warn(`[Outreach] Hold ${prospect.id} — email not validated or risky local-part ${emailLocal}`);
+  // Role-based mailboxes (info@, contact@, admin@) are not inherently invalid.
+  // Keep the provider-verification gate, but do not reject them solely by local-part.
+  if (!isEmailValidatedForOutreach(signalsMeta)) {
+    console.warn(`[Outreach] Hold ${prospect.id} — email not provider-verified`);
     await env.RADAR_DB.prepare("UPDATE prospects SET status = 'hold', outcome = 'skipped_unverified_email', updated_at = ? WHERE id = ?")
       .bind(new Date().toISOString(), prospect_id).run();
     await notifyOnce(env, `unverified_email_${prospect.id}`,
