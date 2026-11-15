@@ -41,7 +41,8 @@ tests.push({
     const link = buildWhatsAppClickToChatUrl("+1 813 555 0100", "Hi team — quick question");
     assert(!!link && link.startsWith("https://wa.me/18135550100?text="), "Build a click-to-chat URL");
     assert(decodeURIComponent(link!.split("?text=")[1]) === "Hi team — quick question", "Preserve message text");
-    assert(buildWhatsAppClickToChatUrl("8135550100", "Hello")?.startsWith("https://wa.me/?text="), "Use contact picker rather than guessing a country code");
+    const localShare = buildWhatsAppClickToChatUrl("8135550100", "Hello");
+    assert(!!localShare && localShare.startsWith("https://wa.me/?text="), "Use contact picker rather than guessing a country code");
   }
 });
 
