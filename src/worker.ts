@@ -10089,7 +10089,7 @@ async function generateAICopy(
     1. Idioma: Español técnico y profesional.
     2. Longitud: 45 a 65 palabras en el primer contacto; 35 a 55 en seguimiento.
     3. Tono: Respetuoso, directo, mentalidad de emprendedor de guerrilla.
-    4. Explica el valor sin prometer resultados: "${tenantInfo ? `Bvelt ayuda a dar seguimiento a solicitudes y clientes.` : "Bvelt ayuda a negocios de servicios a dar seguimiento por SMS a llamadas no atendidas y presupuestos pendientes."}"
+    4. Explica el valor sin prometer resultados: "${tenantInfo ? `Bvelt ayuda a dar seguimiento a solicitudes y clientes.` : "Bvelt ayuda a negocios de servicios a organizar el seguimiento de consultas y presupuestos pendientes mediante los canales que ya tienen disponibles."}"
     5. Primer contacto: pregunta si quiere recibir un ejemplo breve; no incluyas enlaces. Seguimiento: puedes incluir un único enlace simple a ${demoLink}.
     6. No inventes hechos, porcentajes, velocidad web, llamadas perdidas ni pérdidas de ingresos. No uses "auditoría gratis", "garantizado", "instantáneo" ni promesas de 60 segundos sin evidencia explícita. Sin emojis ni signos de exclamación. SIN FIRMA NI PIE DE PÁGINA (el sistema añade el legal).
     7. ${!tenantInfo && founderLine ? `FRASE FUNDADOR (úsala una vez, natural, no inventes otra biografía): "${founderLine}"` : "No inventes historia personal del fundador."}
@@ -10111,7 +10111,7 @@ async function generateAICopy(
     RULES:
     1. Length: ${isFollowUp ? "35 to 55" : "45 to 65"} words. Contractor-friendly and concise.
     2. Tone: Respectful, direct, guerrilla entrepreneur mindset. Never beg. Never play for pity.
-    3. Explain value without promising outcomes: "${tenantInfo ? `Bvelt helps manage follow-up with enquiries and customers.` : "Bvelt helps service businesses follow up by SMS with missed calls and pending estimates."}"
+    3. Explain value without promising outcomes: "${tenantInfo ? `Bvelt helps manage follow-up with enquiries and customers.` : "Bvelt helps service businesses organize follow-up for enquiries and pending estimates through the communication channels they already use."}"
     4. First touch: ask whether a short example would be useful; include no URL. Follow-up: one plain-text link to ${demoLink} is allowed.
     5. Never invent facts, percentages, site-speed measurements, missed calls, or lost revenue. Do not use "free audit", "guaranteed", "instant", or 60-second promises without explicit evidence. No emoji, hype, or exclamation marks. NO SIGNATURE OR FOOTER (system adds legal footer).
     6. ${!tenantInfo && founderLine ? `FOUNDER LINE (use once, natural English, do not invent a different bio): "${founderLine}"` : "Do not invent a personal founder story."}
@@ -10494,8 +10494,8 @@ function getTradePsychologyFallback(
       ? `Una pregunta sobre cómo recibe consultas ${name}`
       : `A question about how ${name} receives enquiries`;
     bodyBase = isSpanish
-      ? `Hola equipo de ${name}, no encontré un sitio web propio de ${name} en la revisión pública que hice. ¿Cómo registran y retoman las consultas cuando una llamada no se puede atender? Estoy creando Bvelt para ayudar con ese seguimiento por SMS y con presupuestos pendientes. Si le sirve, puedo enviarle un ejemplo breve.`
-      : `Hi ${name} team, I could not find a dedicated website for ${name} in the public information I checked. How do you capture and follow up on enquiries when a call cannot be answered? I'm building Bvelt to help with SMS follow-up and pending estimates. I can send a short example if useful.`;
+      ? `Hola equipo de ${name}, no encontré un sitio web propio de ${name} en la revisión pública que hice. ¿Cómo registran y retoman las consultas cuando una llamada no se puede atender? Estoy creando Bvelt para ayudar a organizar ese seguimiento y los presupuestos pendientes. Si le sirve, puedo enviarle un ejemplo breve.`
+      : `Hi ${name} team, I could not find a dedicated website for ${name} in the public information I checked. How do you capture and follow up on enquiries when a call cannot be answered? I'm building Bvelt to help organize that follow-up and pending estimates. I can send a short example if useful.`;
   }
 
   const footer = env ? buildLegalFooter(env) : "";
