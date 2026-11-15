@@ -4205,6 +4205,9 @@ async function recordManualWhatsAppSent(prospectId: string, env: Env): Promise<{
     .bind(prospectId).first() as any;
   if (!prospect) return { success: false, reason: "prospect_not_found" };
   if (!prospect.phone || !normalizeWhatsAppPhone(prospect.phone)) return { success: false, reason: "valid_international_phone_required" };
+  if (String(prospect.outcome || "") !== "whatsapp_manual_ready") {
+    return { success: false, reason: "whatsapp_draft_not_pending" };
+  }
 
   const already = await db.prepare(
     "SELECT id FROM prospect_events WHERE prospect_id = ? AND event_type = 'whatsapp_manual_sent' LIMIT 1"
@@ -10457,9 +10460,11 @@ function getTradePsychologyFallback(
 export function normalizeWhatsAppPhone(value: string | null | undefined): string | null {
   const raw = String(value || "").trim();
   if (!raw) return null;
-  const digits = raw.replace(/\D/g, "");
-  // Do not guess a country code for national/local numbers.
-  return /^[1-9]\d{7,14}$/.test(digits) && (raw.startsWith("+") || digits.length >= 11) ? digits : null;
+  // Require explicit international notation (+CC or 00CC); never infer a country code.
+  const international = raw.startsWith("+") ? raw : raw.startsWith("00") ? "+" + raw.slice(2) : "";
+  if (!international) return null;
+  const digits = international.replace(/\D/g, "");
+  return /^[1-9]\d{7,14}$/.test(digits) ? digits : null;
 }
 
 export function buildWhatsAppClickToChatUrl(phone: string, message: string): string | null {
