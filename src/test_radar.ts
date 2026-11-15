@@ -1,6 +1,6 @@
 declare const process: any;
 
-import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, resolveTenantBuyerSegments, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey, notifyOnce, isVerifiedDeliverableEmail, evaluateFounderOutreachEligibility, buildTechnicalAuditSnapshot, isEmailValidatedForOutreach, isCompletePostalAddress, sendTelegramWithRetry, extractEmailAddress, evaluateResearchEvidenceQuality, classifyReplyText, getTelegramApprovalFeedback, getManualSendPreflightError, buildScheduledRunId, getCurrentDaySenderCount } from './worker';
+import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, resolveTenantBuyerSegments, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey, notifyOnce, isVerifiedDeliverableEmail, evaluateFounderOutreachEligibility, buildTechnicalAuditSnapshot, isEmailValidatedForOutreach, isCompletePostalAddress, sendTelegramWithRetry, extractEmailAddress, evaluateResearchEvidenceQuality, classifyReplyText, getTelegramApprovalFeedback, getManualSendPreflightError, buildScheduledRunId, getCurrentDaySenderCount, normalizeWhatsAppPhone, extractPhoneDigits, buildWhatsAppClickToChatUrl, buildWhatsAppOutreachBody } from './worker';
 import { DEFAULT_FOUNDER_MISSION, MissionConfig } from './worker';
 import { buildResendIdempotencyKey, buildBrandedEmailHtml, resolveBveltSender, inspectOutboundEmailAuth, normalizeOutreachBody } from './emailDispatcher';
 import { fetchPermitContractors } from './permitSources';
@@ -26,6 +26,35 @@ function assert(condition: boolean, message: string) {
     throw new Error(message);
   }
 }
+
+tests.push({
+  name: "WhatsApp links use direct international chat or safe contact picker without claiming verification",
+  run: () => {
+    assert(normalizeWhatsAppPhone("+1 (813) 555-0100") === "18135550100", "International phone should normalize");
+    assert(normalizeWhatsAppPhone("813-555-0100") === null, "Do not guess a country code for national numbers");
+    assert(normalizeWhatsAppPhone("18135550100") === null, "Require explicit international notation");
+    assert(normalizeWhatsAppPhone("0018135550100") === "18135550100", "Accept explicit 00 international prefix");
+    assert(normalizeWhatsAppPhone("123") === null, "Reject short phone numbers");
+    assert(extractPhoneDigits("813-555-0100") === "8135550100", "Keep a usable local phone without inventing its country code");
+    const genericShare = buildWhatsAppClickToChatUrl("813-555-0100", "Hi team");
+    assert(!!genericShare && genericShare.startsWith("https://wa.me/?text="), "Use WhatsApp contact picker for local numbers");
+    const link = buildWhatsAppClickToChatUrl("+1 813 555 0100", "Hi team — quick question");
+    assert(!!link && link.startsWith("https://wa.me/18135550100?text="), "Build a click-to-chat URL");
+    assert(decodeURIComponent(link!.split("?text=")[1]) === "Hi team — quick question", "Preserve message text");
+    const localShare = buildWhatsAppClickToChatUrl("8135550100", "Hello");
+    assert(!!localShare && localShare.startsWith("https://wa.me/?text="), "Use contact picker rather than guessing a country code");
+  }
+});
+
+tests.push({
+  name: "WhatsApp message conversion strips email footer and limits length",
+  run: () => {
+    const body = buildWhatsAppOutreachBody("Hi team,\n\nWould a short example help?\n\n--\nRainer\nAddress\nUnsubscribe");
+    assert(body.includes("Would a short example help?"), "Keep core message");
+    assert(!body.includes("Unsubscribe") && !body.includes("Address"), "Remove email-only footer");
+    assert(buildWhatsAppOutreachBody("x".repeat(1200)).length <= 900, "Keep WhatsApp draft compact");
+  }
+});
 
 tests.push({
   name: "Telegram notifyOnce only caches after confirmed delivery",
@@ -2436,9 +2465,11 @@ tests.push({
     };
     const missedKit = buildAttackKit(verifiedMissedCallProspect);
     assert(missedKit.angle === "missed_calls", "Verified friction must select missed_calls angle");
-    assert(missedKit.sms.length > 0, "SMS must be generated for verified angle");
-    assert(missedKit.sms.includes("Rainer"), "Must sign as Rainer");
-    assert(missedKit.sms.includes("https://bvelt.app/"), "Must include mandatory CTA link https://bvelt.app/");
+    assert(missedKit.sms.length > 0, "A short manual outreach message must be generated for verified angle");
+    assert(missedKit.sms.includes("Rainer"), "Must identify the sender");
+    assert(!/SMS|instant text|under a minute|60 seconds/i.test(missedKit.sms), "Must not promise unsupported SMS automation or response times");
+    assert(!/voicemail|rarely leave|call the next contractor/i.test(missedKit.email.body), "Must not invent caller behavior or lost jobs");
+    assert(!missedKit.email.body.includes("https://bvelt.app/"), "First-touch email should ask permission before sending a demo link");
 
     // 3. Candidate with verified quote request friction -> stale_quotes angle
     const verifiedQuoteProspect = {
@@ -2467,6 +2498,7 @@ tests.push({
     };
     const noSmsKit = buildAttackKit(verifiedNoSmsProspect);
     assert(noSmsKit.angle === "no_sms", "Verified no_sms signal must select no_sms angle");
+    assert(!/Bvelt (?:replies|responds|texts) by SMS|instant text|under a minute/i.test(noSmsKit.sms), "No-SMS signal must not trigger a false Bvelt SMS capability claim");
 
     // 5. Off-ICP prospect (e.g. Barbershop) -> hard gate disqualified
     const offIcpProspect = {

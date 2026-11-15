@@ -3852,16 +3852,30 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
       const [action, prospectId] = callbackData.split(":");
 
       if (action && prospectId) {
-        // Execute decision (approve maps to sent/approved, discard to discard, suppress to suppress)
-        const decisionAction = (action === "approve" || action === "sent") ? "sent" : (action === "discard" ? "discard" : action);
-        const decisionRes = await handleDecision(prospectId, decisionAction, `Triggered via Telegram Button (${action})`, env, {});
-        const decisionJson: any = await decisionRes.json().catch(() => ({}));
+        // WhatsApp is a manual action: opening wa.me never records a send.
+        const isWhatsAppSentAction = action === "wa_sent";
+        const isWhatsAppConfirmedAction = action === "wa_confirmed";
+        let decisionJson: any;
+        if (isWhatsAppSentAction || isWhatsAppConfirmedAction) {
+          const result = isWhatsAppSentAction
+            ? await recordManualWhatsAppSent(prospectId, env)
+            : await recordManualWhatsAppConfirmed(prospectId, env);
+          decisionJson = { success: result.success, reason: result.reason };
+        } else {
+          const decisionAction = (action === "approve" || action === "sent") ? "sent" : (action === "discard" ? "discard" : action);
+          const decisionRes = await handleDecision(prospectId, decisionAction, `Triggered via Telegram Button (${action})`, env, {});
+          decisionJson = await decisionRes.json().catch(() => ({}));
+        }
         const isSendAction = action === "approve" || action === "sent";
         const sendFeedback = isSendAction ? getTelegramApprovalFeedback(decisionJson) : null;
 
         // Answer callback query so Telegram never reports a send that was blocked or simulated.
         if (botToken) {
-          const actionText = isSendAction
+          const actionText = isWhatsAppSentAction
+            ? (decisionJson?.success ? "✅ Contacto WhatsApp registrado" : "⛔ No se pudo registrar el contacto")
+            : isWhatsAppConfirmedAction
+            ? (decisionJson?.success ? "🟢 WhatsApp confirmado manualmente" : "⛔ No se pudo confirmar WhatsApp")
+            : isSendAction
             ? sendFeedback!.title
             : action === "discard"
             ? "❌ Descartado"
@@ -3892,7 +3906,7 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               chat_id: chatId,
-              text: `<b>${actionText}</b>: ID <code>${escapeHtml(prospectId)}</code>. ${decisionJson?.success === true ? "Estado actualizado." : "No se registró como enviado."}${dispatchInfo}`,
+              text: `<b>${actionText}</b>: ID <code>${escapeHtml(prospectId)}</code>. ${decisionJson?.success === true ? (isWhatsAppSentAction ? "Se aplicó un cooldown de 30 días al número." : isWhatsAppConfirmedAction ? "Se guardó la verificación; no se registró ningún envío." : "Estado actualizado.") : escapeHtml(String(decisionJson?.reason || "No se registró la acción."))}${dispatchInfo}`,
               parse_mode: "HTML"
             }),
             signal: AbortSignal.timeout(15000)
@@ -4188,6 +4202,69 @@ export function getTelegramApprovalFeedback(result: any): { title: string; detai
 export function getManualSendPreflightError(prospect: any): string | null {
   const parsed = sanitizeEmail(prospect?.email);
   return parsed.valid && parsed.email ? null : "valid_email_required";
+}
+
+async function recordManualWhatsAppConfirmed(prospectId: string, env: Env): Promise<{ success: boolean; reason: string }> {
+  const db = env.RADAR_DB;
+  const prospect = await db.prepare("SELECT * FROM prospects WHERE id = ? AND COALESCE(tenant_id,'founder') = 'founder'")
+    .bind(prospectId).first() as any;
+  if (!prospect) return { success: false, reason: "prospect_not_found" };
+  if (!extractPhoneDigits(prospect.phone)) return { success: false, reason: "valid_phone_required" };
+  if (String(prospect.outcome || "") !== "whatsapp_manual_ready") {
+    return { success: false, reason: "whatsapp_draft_not_pending" };
+  }
+
+  let metadata: any = {};
+  try { metadata = JSON.parse(prospect.signals_json || "{}"); } catch {}
+  if (!metadata.manual_contact || metadata.manual_contact.channel !== "whatsapp") {
+    return { success: false, reason: "whatsapp_draft_not_found" };
+  }
+  if (metadata.manual_contact.verification === "confirmed_by_founder") {
+    return { success: true, reason: "already_confirmed" };
+  }
+
+  const now = new Date().toISOString();
+  metadata.manual_contact.verification = "confirmed_by_founder";
+  metadata.manual_contact.verified_at = now;
+  await db.prepare("UPDATE prospects SET signals_json = ?, updated_at = ? WHERE id = ?")
+    .bind(JSON.stringify(metadata), now, prospectId).run();
+  await db.prepare(
+    "INSERT INTO prospect_events (prospect_id, event_type, content, created_at) VALUES (?, 'whatsapp_account_confirmed', ?, ?)"
+  ).bind(prospectId, "Founder manually confirmed that the phone opens an active WhatsApp chat; no message-send implied", now).run();
+  return { success: true, reason: "whatsapp_account_confirmed" };
+}
+
+async function recordManualWhatsAppSent(prospectId: string, env: Env): Promise<{ success: boolean; reason: string }> {
+  const db = env.RADAR_DB;
+  const prospect = await db.prepare("SELECT * FROM prospects WHERE id = ? AND COALESCE(tenant_id,'founder') = 'founder'")
+    .bind(prospectId).first() as any;
+  if (!prospect) return { success: false, reason: "prospect_not_found" };
+  if (!prospect.phone || !extractPhoneDigits(prospect.phone)) return { success: false, reason: "valid_phone_required" };
+
+  const already = await db.prepare(
+    "SELECT id FROM prospect_events WHERE prospect_id = ? AND event_type = 'whatsapp_manual_sent' LIMIT 1"
+  ).bind(prospectId).first();
+  if (already) return { success: true, reason: "already_recorded" };
+  if (String(prospect.outcome || "") !== "whatsapp_manual_ready") {
+    return { success: false, reason: "whatsapp_draft_not_pending" };
+  }
+
+  const now = new Date().toISOString();
+  const cooldownUntil = new Date(Date.now() + 30 * 86400000).toISOString();
+  const phoneKey = String(prospect.phone).replace(/\D/g, "");
+  await db.prepare(`
+    UPDATE prospects
+    SET status = 'contacted', outcome = 'whatsapp_manual_sent',
+        last_contact_at = ?, cooldown_until = ?, updated_at = ?
+    WHERE id = ?
+  `).bind(now, cooldownUntil, now, prospectId).run();
+  await db.prepare(
+    "INSERT INTO prospect_events (prospect_id, event_type, content, created_at) VALUES (?, 'whatsapp_manual_sent', ?, ?)"
+  ).bind(prospectId, "Founder confirmed manual WhatsApp message sent; 30-day phone cooldown", now).run();
+  await db.prepare(
+    "INSERT OR REPLACE INTO suppression (key, reason, created_at) VALUES (?, ?, ?)"
+  ).bind(phoneKey, `Contacted on ${now} (cooldown until ${cooldownUntil})`, now).run();
+  return { success: true, reason: "whatsapp_manual_sent_recorded" };
 }
 
 /**
@@ -6774,16 +6851,28 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
     }
   }
 
-  // Rule: "Pending approve" / QUEUED / HOLD only if: score >= 45 AND email present AND not hard-rejected
-  if (finalScore >= 45 && prospect.email && !isHardRejectedChain(prospect.name)) {
-    await enqueueJob(env, {
-      run_id: job.run_id,
-      job_id: `approve_${prospect_id}`,
-      type: 'approve',
-      mode: job.mode,
-      tenant_id: job.tenant_id,
-      payload: { prospect_id, overrides }
-    });
+  // Email prospects retain the existing approval flow. Phone-only prospects
+  // receive a manual WhatsApp draft; the Worker never sends a WhatsApp message.
+  if (finalScore >= 45 && !isHardRejectedChain(prospect.name)) {
+    if (prospect.email) {
+      await enqueueJob(env, {
+        run_id: job.run_id,
+        job_id: `approve_${prospect_id}`,
+        type: 'approve',
+        mode: job.mode,
+        tenant_id: job.tenant_id,
+        payload: { prospect_id, overrides }
+      });
+    } else if (prospect.phone) {
+      await enqueueJob(env, {
+        run_id: job.run_id,
+        job_id: `whatsapp_draft_${prospect_id}`,
+        type: 'outreach',
+        mode: job.mode,
+        tenant_id: job.tenant_id,
+        payload: { prospect_id, overrides, manual_channel: 'whatsapp' }
+      });
+    }
   }
 }
 
@@ -6844,6 +6933,105 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
       .bind(new Date().toISOString(), prospect_id).run();
     return;
   }
+  // Phone-only Founder prospect: generate a reviewed WhatsApp draft and hand it
+  // to the founder. A wa.me link does NOT prove that the number has WhatsApp.
+  if (!String(prospect.email || "").trim()) {
+    const phoneDigits = extractPhoneDigits(prospect.phone);
+    const waPhone = normalizeWhatsAppPhone(prospect.phone);
+    if (!phoneDigits) {
+      await env.RADAR_DB.prepare("UPDATE prospects SET status = 'hold', outcome = 'whatsapp_phone_invalid', updated_at = ? WHERE id = ?")
+        .bind(new Date().toISOString(), prospect_id).run();
+      await notifyOnce(env, `whatsapp_phone_unusable_${prospect.id}`,
+        `<b>📵 Prospecto con teléfono no utilizable</b>\n<b>Negocio:</b> ${escapeHtml(String(prospect.name || ""))}\n<b>Teléfono:</b> <code>${escapeHtml(String(prospect.phone || "No disponible"))}</code>`);
+      return;
+    }
+
+    const suppressed = await checkSuppressedComposite(
+      env.RADAR_DB, null, prospect.website || null, prospect.phone, prospect.name, prospect.city, "founder"
+    );
+    if (suppressed) {
+      await env.RADAR_DB.prepare("UPDATE prospects SET status = 'suppressed', outcome = ?, updated_at = ? WHERE id = ?")
+        .bind(`SUPPRESSED: ${suppressed.reason}`, new Date().toISOString(), prospect.id).run();
+      return;
+    }
+
+    const eligibility = await getFounderOutreachEligibility(env.RADAR_DB, prospect);
+    if (!eligibility.allowed) {
+      await env.RADAR_DB.prepare("UPDATE prospects SET status = 'held', outcome = ?, updated_at = ? WHERE id = ?")
+        .bind(eligibility.reason, new Date().toISOString(), prospect.id).run();
+      return;
+    }
+
+    const dayOfYear = getDayOfYear(new Date());
+    const { missionConfig } = await getPriorityTargets(dayOfYear, env, job.mode, job.tenant_id, overrides, true);
+    const finalizeReserved = await reserveBudget(env.RADAR_DB, "founder", "finalize_units", 1);
+    if (!finalizeReserved) {
+      await env.RADAR_DB.prepare("UPDATE prospects SET status = 'held', outcome = 'finalize_budget_limit', updated_at = ? WHERE id = ?")
+        .bind(new Date().toISOString(), prospect.id).run();
+      return;
+    }
+
+    let draft: { subject: string; body: string };
+    try {
+      draft = await generateAICopy(prospect, prospect.variant_id || "missed_calls", env, missionConfig, "whatsapp");
+      await commitBudget(env.RADAR_DB, "founder", "finalize_units", 1);
+    } catch (error: any) {
+      await releaseBudget(env.RADAR_DB, "founder", "finalize_units", 1);
+      console.warn("[WhatsApp Draft] AI copy failed; using deterministic fallback:", error?.message || error);
+      draft = getTradePsychologyFallback(
+        prospect.name, prospect.trade, prospect.city, prospect.variant_id || "missed_calls",
+        (missionConfig.languages && missionConfig.languages[0]) || "en",
+        prospect.phone, prospect.demo_token, prospect.signal_event, prospect.signal_area, env, prospect.signals_json
+      );
+    }
+
+    const whatsappBody = buildWhatsAppOutreachBody(draft.body);
+    const whatsappUrl = buildWhatsAppClickToChatUrl(prospect.phone, whatsappBody);
+    if (!whatsappBody || !whatsappUrl) {
+      await env.RADAR_DB.prepare("UPDATE prospects SET status = 'hold', outcome = 'whatsapp_draft_unavailable', updated_at = ? WHERE id = ?")
+        .bind(new Date().toISOString(), prospect.id).run();
+      return;
+    }
+
+    const timestamp = new Date().toISOString();
+    let metadata: any = {};
+    try { metadata = JSON.parse(prospect.signals_json || "{}"); } catch {}
+    metadata.manual_contact = {
+      channel: "whatsapp",
+      verification: "unknown",
+      phone_e164_digits: waPhone,
+      phone_digits: phoneDigits,
+      link_ready_at: timestamp,
+      human_send_required: true
+    };
+    await env.RADAR_DB.prepare(`
+      UPDATE prospects
+      SET status = 'notified', outcome = 'whatsapp_manual_ready',
+          draft_subject = 'WhatsApp manual draft', draft_body = ?, signals_json = ?, updated_at = ?
+      WHERE id = ?
+    `).bind(whatsappBody, JSON.stringify(metadata), timestamp, prospect.id).run();
+
+    const message =
+      `<b>📲 BVELT RADAR · CONTACTO WHATSAPP</b>\n\n` +
+      `🏢 <b>${escapeHtml(String(prospect.name || ""))}</b>\n` +
+      `📍 ${escapeHtml(String(prospect.city || ""))} · ${escapeHtml(String(prospect.trade || ""))}\n` +
+      `📊 Score: <b>${Number(prospect.score || 0)}/100</b>\n` +
+      `📞 <code>${waPhone ? "+" + waPhone : escapeHtml(String(prospect.phone || phoneDigits))}</code>\n` +
+      `🟡 WhatsApp: <b>no verificado</b> · ${waPhone ? "chat directo listo" : "selección manual de contacto"}\n\n` +
+      `<b>Mensaje sugerido:</b>\n<pre>${escapeHtml(whatsappBody)}</pre>\n\n` +
+      `<i>Abrir WhatsApp no confirma que la cuenta exista ni envía el mensaje. La política de WhatsApp Business exige consentimiento explícito para recibir mensajes posteriores: un teléfono publicado no basta. Envía solo si tienes una invitación o consentimiento verificable; si no, usa otro canal permitido.</i>`;
+    const buttons = [
+      [{ text: "💬 Abrir WhatsApp", url: whatsappUrl }],
+      [{ text: "🟢 Confirmar que existe", callback_data: `wa_confirmed:${prospect.id}` }],
+      [
+        { text: "✅ Marcar enviado", callback_data: `wa_sent:${prospect.id}` },
+        { text: "❌ Descartar", callback_data: `discard:${prospect.id}` }
+      ]
+    ];
+    await notifyOnce(env, `whatsapp_manual_ready_${prospect.id}`, message, {}, buttons);
+    return;
+  }
+
   const emailCheck = sanitizeEmail(String(prospect.email || ""));
   if (!emailCheck.valid || !emailCheck.email) {
     await env.RADAR_DB.prepare("UPDATE prospects SET status = 'hold', outcome = 'invalid_email_candidate', email = NULL, updated_at = ? WHERE id = ?")
@@ -6855,10 +7043,10 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
   prospect.email = emailCheck.email;
   let signalsMeta: any = {};
   try { signalsMeta = JSON.parse(prospect.signals_json || "{}"); } catch {}
-  const emailLocal = String(prospect.email).split("@")[0].toLowerCase();
-  const isRiskyLocal = /^(contact|admin|webmaster|mail)$/.test(emailLocal);
-  if (!isEmailValidatedForOutreach(signalsMeta) || isRiskyLocal) {
-    console.warn(`[Outreach] Hold ${prospect.id} — email not validated or risky local-part ${emailLocal}`);
+  // Role-based mailboxes (info@, contact@, admin@) are not inherently invalid.
+  // Keep the provider-verification gate, but do not reject them solely by local-part.
+  if (!isEmailValidatedForOutreach(signalsMeta)) {
+    console.warn(`[Outreach] Hold ${prospect.id} — email not provider-verified`);
     await env.RADAR_DB.prepare("UPDATE prospects SET status = 'hold', outcome = 'skipped_unverified_email', updated_at = ? WHERE id = ?")
       .bind(new Date().toISOString(), prospect_id).run();
     await notifyOnce(env, `unverified_email_${prospect.id}`,
@@ -9824,7 +10012,8 @@ async function generateAICopy(
   prospect: any, 
   variantId: string, 
   env: Env,
-  missionConfig?: MissionConfig
+  missionConfig?: MissionConfig,
+  channel: "email" | "whatsapp" = "email"
 ): Promise<{ subject: string; body: string }> {
   const language = (missionConfig?.languages && missionConfig.languages[0]) || "en";
   const isSpanish = language.toLowerCase().startsWith("es");
@@ -9844,13 +10033,17 @@ async function generateAICopy(
 
   // Weather signal custom template branch
   if (prospect.signal_event && prospect.signal_area && !tenantInfo) {
-    const subject = isSpanish
+    const subject = channel === "whatsapp" ? "" : isSpanish
       ? `${prospect.signal_event} para ${prospect.signal_area} - consulta para ${prospect.name}`
       : `${prospect.signal_event} for ${prospect.signal_area} - quick question for ${prospect.name}`;
 
-    const bodyBase = isSpanish
-      ? `Hola equipo de ${prospect.name}, vi el aviso de ${prospect.signal_event} para ${prospect.signal_area}. Soy Rainer, fundador de Bvelt. Ayudo a negocios de servicios a dar seguimiento a llamadas no atendidas y presupuestos pendientes. ¿Tienen un proceso para contactar a quienes no logran comunicarse durante una interrupción? Si le sirve, puedo enviarle un ejemplo breve.`
-      : `Hi ${prospect.name} team, I saw the ${prospect.signal_event} notice for ${prospect.signal_area}. I'm Rainer, founder of Bvelt. I work on follow-up for service businesses when calls go unanswered or estimates remain pending. Do you have a process for reaching people who could not get through during an interruption? I can send a short example if useful.`;
+    const bodyBase = channel === "whatsapp"
+      ? isSpanish
+        ? `Hola equipo de ${prospect.name}. Vi el aviso de ${prospect.signal_event} en ${prospect.signal_area}. ¿Cómo están respondiendo a clientes que no logran comunicarse durante la interrupción? Si les sirve, puedo compartir un ejemplo breve de seguimiento.`
+        : `Hi ${prospect.name} team. I saw the ${prospect.signal_event} notice for ${prospect.signal_area}. How are you helping customers who cannot get through during the disruption? I can share a short follow-up example if useful.`
+      : isSpanish
+        ? `Hola equipo de ${prospect.name}, vi el aviso de ${prospect.signal_event} para ${prospect.signal_area}. Soy Rainer, fundador de Bvelt. Ayudo a negocios de servicios a dar seguimiento a llamadas no atendidas y presupuestos pendientes. ¿Tienen un proceso para contactar a quienes no logran comunicarse durante una interrupción? Si le sirve, puedo enviarle un ejemplo breve.`
+        : `Hi ${prospect.name} team, I saw the ${prospect.signal_event} notice for ${prospect.signal_area}. I'm Rainer, founder of Bvelt. I work on follow-up for service businesses when calls go unanswered or estimates remain pending. Do you have a process for reaching people who could not get through during an interruption? I can send a short example if useful.`;
 
     const footer = buildLegalFooter(env);
     const fullBody = footer ? `${bodyBase}\n\n${footer}` : bodyBase;
@@ -9880,6 +10073,7 @@ async function generateAICopy(
   }
 
   const prompt = isSpanish ? `
+    ${channel === "whatsapp" ? "OVERRIDE DE CANAL: Es un mensaje inicial de WhatsApp, no un correo. Máximo 35-45 palabras. Conversacional y natural, sin asunto, firma, pie legal, enlaces ni formato de email. Una observación verificable o una pregunta útil, una sola propuesta de valor y una pregunta de baja presión. No afirmes que el negocio usa WhatsApp ni que pierde llamadas." : ""}
     Eres un redactor publicitario experto en ventas (sales copywriter). Escribes correos fríos directos y profesionales.
     ${tenantInfo ? `Remitente: ${tenantInfo.tenant_name} (${tenantInfo.industry})` : "Remitente: Bvelt (https://bvelt.app)"}
     
@@ -9895,13 +10089,14 @@ async function generateAICopy(
     1. Idioma: Español técnico y profesional.
     2. Longitud: 45 a 65 palabras en el primer contacto; 35 a 55 en seguimiento.
     3. Tono: Respetuoso, directo, mentalidad de emprendedor de guerrilla.
-    4. Explica el valor sin prometer resultados: "${tenantInfo ? `Bvelt ayuda a dar seguimiento a solicitudes y clientes.` : "Bvelt ayuda a negocios de servicios a dar seguimiento por SMS a llamadas no atendidas y presupuestos pendientes."}"
+    4. Explica el valor sin prometer resultados: "${tenantInfo ? `Bvelt ayuda a dar seguimiento a solicitudes y clientes.` : "Bvelt ayuda a negocios de servicios a organizar el seguimiento de consultas y presupuestos pendientes mediante los canales que ya tienen disponibles."}"
     5. Primer contacto: pregunta si quiere recibir un ejemplo breve; no incluyas enlaces. Seguimiento: puedes incluir un único enlace simple a ${demoLink}.
     6. No inventes hechos, porcentajes, velocidad web, llamadas perdidas ni pérdidas de ingresos. No uses "auditoría gratis", "garantizado", "instantáneo" ni promesas de 60 segundos sin evidencia explícita. Sin emojis ni signos de exclamación. SIN FIRMA NI PIE DE PÁGINA (el sistema añade el legal).
     7. ${!tenantInfo && founderLine ? `FRASE FUNDADOR (úsala una vez, natural, no inventes otra biografía): "${founderLine}"` : "No inventes historia personal del fundador."}
     8. ${isFollowUp ? "Esto es SEGUIMIENTO toque #" + outreachTouch + " sin respuesta. Más corto, otro ángulo, sin culpar. Asunto sin Re: falso." : "Primer correo en frío."}
     9. Formato JSON: {"subject": "...", "body": "..."}
   ` : `
+    ${channel === "whatsapp" ? "CHANNEL OVERRIDE: This is a first-touch WhatsApp message, not an email. Maximum 35-45 words. Natural and conversational; no subject, signature, legal footer, links, or email formatting. Use one verified observation or useful question, one value proposition, and one low-pressure question. Never claim the business uses WhatsApp or misses calls." : ""}
     You are an expert sales copywriter writing cold outreach.
     ${tenantInfo ? `Sender: ${tenantInfo.tenant_name} (${tenantInfo.industry})` : "Sender: Bvelt (https://bvelt.app)"}
     
@@ -9916,7 +10111,7 @@ async function generateAICopy(
     RULES:
     1. Length: ${isFollowUp ? "35 to 55" : "45 to 65"} words. Contractor-friendly and concise.
     2. Tone: Respectful, direct, guerrilla entrepreneur mindset. Never beg. Never play for pity.
-    3. Explain value without promising outcomes: "${tenantInfo ? `Bvelt helps manage follow-up with enquiries and customers.` : "Bvelt helps service businesses follow up by SMS with missed calls and pending estimates."}"
+    3. Explain value without promising outcomes: "${tenantInfo ? `Bvelt helps manage follow-up with enquiries and customers.` : "Bvelt helps service businesses organize follow-up for enquiries and pending estimates through the communication channels they already use."}"
     4. First touch: ask whether a short example would be useful; include no URL. Follow-up: one plain-text link to ${demoLink} is allowed.
     5. Never invent facts, percentages, site-speed measurements, missed calls, or lost revenue. Do not use "free audit", "guaranteed", "instant", or 60-second promises without explicit evidence. No emoji, hype, or exclamation marks. NO SIGNATURE OR FOOTER (system adds legal footer).
     6. ${!tenantInfo && founderLine ? `FOUNDER LINE (use once, natural English, do not invent a different bio): "${founderLine}"` : "Do not invent a personal founder story."}
@@ -10156,10 +10351,7 @@ export function buildAttackKit(p: any): {
     };
   }
 
-  const demoUrl = "https://bvelt.app/";
-  const senderSignature = "Rainer — Bvelt";
   const firstName = name.split(/\s+/)[0] || name;
-  const variantIndex = hashCode(String(p.id || name + city)) % 3;
 
   const reasons: string[] = [];
   if (selectedAngle === 'weather_surge') reasons.push(`señal climática/demanda: ${p.signal_event || 'alerta meteorológica'}`);
@@ -10174,68 +10366,21 @@ export function buildAttackKit(p: any): {
   let sms = "";
   let call_script = "";
 
-  if (selectedAngle === 'missed_calls') {
-    subject = `${name} — missed ${tradeLabel} calls in ${city}`;
+  const question = selectedAngle === 'weather_surge' && p.signal_event
+    ? `I saw the public ${p.signal_event} notice for ${p.signal_area || city}. How are you handling incoming enquiries during that period?`
+    : selectedAngle === 'stale_quotes'
+    ? `How do you follow up on estimates that are still open after the first quote?`
+    : selectedAngle === 'no_sms'
+    ? `When a customer prefers a written reply, which channel do you use to continue the conversation?`
+    : `When a call cannot be answered while the team is working, how do you make sure the enquiry gets a reply?`;
 
-    if (variantIndex === 0) {
-      sms = `Hi ${firstName} — quick note from Rainer at Bvelt. When ${tradeLabel} calls in ${city} hit voicemail, a lot of homeowners call the next shop. We text them in under a minute so the job doesn't walk. 60-sec demo for ${name}: ${demoUrl} — want it or should I stop? — ${senderSignature}`;
-    } else if (variantIndex === 1) {
-      sms = `Hi ${firstName} — Rainer here with Bvelt. When your crew is out on a job in ${city} and the phone rings, most callers won't leave a voicemail. Bvelt sends an instant text back so you catch the job. See how it works: ${demoUrl} — worth a glance? — ${senderSignature}`;
-    } else {
-      sms = `Hi ${firstName} — Rainer from Bvelt. When homeowners call for ${tradeLabel} in ${city} after hours, whoever replies by text first gets the job. We send that automated text response instantly. See how it works: ${demoUrl} — should I send more info or pass? — ${senderSignature}`;
-    }
-
-    emailBody = `Hi ${name} team — saw your ${tradeLabel} service in ${city}.\n\nWhen your crew is out on a job or it's after hours, missed calls usually go straight to voicemail. In ${city}, homeowners rarely leave a message — they just call the next contractor on Google.\n\nWe built Bvelt to send an instant text back in under a minute so those calls stay on your calendar instead of walking away.\n\nA quick look at how it works: ${demoUrl}\n\nWould you be open to taking a look, or should I stop reaching out?\n\nBest,\n${senderSignature}`;
-
-    call_script = `- Operator Context: Verified ${tradeLabel} contractor in ${city}.\n- Opening Question: "When your crew is on a job and the phone rings, who catches the call?"\n- Key Point: Homeowners in ${city} call down Google listings and hire whoever texts back first.\n- Next Step: Offer to text over the demo link (${demoUrl}).`;
-
-  } else if (selectedAngle === 'no_sms') {
-    subject = `${name} — texting option for ${tradeLabel} in ${city}`;
-
-    if (variantIndex === 0) {
-      sms = `Hi ${firstName} — quick note from Rainer at Bvelt. Saw your ${tradeLabel} shop in ${city}. Most homeowners text for estimates now and walk away if there's no SMS option. We add instant text response for missed calls. Demo: ${demoUrl} — interested? — ${senderSignature}`;
-    } else if (variantIndex === 1) {
-      sms = `Hi ${firstName} — Rainer with Bvelt. If a homeowner in ${city} tries to text your ${tradeLabel} line and gets no reply, that lead goes cold. Bvelt replies by SMS in under a minute automatically. See how it works: ${demoUrl} — worth a look? — ${senderSignature}`;
-    } else {
-      sms = `Hi ${firstName} — Rainer at Bvelt. A lot of ${tradeLabel} clients in ${city} prefer texting over calling. Bvelt turns missed phone calls into instant text conversations. 60-sec demo for ${name}: ${demoUrl} — want to check it out? — ${senderSignature}`;
-    }
-
-    emailBody = `Hi ${name} team — saw your ${tradeLabel} shop in ${city}.\n\nA lot of homeowners in ${city} prefer to text for estimates before calling. If the only option is a phone call or voicemail, those jobs quietly slip away.\n\nWe built Bvelt to add instant automated texting for missed calls and web inquiries so you catch those homeowners immediately.\n\nA quick look at how it works: ${demoUrl}\n\nWould you be open to taking a look?\n\nBest,\n${senderSignature}`;
-
-    call_script = `- Operator Context: ${tradeLabel} contractor in ${city} without instant texting.\n- Opening Question: "Do homeowners ever ask to text photos of the job, or is it phone-only?"\n- Key Point: Homeowners prefer quick text responses over leaving voicemails.\n- Next Step: Offer to text over the demo link (${demoUrl}).`;
-
-  } else if (selectedAngle === 'stale_quotes') {
-    subject = `${name} — following up on ${tradeLabel} quotes in ${city}`;
-
-    if (variantIndex === 0) {
-      sms = `Hi ${firstName} — quick note from Rainer at Bvelt. Unanswered ${tradeLabel} estimates in ${city} are a quiet revenue leak. Bvelt automatically nudges past quotes so jobs don't go cold. See how it works: ${demoUrl} — open to a quick look? — ${senderSignature}`;
-    } else if (variantIndex === 1) {
-      sms = `Hi ${firstName} — Rainer here from Bvelt. Most ${tradeLabel} contractors in ${city} don't have time to follow up bids from last week. Bvelt sends automated text check-ins that bring buyers back. See how it works: ${demoUrl} — want a look? — ${senderSignature}`;
-    } else {
-      sms = `Hi ${firstName} — Rainer at Bvelt. Following up on past ${tradeLabel} bids in ${city} takes hours when done by hand. Bvelt sequences text follow-ups automatically so you win more jobs. See Bvelt: ${demoUrl} — should I send details or stop? — ${senderSignature}`;
-    }
-
-    emailBody = `Hi ${name} team — saw your ${tradeLabel} business in ${city}.\n\nFollowing up on estimates that sit unanswered is where most contractors in ${city} leave money on the table. Most homeowners get busy and just need a quick text check-in.\n\nWe built Bvelt to automatically send friendly text follow-ups on past quotes so bids don't go cold.\n\nA quick look at how it works: ${demoUrl}\n\nWould you be open to taking a look?\n\nBest,\n${senderSignature}`;
-
-    call_script = `- Operator Context: ${tradeLabel} contractor in ${city} sending out bids and estimates.\n- Opening Question: "How do you follow up on estimates that don't close right away?"\n- Key Point: Unanswered bids go cold unless sequenced with friendly SMS check-ins.\n- Next Step: Offer to text over the demo link (${demoUrl}).`;
-
-  } else {
-    // weather_surge
-    subject = `${name} — handling ${tradeLabel} call spikes in ${city}`;
-
-    if (variantIndex === 0) {
-      sms = `Hi ${firstName} — quick note from Rainer at Bvelt. With recent severe weather in ${city}, ${tradeLabel} call volume spikes fast. Bvelt texts back missed emergency calls instantly so jobs don't slip away. See how it works: ${demoUrl} — open to a look? — ${senderSignature}`;
-    } else if (variantIndex === 1) {
-      sms = `Hi ${firstName} — Rainer with Bvelt. Heavy weather in ${city} means phones ring non-stop for ${tradeLabel} work. Bvelt catches missed calls with automated text replies so your crew stays booked. See how it works: ${demoUrl} — worth a glance? — ${senderSignature}`;
-    } else {
-      sms = `Hi ${firstName} — Rainer from Bvelt. When storm weather hits ${city}, homeowners call multiple ${tradeLabel} companies at once. Bvelt texts back in under 60 seconds to lock in the job. See Bvelt: ${demoUrl} — should I share details? — ${senderSignature}`;
-    }
-
-    emailBody = `Hi ${name} team — with the recent weather event in ${city}, call volume for ${tradeLabel} spikes fast.\n\nWhen phones ring non-stop, missed calls go to competitors who answer first.\n\nWe built Bvelt to send instant text replies to missed calls so your crew locks in emergency jobs automatically.\n\nA quick look at how it works: ${demoUrl}\n\nWould you be open to taking a look?\n\nBest,\n${senderSignature}`;
-
-    call_script = `- Operator Context: ${tradeLabel} contractor in ${city} facing weather call surges.\n- Opening Question: "How are you handling the extra call volume after the storm?"\n- Key Point: Instant automated text replies lock in emergency callers before competitors do.\n- Next Step: Offer to text over the demo link (${demoUrl}).`;
-  }
-
+  // Product capability statement deliberately avoids SMS automation claims:
+  // SMS is not an active Bvelt delivery channel in this release.
+  const valueProp = `Bvelt helps service businesses organize enquiries and pending estimates so follow-up is easier to manage.`;
+  subject = `${name} — a question about enquiry follow-up`;
+  sms = `Hi ${firstName} — Rainer from Bvelt. ${question} ${valueProp} Would a short example be useful?`;
+  emailBody = `Hi ${name} team,\n\n${question}\n\n${valueProp}\n\nWould a short example be useful?`;
+  call_script = `- Opening Question: "${question}"\n- Key Point: ${valueProp}\n- Next Step: Offer a short example only if the problem is relevant to their business.`;
   // Enforce max ~300 chars on SMS
   if (sms.length > 310) {
     sms = sms.slice(0, 307) + "...";
@@ -10244,7 +10389,7 @@ export function buildAttackKit(p: any): {
   const next =
     phone && !p.email ? "Llamar o contactar por WhatsApp primero (solo teléfono)." :
     p.email ? "Enviar correo + registrar decisión Enviar." :
-    "Buscar contacto y luego kit SMS/llamada.";
+    "Buscar contacto y luego preparar un mensaje manual o una llamada.";
 
   return {
     prospect_id: String(p.id || ""),
@@ -10299,12 +10444,44 @@ function getTradePsychologyFallback(
       ? `Una pregunta sobre cómo recibe consultas ${name}`
       : `A question about how ${name} receives enquiries`;
     bodyBase = isSpanish
-      ? `Hola equipo de ${name}, no encontré un sitio web propio de ${name} en la revisión pública que hice. ¿Cómo registran y retoman las consultas cuando una llamada no se puede atender? Estoy creando Bvelt para ayudar con ese seguimiento por SMS y con presupuestos pendientes. Si le sirve, puedo enviarle un ejemplo breve.`
-      : `Hi ${name} team, I could not find a dedicated website for ${name} in the public information I checked. How do you capture and follow up on enquiries when a call cannot be answered? I'm building Bvelt to help with SMS follow-up and pending estimates. I can send a short example if useful.`;
+      ? `Hola equipo de ${name}, no encontré un sitio web propio de ${name} en la revisión pública que hice. ¿Cómo registran y retoman las consultas cuando una llamada no se puede atender? Estoy creando Bvelt para ayudar a organizar ese seguimiento y los presupuestos pendientes. Si le sirve, puedo enviarle un ejemplo breve.`
+      : `Hi ${name} team, I could not find a dedicated website for ${name} in the public information I checked. How do you capture and follow up on enquiries when a call cannot be answered? I'm building Bvelt to help organize that follow-up and pending estimates. I can send a short example if useful.`;
   }
 
   const footer = env ? buildLegalFooter(env) : "";
   return { subject, body: footer ? `${bodyBase}\n\n${footer}` : bodyBase };
+}
+
+export function extractPhoneDigits(value: string | null | undefined): string | null {
+  const digits = String(value || "").replace(/\D/g, "");
+  return /^\d{7,15}$/.test(digits) ? digits : null;
+}
+
+export function normalizeWhatsAppPhone(value: string | null | undefined): string | null {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  // Require explicit international notation (+CC or 00CC); never infer a country code.
+  const international = raw.startsWith("+") ? raw : raw.startsWith("00") ? "+" + raw.slice(2) : "";
+  if (!international) return null;
+  const digits = international.replace(/\D/g, "");
+  return /^[1-9]\d{7,14}$/.test(digits) ? digits : null;
+}
+
+export function buildWhatsAppClickToChatUrl(phone: string, message: string): string | null {
+  const normalized = normalizeWhatsAppPhone(phone);
+  const digits = extractPhoneDigits(phone);
+  const text = String(message || "").trim();
+  if (!digits || !text) return null;
+  // Without an explicit country code, use WhatsApp's documented share-to-contact picker.
+  const base = normalized ? "https://wa.me/" + normalized : "https://wa.me/";
+  return base + "?text=" + encodeURIComponent(text);
+}
+
+export function buildWhatsAppOutreachBody(rawBody: string): string {
+  let body = String(rawBody || "").trim().split(/\n\s*--\s*\n/)[0].trim();
+  body = body.replace(/\n(?:Best|Regards|Sincerely|Saludos cordiales),?\s*\n[\s\S]*$/i, "").trim();
+  body = body.replace(/\n{3,}/g, "\n\n");
+  return body.length > 900 ? body.slice(0, 897).trimEnd() + "..." : body;
 }
 
 export function isCompletePostalAddress(value: string | null | undefined): boolean {
