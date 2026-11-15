@@ -1,0 +1,23 @@
+--- a/src/worker.ts
++++ b/src/worker.ts
+@@ discovery pre-filter
+-    if (isOffIcpName(candidate.name, allowTenantBuyer)) {
++    if (isOffIcpName(candidate.name, allowTenantBuyer, candidate.trade || trade)) {
+@@ discovery pre-insert
+-    if (isOffIcpName(candidate.name, job.mode === 'tenant')) {
++    if (isOffIcpName(candidate.name, job.mode === 'tenant', candidate.trade)) {
+@@ enrich
+-  if (isOffIcpName(prospect.name, prospect.mode === 'tenant')) {
++  if (isOffIcpName(prospect.name, prospect.mode === 'tenant', prospect.trade)) {
+@@ outreach job
+-  if (isHardRejectedChain(prospect.name) || isOffIcpName(prospect.name, job.mode === "tenant")) {
++  if (isHardRejectedChain(prospect.name) || isOffIcpName(prospect.name, job.mode === "tenant", prospect.trade)) {
+@@ fetchLocalBusinesses dedupe
+-    if (isOffIcpName(rawName, mode === "tenant") || !coherence.coherent || coherence.disqualified) {
++    if (isOffIcpName(rawName, mode === "tenant", candTrade) || !coherence.coherent || coherence.disqualified) {
+@@ sendOrQueueOutreach
+-  if (isOffIcpName(prospect.name, prospect.mode === 'tenant')) {
++  if (isOffIcpName(prospect.name, prospect.mode === 'tenant', prospect.trade)) {
+@@ checkTradeCoherence
+-  if (isOffIcpName(name, allowTenantBuyer)) {
++  if (isOffIcpName(name, allowTenantBuyer, declaredTrade)) {
