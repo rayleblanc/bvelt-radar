@@ -57,7 +57,6 @@ export interface SanitizeResult {
   email?: string;
 }
 
-/** Layered commercial email trust — never treat syntax-only as verified. */
 export type EmailTrustLevel =
   | 'rejected'
   | 'syntax_ok'
@@ -69,7 +68,6 @@ export interface EmailTrustAssessment {
   level: EmailTrustLevel;
   email: string | null;
   reason?: string;
-  /** True only when level is at least syntax_ok and not placeholder/disposable. */
   outreachEligible: boolean;
 }
 
@@ -234,17 +232,13 @@ const FOUNDER_EXCLUSION_RULES: Array<{ category: string; pattern: RegExp }> = [
   { category: "low-value retail", pattern: /\b(dollar store|discount store|thrift store|pawn shop)\b/i },
 ];
 
-/**
- * Institutions and non-commercial entities — always excluded from commercial ICP.
- * Note: dental/medical clinics stay eligible (Bvelt-compatible healthcare segment).
- */
 const NON_BUSINESS_ENTITY_REGEX =
   /\b(church|iglesia|ministry|ministerio|chapel|temple|parish|cathedral|mosque|synagogue|school|college|university|library|museum|soccer|hockey|baseball|football club|minor (?:soccer|hockey|baseball)|sports? club|recreation centre|recreation center|community centre|community center|hoa\b|homeowners? association|city of\b|town of\b|municipality|charity|non[- ]?profit|ngo\b)\b/i;
 
-/**
- * Detect name vs claimed trade/category incoherence.
- * Prefix matches (landscap*, electric*) — avoid \\b after stem so landscaping/electrician work.
- */
+/** Food-service name cues that checkTradeCoherence can reclassify from a stale trade label. */
+const FOOD_SERVICE_NAME_REGEX =
+  /\b(restaurant|cafe|caf[eé]|diner|pizzeria|chinese|sushi|bistro|grill|kitchen|food truck)\b/i;
+
 export function isCategoryNameMismatch(
   name: string | null | undefined,
   categoryOrTrade: string | null | undefined
@@ -261,7 +255,7 @@ export function isCategoryNameMismatch(
 
   if (!tradeish) return false;
 
-  if (/\b(restaurant|cafe|caf[eé]|diner|pizzeria|chinese|sushi|bistro|bar\b|pub\b|grill|kitchen|food truck)\b/i.test(n)) {
+  if (FOOD_SERVICE_NAME_REGEX.test(n)) {
     return true;
   }
   if (/\b(soccer|hockey|baseball|football|sports?\s+club|minor\s+\w+|ymca|recreation)\b/i.test(n)) {
@@ -295,11 +289,14 @@ export function isOffIcpName(
 
   if (NON_BUSINESS_ENTITY_REGEX.test(clean)) return true;
 
-  // Category mismatch is intentionally NOT a hard isOffIcpName failure.
-  // checkTradeCoherence must be allowed to reclassify stale labels
-  // (e.g. restaurant evidence correcting a landscaping declaration).
-  // Hard block for outreach remains in outreachQualityBlocked().
-  void categoryOrTrade;
+  if (isCategoryNameMismatch(name, categoryOrTrade)) {
+    // Food-service names are allowed through so checkTradeCoherence can
+    // reclassify a stale trade (test: Sun Garden Chinese + landscaping).
+    // Non-food mismatches (lighting retail as electrician) stay hard-blocked.
+    if (!FOOD_SERVICE_NAME_REGEX.test(clean)) {
+      return true;
+    }
+  }
 
   if (allowTenantBuyer) return false;
 
