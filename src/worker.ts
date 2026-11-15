@@ -9997,13 +9997,17 @@ async function generateAICopy(
 
   // Weather signal custom template branch
   if (prospect.signal_event && prospect.signal_area && !tenantInfo) {
-    const subject = isSpanish
+    const subject = channel === "whatsapp" ? "" : isSpanish
       ? `${prospect.signal_event} para ${prospect.signal_area} - consulta para ${prospect.name}`
       : `${prospect.signal_event} for ${prospect.signal_area} - quick question for ${prospect.name}`;
 
-    const bodyBase = isSpanish
-      ? `Hola equipo de ${prospect.name}, vi el aviso de ${prospect.signal_event} para ${prospect.signal_area}. Soy Rainer, fundador de Bvelt. Ayudo a negocios de servicios a dar seguimiento a llamadas no atendidas y presupuestos pendientes. ¿Tienen un proceso para contactar a quienes no logran comunicarse durante una interrupción? Si le sirve, puedo enviarle un ejemplo breve.`
-      : `Hi ${prospect.name} team, I saw the ${prospect.signal_event} notice for ${prospect.signal_area}. I'm Rainer, founder of Bvelt. I work on follow-up for service businesses when calls go unanswered or estimates remain pending. Do you have a process for reaching people who could not get through during an interruption? I can send a short example if useful.`;
+    const bodyBase = channel === "whatsapp"
+      ? isSpanish
+        ? `Hola equipo de ${prospect.name}. Vi el aviso de ${prospect.signal_event} en ${prospect.signal_area}. ¿Cómo están respondiendo a clientes que no logran comunicarse durante la interrupción? Si les sirve, puedo compartir un ejemplo breve de seguimiento.`
+        : `Hi ${prospect.name} team. I saw the ${prospect.signal_event} notice for ${prospect.signal_area}. How are you helping customers who cannot get through during the disruption? I can share a short follow-up example if useful.`
+      : isSpanish
+        ? `Hola equipo de ${prospect.name}, vi el aviso de ${prospect.signal_event} para ${prospect.signal_area}. Soy Rainer, fundador de Bvelt. Ayudo a negocios de servicios a dar seguimiento a llamadas no atendidas y presupuestos pendientes. ¿Tienen un proceso para contactar a quienes no logran comunicarse durante una interrupción? Si le sirve, puedo enviarle un ejemplo breve.`
+        : `Hi ${prospect.name} team, I saw the ${prospect.signal_event} notice for ${prospect.signal_area}. I'm Rainer, founder of Bvelt. I work on follow-up for service businesses when calls go unanswered or estimates remain pending. Do you have a process for reaching people who could not get through during an interruption? I can send a short example if useful.`;
 
     const footer = buildLegalFooter(env);
     const fullBody = footer ? `${bodyBase}\n\n${footer}` : bodyBase;
