@@ -10369,68 +10369,21 @@ export function buildAttackKit(p: any): {
   let sms = "";
   let call_script = "";
 
-  if (selectedAngle === 'missed_calls') {
-    subject = `${name} — missed ${tradeLabel} calls in ${city}`;
+  const question = selectedAngle === 'weather_surge' && p.signal_event
+    ? `I saw the public ${p.signal_event} notice for ${p.signal_area || city}. How are you handling incoming enquiries during that period?`
+    : selectedAngle === 'stale_quotes'
+    ? `How do you follow up on estimates that are still open after the first quote?`
+    : selectedAngle === 'no_sms'
+    ? `When a customer prefers a written reply, which channel do you use to continue the conversation?`
+    : `When a call cannot be answered while the team is working, how do you make sure the enquiry gets a reply?`;
 
-    if (variantIndex === 0) {
-      sms = `Hi ${firstName} — quick note from Rainer at Bvelt. When ${tradeLabel} calls in ${city} hit voicemail, a lot of homeowners call the next shop. We text them in under a minute so the job doesn't walk. 60-sec demo for ${name}: ${demoUrl} — want it or should I stop? — ${senderSignature}`;
-    } else if (variantIndex === 1) {
-      sms = `Hi ${firstName} — Rainer here with Bvelt. When your crew is out on a job in ${city} and the phone rings, most callers won't leave a voicemail. Bvelt sends an instant text back so you catch the job. See how it works: ${demoUrl} — worth a glance? — ${senderSignature}`;
-    } else {
-      sms = `Hi ${firstName} — Rainer from Bvelt. When homeowners call for ${tradeLabel} in ${city} after hours, whoever replies by text first gets the job. We send that automated text response instantly. See how it works: ${demoUrl} — should I send more info or pass? — ${senderSignature}`;
-    }
-
-    emailBody = `Hi ${name} team — saw your ${tradeLabel} service in ${city}.\n\nWhen your crew is out on a job or it's after hours, missed calls usually go straight to voicemail. In ${city}, homeowners rarely leave a message — they just call the next contractor on Google.\n\nWe built Bvelt to send an instant text back in under a minute so those calls stay on your calendar instead of walking away.\n\nA quick look at how it works: ${demoUrl}\n\nWould you be open to taking a look, or should I stop reaching out?\n\nBest,\n${senderSignature}`;
-
-    call_script = `- Operator Context: Verified ${tradeLabel} contractor in ${city}.\n- Opening Question: "When your crew is on a job and the phone rings, who catches the call?"\n- Key Point: Homeowners in ${city} call down Google listings and hire whoever texts back first.\n- Next Step: Offer to text over the demo link (${demoUrl}).`;
-
-  } else if (selectedAngle === 'no_sms') {
-    subject = `${name} — texting option for ${tradeLabel} in ${city}`;
-
-    if (variantIndex === 0) {
-      sms = `Hi ${firstName} — quick note from Rainer at Bvelt. Saw your ${tradeLabel} shop in ${city}. Most homeowners text for estimates now and walk away if there's no SMS option. We add instant text response for missed calls. Demo: ${demoUrl} — interested? — ${senderSignature}`;
-    } else if (variantIndex === 1) {
-      sms = `Hi ${firstName} — Rainer with Bvelt. If a homeowner in ${city} tries to text your ${tradeLabel} line and gets no reply, that lead goes cold. Bvelt replies by SMS in under a minute automatically. See how it works: ${demoUrl} — worth a look? — ${senderSignature}`;
-    } else {
-      sms = `Hi ${firstName} — Rainer at Bvelt. A lot of ${tradeLabel} clients in ${city} prefer texting over calling. Bvelt turns missed phone calls into instant text conversations. 60-sec demo for ${name}: ${demoUrl} — want to check it out? — ${senderSignature}`;
-    }
-
-    emailBody = `Hi ${name} team — saw your ${tradeLabel} shop in ${city}.\n\nA lot of homeowners in ${city} prefer to text for estimates before calling. If the only option is a phone call or voicemail, those jobs quietly slip away.\n\nWe built Bvelt to add instant automated texting for missed calls and web inquiries so you catch those homeowners immediately.\n\nA quick look at how it works: ${demoUrl}\n\nWould you be open to taking a look?\n\nBest,\n${senderSignature}`;
-
-    call_script = `- Operator Context: ${tradeLabel} contractor in ${city} without instant texting.\n- Opening Question: "Do homeowners ever ask to text photos of the job, or is it phone-only?"\n- Key Point: Homeowners prefer quick text responses over leaving voicemails.\n- Next Step: Offer to text over the demo link (${demoUrl}).`;
-
-  } else if (selectedAngle === 'stale_quotes') {
-    subject = `${name} — following up on ${tradeLabel} quotes in ${city}`;
-
-    if (variantIndex === 0) {
-      sms = `Hi ${firstName} — quick note from Rainer at Bvelt. Unanswered ${tradeLabel} estimates in ${city} are a quiet revenue leak. Bvelt automatically nudges past quotes so jobs don't go cold. See how it works: ${demoUrl} — open to a quick look? — ${senderSignature}`;
-    } else if (variantIndex === 1) {
-      sms = `Hi ${firstName} — Rainer here from Bvelt. Most ${tradeLabel} contractors in ${city} don't have time to follow up bids from last week. Bvelt sends automated text check-ins that bring buyers back. See how it works: ${demoUrl} — want a look? — ${senderSignature}`;
-    } else {
-      sms = `Hi ${firstName} — Rainer at Bvelt. Following up on past ${tradeLabel} bids in ${city} takes hours when done by hand. Bvelt sequences text follow-ups automatically so you win more jobs. See Bvelt: ${demoUrl} — should I send details or stop? — ${senderSignature}`;
-    }
-
-    emailBody = `Hi ${name} team — saw your ${tradeLabel} business in ${city}.\n\nFollowing up on estimates that sit unanswered is where most contractors in ${city} leave money on the table. Most homeowners get busy and just need a quick text check-in.\n\nWe built Bvelt to automatically send friendly text follow-ups on past quotes so bids don't go cold.\n\nA quick look at how it works: ${demoUrl}\n\nWould you be open to taking a look?\n\nBest,\n${senderSignature}`;
-
-    call_script = `- Operator Context: ${tradeLabel} contractor in ${city} sending out bids and estimates.\n- Opening Question: "How do you follow up on estimates that don't close right away?"\n- Key Point: Unanswered bids go cold unless sequenced with friendly SMS check-ins.\n- Next Step: Offer to text over the demo link (${demoUrl}).`;
-
-  } else {
-    // weather_surge
-    subject = `${name} — handling ${tradeLabel} call spikes in ${city}`;
-
-    if (variantIndex === 0) {
-      sms = `Hi ${firstName} — quick note from Rainer at Bvelt. With recent severe weather in ${city}, ${tradeLabel} call volume spikes fast. Bvelt texts back missed emergency calls instantly so jobs don't slip away. See how it works: ${demoUrl} — open to a look? — ${senderSignature}`;
-    } else if (variantIndex === 1) {
-      sms = `Hi ${firstName} — Rainer with Bvelt. Heavy weather in ${city} means phones ring non-stop for ${tradeLabel} work. Bvelt catches missed calls with automated text replies so your crew stays booked. See how it works: ${demoUrl} — worth a glance? — ${senderSignature}`;
-    } else {
-      sms = `Hi ${firstName} — Rainer from Bvelt. When storm weather hits ${city}, homeowners call multiple ${tradeLabel} companies at once. Bvelt texts back in under 60 seconds to lock in the job. See Bvelt: ${demoUrl} — should I share details? — ${senderSignature}`;
-    }
-
-    emailBody = `Hi ${name} team — with the recent weather event in ${city}, call volume for ${tradeLabel} spikes fast.\n\nWhen phones ring non-stop, missed calls go to competitors who answer first.\n\nWe built Bvelt to send instant text replies to missed calls so your crew locks in emergency jobs automatically.\n\nA quick look at how it works: ${demoUrl}\n\nWould you be open to taking a look?\n\nBest,\n${senderSignature}`;
-
-    call_script = `- Operator Context: ${tradeLabel} contractor in ${city} facing weather call surges.\n- Opening Question: "How are you handling the extra call volume after the storm?"\n- Key Point: Instant automated text replies lock in emergency callers before competitors do.\n- Next Step: Offer to text over the demo link (${demoUrl}).`;
-  }
-
+  // Product capability statement deliberately avoids SMS automation claims:
+  // SMS is not an active Bvelt delivery channel in this release.
+  const valueProp = `Bvelt helps service businesses organize enquiries and pending estimates so follow-up is easier to manage.`;
+  subject = `${name} — a question about enquiry follow-up`;
+  sms = `Hi ${firstName} — Rainer from Bvelt. ${question} ${valueProp} Would a short example be useful?`;
+  emailBody = `Hi ${name} team,\n\n${question}\n\n${valueProp}\n\nWould a short example be useful?`;
+  call_script = `- Opening Question: "${question}"\n- Key Point: ${valueProp}\n- Next Step: Offer a short example only if the problem is relevant to their business.`;
   // Enforce max ~300 chars on SMS
   if (sms.length > 310) {
     sms = sms.slice(0, 307) + "...";
