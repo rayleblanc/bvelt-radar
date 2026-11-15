@@ -1,51 +1,120 @@
-# AGENTS.md — Bvelt Intelligence
+# AGENTS.md — Bvelt Radar (bvelt-radar)
+
+Operating guide for any AI coding agent working in this repository.
 
 ## Source of truth
-Read `Bvelt_Intelligence_Documento_Maestro_v2.1.md` when it is present in the current working context. If it is not available, use the latest explicit direction from Ray and verified repository state; never assume a missing plan file or invent its contents.
+
+1. **Ecosystem plan:** LocalFlowPro `docs/BVELT_MASTER_PLAN.md` (2026-11-15+).  
+   Radar is the **capture layer** of that circuit. Fetch/read that plan when changing cross-repo contracts (learning events, tenant bootstrap, identity links).
+2. **This file (AGENTS.md):** Radar-specific non-negotiables (Founder outreach compliance, deploy, isolation).  
+   Safety/compliance here wins over generic “ship faster” pressure.
+3. **Live `main` + Cloudflare Worker state:** inspect before editing. Another agent may have changed the same zone.
+
+Legacy name `Bvelt_Intelligence_Documento_Maestro_v2.1.md` is superseded by LocalFlowPro `docs/BVELT_MASTER_PLAN.md`.
+
+---
+
+## What Radar is (one paragraph)
+
+Radar **observes real markets**: discovers businesses, scores ICP/email trust/trade coherence, serves Founder prospecting and **Tenant buyer search**, emits learning/observation history, and never pretends a reply is a sale. Canonical **outcomes and revenue truth live in BEM (LocalFlowPro)**. Radar keeps source observations and operational prospecting records.
+
+---
+
+## Place in the Master Plan circuit
+
+```
+Radar (this repo) → BEM → Intelligence → Bvelt UI → Brain → outcomes → BEM → learning back to Radar
+```
+
+Relevant Master Plan layers for this repo:
+
+| Layer | Radar responsibility |
+|-------|----------------------|
+| **B** Territory → Leads | Tenant bootstrap/search/leads quality; no silent empty; diagnostics |
+| **D** Learning closed | Accept BEM outbox events; Founder≠Tenant counters; idempotent writes |
+| **G** Radar depth | ICP coverage, change detection, dedup, observation history, cost-controlled sidecar |
+| **I** Anti-extinction | Secrets encrypted; degradable paths; no fabricated prod events |
+
+Do **not** implement Bvelt UI, Stripe, or Brain rules inside this repo.
+
+---
 
 ## Non-negotiable rules
-1. Preserve the full ecosystem ambition. Lack of customers, data, budget, or time does not justify silently deleting capabilities from the target architecture.
-2. Never invent evidence, outcomes, revenue, tests, migrations, secrets, CI results, or deployments.
-3. Label fixtures/simulations, modeled metrics, real observations, and verified outcomes distinctly.
-4. Assign M1–M5 maturity per capability and cite concrete evidence. Code, tests, production configuration, real operation, and continuous validation are different things.
-5. Before changing code, inspect current main, branches, commits, open PRs, CI, and recent collaborator/Grok work. Compare diffs; do not overwrite or duplicate.
-6. Do not merge stale branches. Rebase/reimplement only after reviewing every relevant change against current main.
-7. Keep Founder, Tenant, and Public scopes isolated in storage, routes, credentials, idempotency keys, and analytics.
-8. Derive tenant identity and authorization scope on the server from authenticated identity. Never trust client-supplied tenant IDs as authority.
-9. BEM is the verifiable business memory; Brain is the reasoning/orchestration layer. Do not create a competing memory store in Brain.
-10. Outcomes are append-only. Exact retries are idempotent; same idempotency key with different payload returns 409.
-11. Unknown revenue is NULL, never zero by default. A sent/delivered event is not a reply, booking, win, or sale.
-12. Never create fictitious production events. M4 may use Ray's own Tenant account and a genuine action through the normal authenticated flow; never fabricate a business outcome.
-13. Until the Tenant outcome circuit reaches M4, parallel implementation is limited to security, regression tests, and execution-plan Blocks 6–7. Other future capabilities may receive written contracts only.
-14. Do not change the Gemini/Groq cascade or model names without Ray's explicit instruction.
-15. Do not introduce paid services, card requirements, paid AI, or advertising without explicit approval.
-16. Never expose secret values in code, logs, tool output, reports, or chat. A plaintext credential must be rotated and stored as a secret.
-17. Production migrations, secret rotation, and binding/configuration changes still require Ray's explicit approval.
-18. Standing authorization for `bvelt-radar`: deploy to production after each completed code phase once the exact diff is reviewed and every required GitHub check is green. This authorization applies only to Radar, not Bvelt.
-19. Before merging, inspect GitHub Actions workflow runs, jobs, and logs—not only the green summary. Never bypass branch protection; if GitHub rejects the merge, stop and report the blocker.
-20. After merge, verify the new Cloudflare Worker version is deployed at 100%, preserve bindings/secrets/schedules, and confirm the Founder cron remains active. Do not claim deployment if Cloudflare does not confirm it.
-21. Keep Radar operational during development. Do not disable Founder discovery, outreach, queues, or cron unless Ray explicitly instructs.
-22. Do not close an operational recovery phase until a genuine post-deploy Founder run has been inspected for discovery results, source diagnostics, filtering, email dispatch, and Telegram delivery. Never fabricate production events.
-23. Founder outreach is capped at three total touches (initial + two follow-ups), at least five days apart, and stops on reply, bounce, unsubscribe, or complaint. Use per-touch idempotency and historical message counts to protect legacy prospects.
-24. Keep `GITHUB_ACTIONS_TOKEN` and all credentials as encrypted Worker secrets. A plaintext credential must be rotated, not merely hidden in logs.
-25. Never claim production success from a passing build or the presence of a Worker deployment alone.
-26. At the end, report changed files, commit/PR, CI logs, Cloudflare deployment evidence, post-deploy runtime evidence, unresolved risks, and any action required from Ray.
 
-## Working sequence
-- Verify current repository and Cloudflare state before acting.
-- Continue the lowest-dependency incomplete execution block; do not skip the M4 gate.
-- Keep migrations separate, versioned, reconciled against live D1, and paired with rollback.
+1. **Full ambition.** Do not silently delete target capabilities from the ecosystem architecture because of missing customers or budget.
+2. **Never invent** evidence, outcomes, revenue, tests, migrations, secrets, CI results, or deployments.
+3. Label fixtures, modeled metrics, real observations, and verified outcomes **distinctly**.
+4. Before changing code: inspect `main`, PRs, CI **job logs**, recent collaborator commits. Diff first.
+5. Do not merge stale branches without reconciling against current `main`.
+6. **Isolate** Founder, Tenant, and Public scopes in storage, routes, credentials, idempotency keys, aggregation, and reporting.
+7. Tenant identity/authorization for learning is **service-to-service** and scoped to what Bvelt authenticated — never trust a raw client tenant id as authority.
+8. **BEM is memory; Brain is intelligence** (both primarily in LocalFlowPro). Radar does not become a second outcome ledger of record.
+9. Learning writes are **idempotent**. Conflicts → **409**. Unconfirmed persistence → retryable failure, **never** success.
+10. Unknown revenue is **NULL**. Sent/delivered ≠ reply ≠ booking ≠ win ≠ sale. Tenant counters must not conflate those events.
+11. Never create fictitious production events. Inspect real post-deploy Founder runs for discovery, filters, email, Telegram.
+12. Do not change Gemini/Groq cascade or model names without Ray’s explicit instruction (if used here).
+13. Do not introduce new paid services/ads without approval.
+14. Never expose secrets in code, logs, tool output, or chat. Rotate leaks. Keep `GITHUB_ACTIONS_TOKEN` and credentials as **encrypted Worker secrets**, never plaintext vars.
+15. Production migrations / secret rotation / binding changes require Ray’s explicit approval unless already granted for the task.
+16. **Standing authorization for `bvelt-radar` only:** after a completed code phase, exact diff reviewed, and every required GitHub check **green**, deploy to production Worker. This does **not** authorize Bvelt (LocalFlowPro) deploys.
+17. Before merge: read Actions job logs, not only badges. Never bypass branch protection.
+18. After merge/deploy: confirm Worker version at **100%**, bindings/secrets/schedules intact, Founder cron active. Do not claim deploy without Cloudflare confirmation.
+19. Keep Radar operational. Do not disable Founder discovery, outreach, queues, or cron unless Ray explicitly instructs.
+20. Founder outreach: **max three touches** (initial + two follow-ups), ≥5 days apart; stop on reply, bounce, unsubscribe, or complaint. Per-touch idempotency + historical counts protect legacy prospects.
+21. Founder email **fail closed** unless: sender has complete physical postal address, recipient has positive provider-backed verification, and suppression/cooldown/idempotency pass. Manual approval does not bypass these controls.
+22. Founder first-touch: **plain text, no URL**. Follow-ups: at most one product link. Never invent site-speed metrics, missed-call facts, conversion %, free audits, or response-time guarantees.
+23. Resend “delivered” = receiving server accepted the message, **not** inbox placement. State Gmail-folder limits when unknown.
+24. Mirror provider bounce suppressions into Radar D1; never contact suppressed addresses again. Discovery may continue while email is held for compliance.
+25. Never claim production success from a green build or “Worker exists” alone.
+26. End of session: report files, commit/PR, CI logs, Cloudflare deploy evidence, post-deploy runtime evidence, risks, Ray actions.
+
+---
 
 ## Repository ownership — bvelt-radar
-- Radar owns original market observations and operational prospecting records.
-- Preserve Radar's source records; link to BEM through canonical business IDs when available.
-- Tenant learning is authenticated service-to-service and strictly scoped to the tenant derived/authorized by Bvelt.
-- Founder learning must remain a separate scope and contract; never route it through Tenant learning ingestion.
-- Idempotency conflicts return 409. Unconfirmed persistence returns a retryable failure, never success.
-- Keep `GITHUB_ACTIONS_TOKEN` and all service credentials as encrypted Worker secrets, never plaintext variables.
-- Keep the Founder and Tenant datasets separate in storage, routes, aggregation, and reporting.
 
-27. Founder email dispatch must fail closed unless the sender has a complete physical postal address, the recipient has positive provider-backed verification, and suppression/cooldown/idempotency checks pass. Manual approval never bypasses these controls.
-28. Founder first-touch email is plain text with no URL; follow-ups are capped at three total touches, at least five days apart, with at most one product link. Never invent site-speed metrics, missed-call facts, conversion percentages, free audits, or response-time guarantees.
-29. Resend "delivered" means the receiving server accepted the message, not that it reached the inbox. Verify Gmail folder placement when the connected account exposes it; otherwise state the limitation.
-30. Mirror provider bounce suppressions into Radar D1 and never contact a suppressed address again. Discovery may continue while email dispatch is held for compliance.
+- Owns **original market observations** and operational prospecting records.
+- Preserve source records; link to BEM via canonical business IDs when available — do not silently steal ownership of outcomes.
+- Tenant learning ingestion is authenticated and tenant-scoped from Bvelt.
+- Founder learning is a **separate** scope and contract; never route Founder through Tenant learning ingestion.
+- Keep Founder and Tenant datasets separate in storage, routes, aggregation, and reporting.
+
+### Contracts with LocalFlowPro
+
+- Tenant bootstrap / search / leads APIs consumed by `radarBootstrapService` and related Bvelt clients.
+- Learning events from BEM outbox (`/learning/events` or equivalent) — idempotent, realm-separated counters.
+- Observation history append-only for tenant territory snapshots when Master Plan **Territory Lock** is implemented.
+
+When changing request/response shapes, update both repos or version the API; do not break Bvelt prod silently.
+
+---
+
+## Working sequence
+
+1. Verify repo + Cloudflare state.
+2. Prefer Master Plan items that unblock **B** (tenant leads quality/diagnostics) and **D** (learning integrity) over speculative features.
+3. Keep migrations separate, versioned, reconciled against live D1, with rollback notes.
+4. CI green before merge; deploy per standing Radar authorization only when checks pass.
+
+---
+
+## Anti-patterns
+
+- Treating a positive reply as a won deal in counters.
+- Mixing Founder and Tenant learning tables or routes.
+- Returning success when D1 write was not confirmed.
+- Plaintext secrets in `wrangler` vars or logs.
+- Disabling Founder cron “temporarily” without Ray.
+- Inventing compliance-sensitive claims in outreach copy.
+- Changing Bvelt app code in this repository.
+
+---
+
+## Collaboration with other AIs
+
+- Read current `main` before writes.
+- Coordinate learning/bootstrap contract changes with LocalFlowPro agents.
+- Tag work to Master Plan layer IDs (`B6`, `D3`, `G2`, …) when possible.
+
+---
+
+*Aligned to BVELT_MASTER_PLAN · bvelt-radar · 2026-11-15*
