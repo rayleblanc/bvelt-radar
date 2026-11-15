@@ -247,7 +247,7 @@ const NON_BUSINESS_ENTITY_REGEX =
 
 /**
  * Detect name vs claimed trade/category incoherence (production findings):
- * restaurant labeled landscaping, sports club as services, wholesale supply as contractor.
+ * restaurant labeled landscaping, sports club as services, wholesale/retail lighting as contractor.
  */
 export function isCategoryNameMismatch(
   name: string | null | undefined,
@@ -259,7 +259,7 @@ export function isCategoryNameMismatch(
   if (!n || !c) return false;
 
   const tradeish =
-    /\b(landscap|lawn|garden|electric|electr|plumb|hvac|h\.?v\.?a\.?c|contractor|roofer|roofing|hvac|heating|cooling|pest|cleaning|handyman)\b/i.test(
+    /\b(landscap|lawn|garden|electric|electr|plumb|hvac|h\.?v\.?a\.?c|contractor|roofer|roofing|heating|cooling|pest|cleaning|handyman)\b/i.test(
       c
     );
 
@@ -272,10 +272,17 @@ export function isCategoryNameMismatch(
     return true;
   }
   if (/\b(wholesale|distributor|distribution|supply\s+house|lighting\s+supply|building\s+supply)\b/i.test(n)) {
-    // Wholesale can sell to contractors but is not itself a residential service contractor ICP for Founder outreach.
     if (/\b(contractor|electrician|plumber|residential|service)\b/i.test(c)) {
       return true;
     }
+  }
+  // "Prestige Lighting" style retailers: lighting in the name, no electrical trade word, claimed as electrician/contractor.
+  if (
+    /\blighting\b/i.test(n) &&
+    !/\b(electric|electrical|electrician|electricians)\b/i.test(n) &&
+    /\b(electric|electrical|electrician|contractor)\b/i.test(c)
+  ) {
+    return true;
   }
   return false;
 }
