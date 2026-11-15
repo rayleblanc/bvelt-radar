@@ -4240,8 +4240,12 @@ async function handleDecision(
 
     // Manual approval must not bypass the global pause or the outreach circuit breaker.
     if (env.RADAR_GLOBAL_PAUSE === "true" || env.RADAR_GLOBAL_PAUSE === "1") {
-      await db.prepare("UPDATE prospects SET status = 'held', outcome = 'radar_global_pause', updated_at = ? WHERE id = ?").bind(timestamp, id).run();
-      return Response.json({ success: false, blocked: true, reason: "radar_global_pause", id }, { status: 423, headers });
+      await db.prepare("UPDATE prospects SET status = 'held', outcome = 'RADAR_GLOBAL_PAUSED', updated_at = ? WHERE id = ?").bind(timestamp, id).run();
+      return Response.json({ success: false, blocked: true, reason: "RADAR_GLOBAL_PAUSED", id }, { status: 423, headers });
+    }
+    if (env.RADAR_OUTREACH_PAUSE === "true" || env.RADAR_OUTREACH_PAUSE === "1") {
+      await db.prepare("UPDATE prospects SET status = 'held', outcome = 'RADAR_OUTREACH_PAUSED', updated_at = ? WHERE id = ?").bind(timestamp, id).run();
+      return Response.json({ success: false, blocked: true, reason: "RADAR_OUTREACH_PAUSED", id }, { status: 423, headers });
     }
     const manualCircuitBreaker = await getCircuitBreakerStatus(db);
     if (manualCircuitBreaker.active) {
