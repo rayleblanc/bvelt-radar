@@ -6901,12 +6901,13 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
   // Phone-only Founder prospect: generate a reviewed WhatsApp draft and hand it
   // to the founder. A wa.me link does NOT prove that the number has WhatsApp.
   if (!String(prospect.email || "").trim()) {
+    const phoneDigits = extractPhoneDigits(prospect.phone);
     const waPhone = normalizeWhatsAppPhone(prospect.phone);
-    if (!waPhone) {
-      await env.RADAR_DB.prepare("UPDATE prospects SET status = 'hold', outcome = 'whatsapp_phone_not_international', updated_at = ? WHERE id = ?")
+    if (!phoneDigits) {
+      await env.RADAR_DB.prepare("UPDATE prospects SET status = 'hold', outcome = 'whatsapp_phone_invalid', updated_at = ? WHERE id = ?")
         .bind(new Date().toISOString(), prospect_id).run();
       await notifyOnce(env, `whatsapp_phone_unusable_${prospect.id}`,
-        `<b>📵 Prospecto con teléfono, WhatsApp pendiente</b>\n<b>Negocio:</b> ${escapeHtml(String(prospect.name || ""))}\n<b>Teléfono:</b> <code>${escapeHtml(String(prospect.phone || "No disponible"))}</code>\n<i>Falta un número internacional válido. Radar no inventará el código de país.</i>`);
+        `<b>📵 Prospecto con teléfono no utilizable</b>\n<b>Negocio:</b> ${escapeHtml(String(prospect.name || ""))}\n<b>Teléfono:</b> <code>${escapeHtml(String(prospect.phone || "No disponible"))}</code>`);
       return;
     }
 
@@ -6964,6 +6965,7 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
       channel: "whatsapp",
       verification: "unknown",
       phone_e164_digits: waPhone,
+      phone_digits: phoneDigits,
       link_ready_at: timestamp,
       human_send_required: true
     };
@@ -6979,8 +6981,8 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
       `🏢 <b>${escapeHtml(String(prospect.name || ""))}</b>\n` +
       `📍 ${escapeHtml(String(prospect.city || ""))} · ${escapeHtml(String(prospect.trade || ""))}\n` +
       `📊 Score: <b>${Number(prospect.score || 0)}/100</b>\n` +
-      `📞 <code>+${waPhone}</code>\n` +
-      `🟡 WhatsApp: <b>no verificado</b> · enlace listo\n\n` +
+      `📞 <code>${waPhone ? "+" + waPhone : escapeHtml(String(prospect.phone || phoneDigits))}</code>\n` +
+      `🟡 WhatsApp: <b>no verificado</b> · ${waPhone ? "chat directo listo" : "selección manual de contacto"}\n\n` +
       `<b>Mensaje sugerido:</b>\n<pre>${escapeHtml(whatsappBody)}</pre>\n\n` +
       `<i>Abrir WhatsApp no confirma que la cuenta exista ni envía el mensaje. Revisa el destinatario y envíalo manualmente solo si el contacto es apropiado.</i>`;
     const buttons = [
