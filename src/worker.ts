@@ -6856,6 +6856,102 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
       .bind(new Date().toISOString(), prospect_id).run();
     return;
   }
+  // Phone-only Founder prospect: generate a reviewed WhatsApp draft and hand it
+  // to the founder. A wa.me link does NOT prove that the number has WhatsApp.
+  if (!String(prospect.email || "").trim()) {
+    const waPhone = normalizeWhatsAppPhone(prospect.phone);
+    if (!waPhone) {
+      await env.RADAR_DB.prepare("UPDATE prospects SET status = 'hold', outcome = 'whatsapp_phone_not_international', updated_at = ? WHERE id = ?")
+        .bind(new Date().toISOString(), prospect_id).run();
+      await notifyOnce(env, `whatsapp_phone_unusable_${prospect.id}`,
+        `<b>📵 Prospecto con teléfono, WhatsApp pendiente</b>\n<b>Negocio:</b> ${escapeHtml(String(prospect.name || ""))}\n<b>Teléfono:</b> <code>${escapeHtml(String(prospect.phone || "No disponible"))}</code>\n<i>Falta un número internacional válido. Radar no inventará el código de país.</i>`);
+      return;
+    }
+
+    const suppressed = await checkSuppressedComposite(
+      env.RADAR_DB, null, prospect.website || null, prospect.phone, prospect.name, prospect.city, "founder"
+    );
+    if (suppressed) {
+      await env.RADAR_DB.prepare("UPDATE prospects SET status = 'suppressed', outcome = ?, updated_at = ? WHERE id = ?")
+        .bind(`SUPPRESSED: ${suppressed.reason}`, new Date().toISOString(), prospect.id).run();
+      return;
+    }
+
+    const eligibility = await getFounderOutreachEligibility(env.RADAR_DB, prospect);
+    if (!eligibility.allowed) {
+      await env.RADAR_DB.prepare("UPDATE prospects SET status = 'held', outcome = ?, updated_at = ? WHERE id = ?")
+        .bind(eligibility.reason, new Date().toISOString(), prospect.id).run();
+      return;
+    }
+
+    const dayOfYear = getDayOfYear(new Date());
+    const { missionConfig } = await getPriorityTargets(dayOfYear, env, job.mode, job.tenant_id, overrides, true);
+    const finalizeReserved = await reserveBudget(env.RADAR_DB, "founder", "finalize_units", 1);
+    if (!finalizeReserved) {
+      await env.RADAR_DB.prepare("UPDATE prospects SET status = 'held', outcome = 'finalize_budget_limit', updated_at = ? WHERE id = ?")
+        .bind(new Date().toISOString(), prospect.id).run();
+      return;
+    }
+
+    let draft: { subject: string; body: string };
+    try {
+      draft = await generateAICopy(prospect, prospect.variant_id || "missed_calls", env, missionConfig);
+      await commitBudget(env.RADAR_DB, "founder", "finalize_units", 1);
+    } catch (error: any) {
+      await releaseBudget(env.RADAR_DB, "founder", "finalize_units", 1);
+      console.warn("[WhatsApp Draft] AI copy failed; using deterministic fallback:", error?.message || error);
+      draft = getTradePsychologyFallback(
+        prospect.name, prospect.trade, prospect.city, prospect.variant_id || "missed_calls",
+        (missionConfig.languages && missionConfig.languages[0]) || "en",
+        prospect.phone, prospect.demo_token, prospect.signal_event, prospect.signal_area, env, prospect.signals_json
+      );
+    }
+
+    const whatsappBody = buildWhatsAppOutreachBody(draft.body);
+    const whatsappUrl = buildWhatsAppClickToChatUrl(prospect.phone, whatsappBody);
+    if (!whatsappBody || !whatsappUrl) {
+      await env.RADAR_DB.prepare("UPDATE prospects SET status = 'hold', outcome = 'whatsapp_draft_unavailable', updated_at = ? WHERE id = ?")
+        .bind(new Date().toISOString(), prospect.id).run();
+      return;
+    }
+
+    const timestamp = new Date().toISOString();
+    let metadata: any = {};
+    try { metadata = JSON.parse(prospect.signals_json || "{}"); } catch {}
+    metadata.manual_contact = {
+      channel: "whatsapp",
+      verification: "unknown",
+      phone_e164_digits: waPhone,
+      link_ready_at: timestamp,
+      human_send_required: true
+    };
+    await env.RADAR_DB.prepare(`
+      UPDATE prospects
+      SET status = 'notified', outcome = 'whatsapp_manual_ready',
+          draft_subject = 'WhatsApp manual draft', draft_body = ?, signals_json = ?, updated_at = ?
+      WHERE id = ?
+    `).bind(whatsappBody, JSON.stringify(metadata), timestamp, prospect.id).run();
+
+    const message =
+      `<b>📲 BVELT RADAR · CONTACTO WHATSAPP</b>\n\n` +
+      `🏢 <b>${escapeHtml(String(prospect.name || ""))}</b>\n` +
+      `📍 ${escapeHtml(String(prospect.city || ""))} · ${escapeHtml(String(prospect.trade || ""))}\n` +
+      `📊 Score: <b>${Number(prospect.score || 0)}/100</b>\n` +
+      `📞 <code>+${waPhone}</code>\n` +
+      `🟡 WhatsApp: <b>no verificado</b> · enlace listo\n\n` +
+      `<b>Mensaje sugerido:</b>\n<pre>${escapeHtml(whatsappBody)}</pre>\n\n` +
+      `<i>Abrir WhatsApp no confirma que la cuenta exista ni envía el mensaje. Revisa el destinatario y envíalo manualmente solo si el contacto es apropiado.</i>`;
+    const buttons = [
+      [{ text: "💬 Abrir WhatsApp", url: whatsappUrl }],
+      [
+        { text: "✅ Marcar enviado", callback_data: `wa_sent:${prospect.id}` },
+        { text: "❌ Descartar", callback_data: `discard:${prospect.id}` }
+      ]
+    ];
+    await notifyOnce(env, `whatsapp_manual_ready_${prospect.id}`, message, {}, buttons);
+    return;
+  }
+
   const emailCheck = sanitizeEmail(String(prospect.email || ""));
   if (!emailCheck.valid || !emailCheck.email) {
     await env.RADAR_DB.prepare("UPDATE prospects SET status = 'hold', outcome = 'invalid_email_candidate', email = NULL, updated_at = ? WHERE id = ?")
