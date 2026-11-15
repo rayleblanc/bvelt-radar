@@ -4238,6 +4238,18 @@ async function handleDecision(
       }, { status: 403, headers });
     }
 
+    // Manual approval must not bypass the global pause or the outreach circuit breaker.
+    if (env.RADAR_GLOBAL_PAUSE === "true" || env.RADAR_GLOBAL_PAUSE === "1") {
+      await db.prepare("UPDATE prospects SET status = 'held', outcome = 'radar_global_pause', updated_at = ? WHERE id = ?").bind(timestamp, id).run();
+      return Response.json({ success: false, blocked: true, reason: "radar_global_pause", id }, { status: 423, headers });
+    }
+    const manualCircuitBreaker = await getCircuitBreakerStatus(db);
+    if (manualCircuitBreaker.active) {
+      await db.prepare("UPDATE prospects SET status = 'held', outcome = 'outreach_circuit_breaker_open', updated_at = ? WHERE id = ?").bind(timestamp, id).run();
+      await notifyOnce(env, "outreach_circuit_breaker_open", "⛔ <b>Outreach en HOLD:</b> Circuit breaker activo. Requiere revisión antes de reanudar.");
+      return Response.json({ success: false, blocked: true, reason: manualCircuitBreaker.reason || "outreach_circuit_breaker_open", id }, { status: 503, headers });
+    }
+
     // Execute Outbound Email Dispatch
     let dispatchOutcome: any = { success: true, provider: 'simulated', status: 'simulated', messageId: `sim_${id.substring(0, 8)}` };
     let manualIdempotencyKey: string | null = null;
