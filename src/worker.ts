@@ -4204,7 +4204,7 @@ async function recordManualWhatsAppSent(prospectId: string, env: Env): Promise<{
   const prospect = await db.prepare("SELECT * FROM prospects WHERE id = ? AND COALESCE(tenant_id,'founder') = 'founder'")
     .bind(prospectId).first() as any;
   if (!prospect) return { success: false, reason: "prospect_not_found" };
-  if (!prospect.phone || !normalizeWhatsAppPhone(prospect.phone)) return { success: false, reason: "valid_international_phone_required" };
+  if (!prospect.phone || !extractPhoneDigits(prospect.phone)) return { success: false, reason: "valid_phone_required" };
 
   const already = await db.prepare(
     "SELECT id FROM prospect_events WHERE prospect_id = ? AND event_type = 'whatsapp_manual_sent' LIMIT 1"
@@ -10457,6 +10457,11 @@ function getTradePsychologyFallback(
   return { subject, body: footer ? `${bodyBase}\n\n${footer}` : bodyBase };
 }
 
+export function extractPhoneDigits(value: string | null | undefined): string | null {
+  const digits = String(value || "").replace(/\D/g, "");
+  return /^\d{7,15}$/.test(digits) ? digits : null;
+}
+
 export function normalizeWhatsAppPhone(value: string | null | undefined): string | null {
   const raw = String(value || "").trim();
   if (!raw) return null;
@@ -10469,8 +10474,12 @@ export function normalizeWhatsAppPhone(value: string | null | undefined): string
 
 export function buildWhatsAppClickToChatUrl(phone: string, message: string): string | null {
   const normalized = normalizeWhatsAppPhone(phone);
+  const digits = extractPhoneDigits(phone);
   const text = String(message || "").trim();
-  return normalized && text ? "https://wa.me/" + normalized + "?text=" + encodeURIComponent(text) : null;
+  if (!digits || !text) return null;
+  // Without an explicit country code, use WhatsApp's documented share-to-contact picker.
+  const base = normalized ? "https://wa.me/" + normalized : "https://wa.me/";
+  return base + "?text=" + encodeURIComponent(text);
 }
 
 export function buildWhatsAppOutreachBody(rawBody: string): string {
