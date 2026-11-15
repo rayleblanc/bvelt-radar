@@ -37,6 +37,7 @@ declare global {
   interface ScheduledEvent {
     cron: string;
     type: string;
+    scheduledTime: number;
   }
   interface Queue<Message = any> {
     send(message: Message, options?: any): Promise<void>;
@@ -3109,7 +3110,9 @@ export default {
   // Daily Scheduled Trigger (Cron: "0 12 * * *")
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
     console.log(`[Radar Cron] Scheduled trigger initiated at ${new Date().toISOString()}`);
-    const run = startProspectingRun(env, "founder", null);
+    const scheduledAt = Number(event?.scheduledTime);
+    const scheduledTime = Number.isFinite(scheduledAt) && scheduledAt > 0 ? scheduledAt : Date.now();
+    const run = startProspectingRun(env, "founder", null, undefined, false, scheduledTime);
     // After discovery wave, repair opportunities table from scored prospects (guerrilla self-heal)
     const heal = (async () => {
       try {
@@ -4235,9 +4238,28 @@ async function handleDecision(
       }, { status: 403, headers });
     }
 
+    // Manual approval must not bypass the global pause or the outreach circuit breaker.
+    if (env.RADAR_GLOBAL_PAUSE === "true" || env.RADAR_GLOBAL_PAUSE === "1") {
+      await db.prepare("UPDATE prospects SET status = 'held', outcome = 'RADAR_GLOBAL_PAUSED', updated_at = ? WHERE id = ?").bind(timestamp, id).run();
+      return Response.json({ success: false, blocked: true, reason: "RADAR_GLOBAL_PAUSED", id }, { status: 423, headers });
+    }
+    if (env.RADAR_OUTREACH_PAUSE === "true" || env.RADAR_OUTREACH_PAUSE === "1") {
+      await db.prepare("UPDATE prospects SET status = 'held', outcome = 'RADAR_OUTREACH_PAUSED', updated_at = ? WHERE id = ?").bind(timestamp, id).run();
+      return Response.json({ success: false, blocked: true, reason: "RADAR_OUTREACH_PAUSED", id }, { status: 423, headers });
+    }
+    const manualCircuitBreaker = await getCircuitBreakerStatus(db);
+    if (manualCircuitBreaker.active) {
+      await db.prepare("UPDATE prospects SET status = 'held', outcome = 'outreach_circuit_breaker_open', updated_at = ? WHERE id = ?").bind(timestamp, id).run();
+      await notifyOnce(env, "outreach_circuit_breaker_open", "⛔ <b>Outreach en HOLD:</b> Circuit breaker activo. Requiere revisión antes de reanudar.");
+      return Response.json({ success: false, blocked: true, reason: manualCircuitBreaker.reason || "outreach_circuit_breaker_open", id }, { status: 503, headers });
+    }
+
     // Execute Outbound Email Dispatch
     let dispatchOutcome: any = { success: true, provider: 'simulated', status: 'simulated', messageId: `sim_${id.substring(0, 8)}` };
     let manualIdempotencyKey: string | null = null;
+    const manualHasLiveProvider = !!(env.RESEND_API_KEY?.trim() || env.BREVO_API_KEY?.trim());
+    const manualTenantId = prospect.tenant_id || "founder";
+    let manualBudgetReserved = false;
     if (prospect.email && prospect.email.includes('@')) {
       const manualEligibility = await getFounderOutreachEligibility(db, prospect);
       if (!manualEligibility.allowed) {
@@ -4250,7 +4272,7 @@ async function handleDecision(
       if (!isEmailValidatedForOutreach(prospect.signals_json || "{}")) {
         return Response.json({ success: false, blocked: true, reason: "email_not_provider_verified", id }, { status: 409, headers });
       }
-      const manualSequenceId = env.RESEND_API_KEY ? "resend_live" : env.BREVO_API_KEY ? "brevo_live" : "manual_simulated";
+      const manualSequenceId = env.RESEND_API_KEY?.trim() ? "resend_live" : env.BREVO_API_KEY?.trim() ? "brevo_live" : "manual_simulated";
       manualIdempotencyKey = buildOutreachIdempotencyKey(prospect.tenant_id || "founder", prospect.id, manualSequenceId, manualEligibility.nextTouch);
       const existingManual = await db.prepare("SELECT status FROM outreach_idempotency WHERE idempotency_key = ?").bind(manualIdempotencyKey).first() as any;
       if (existingManual && ["reserved", "sent", "scheduled", "queued", "provider_unknown"].includes(String(existingManual.status || "").toLowerCase())) {
@@ -4261,7 +4283,7 @@ async function handleDecision(
       const safeBody = typeof normalizeOutreachBody === 'function' ? normalizeOutreachBody(draftBody) : draftBody;
 
       // Compliance Hard Gate: missing sender postal address MUST block outbound dispatch
-      if ((env.RESEND_API_KEY || env.BREVO_API_KEY) && !isCompletePostalAddress(env.SENDER_POSTAL_ADDRESS)) {
+      if (manualHasLiveProvider && !isCompletePostalAddress(env.SENDER_POSTAL_ADDRESS)) {
         await notifyOnce(
           env,
           "missing_sender_postal_address",
@@ -4274,13 +4296,39 @@ async function handleDecision(
         }, { status: 400, headers });
       }
 
-      const manualReservation = await db.prepare(`
-        INSERT INTO outreach_idempotency (idempotency_key, prospect_id, tenant_id, email, status, created_at, updated_at)
-        VALUES (?, ?, ?, ?, 'reserved', ?, ?)
-        ON CONFLICT(idempotency_key) DO UPDATE SET status = 'reserved', email = excluded.email, updated_at = excluded.updated_at
-        WHERE outreach_idempotency.status = 'failed'
-      `).bind(manualIdempotencyKey, prospect.id, prospect.tenant_id || "founder", prospect.email, timestamp, timestamp).run() as any;
+      // Manual Telegram approval is still subject to the same sender governor
+      // and daily outreach budget as autonomous dispatch. Approval is not a cap bypass.
+      if (manualHasLiveProvider) {
+        const manualGovernor = await checkSenderGovernor(env);
+        if (!manualGovernor.allowed) {
+          await db.prepare("UPDATE prospects SET status = 'held', outcome = 'sender_governor_limit', updated_at = ? WHERE id = ?")
+            .bind(timestamp, id).run();
+          await notifyOnce(env, "sender_governor_blocked", "⚠️ <b>Outreach en HOLD:</b> Sender Governor límite diario alcanzado (" + manualGovernor.reason + ").");
+          return Response.json({ success: false, blocked: true, reason: manualGovernor.reason, id }, { status: 429, headers });
+        }
+        manualBudgetReserved = await reserveBudget(db, manualTenantId, 'outreach_units', 1);
+        if (!manualBudgetReserved) {
+          await db.prepare("UPDATE prospects SET status = 'held', outcome = 'outreach_budget_limit_exceeded', updated_at = ? WHERE id = ?")
+            .bind(timestamp, id).run();
+          await notifyOnce(env, "outreach_budget_exhausted", "⚠️ <b>Outreach en HOLD:</b> Presupuesto diario agotado para '" + manualTenantId + "'.");
+          return Response.json({ success: false, blocked: true, reason: "outreach_budget_limit_exceeded", id }, { status: 429, headers });
+        }
+      }
+
+      let manualReservation: any;
+      try {
+        manualReservation = await db.prepare(`
+          INSERT INTO outreach_idempotency (idempotency_key, prospect_id, tenant_id, email, status, created_at, updated_at)
+          VALUES (?, ?, ?, ?, 'reserved', ?, ?)
+          ON CONFLICT(idempotency_key) DO UPDATE SET status = 'reserved', email = excluded.email, updated_at = excluded.updated_at
+          WHERE outreach_idempotency.status = 'failed'
+        `).bind(manualIdempotencyKey, prospect.id, manualTenantId, prospect.email, timestamp, timestamp).run() as any;
+      } catch (reservationError) {
+        if (manualBudgetReserved) await releaseBudget(db, manualTenantId, 'outreach_units', 1);
+        throw reservationError;
+      }
       if (!(Number(manualReservation?.meta?.changes || 0) > 0)) {
+        if (manualBudgetReserved) await releaseBudget(db, manualTenantId, 'outreach_units', 1);
         return Response.json({ success: false, blocked: true, reason: "outreach_reservation_conflict", id }, { status: 409, headers });
       }
 
@@ -4300,6 +4348,7 @@ async function handleDecision(
       });
 
       if (dispatchOutcome.status !== "dispatched" || !String(dispatchOutcome.messageId || "").trim()) {
+        if (manualBudgetReserved) await releaseBudget(db, manualTenantId, 'outreach_units', 1);
         const dispatchError = dispatchOutcome.error || (
           dispatchOutcome.status === "simulated"
             ? "email_provider_not_configured"
@@ -4350,6 +4399,14 @@ async function handleDecision(
       try {
         await db.prepare("UPDATE outreach_idempotency SET status = 'sent', provider_reference = ?, updated_at = ? WHERE idempotency_key = ?")
           .bind(dispatchOutcome.messageId || null, timestamp, manualIdempotencyKey).run();
+      } catch (e) {}
+    }
+    if (manualBudgetReserved) {
+      await incrementSenderSends(db);
+      await commitBudget(db, manualTenantId, 'outreach_units', 1);
+      try {
+        await db.prepare("UPDATE daily_missions SET outreach_count = outreach_count + 1 WHERE tenant_id = ? AND day = ?")
+          .bind(manualTenantId, new Date().toISOString().slice(0, 10)).run();
       } catch (e) {}
     }
 
@@ -4952,6 +5009,14 @@ export async function bootstrapBveltTenant(
   };
 }
 
+/** Stable D1 run identity for one Cloudflare ScheduledEvent delivery slot. */
+export function buildScheduledRunId(mode: string, tenantId: string | null, scheduledTime: number): string {
+  const stamp = Math.floor(Number(scheduledTime));
+  if (!Number.isFinite(stamp) || stamp <= 0) throw new Error("A valid Cloudflare scheduledTime is required");
+  const safe = (value: string) => value.toLowerCase().replace(/[^a-z0-9_-]+/g, "_").slice(0, 48) || "unknown";
+  return "cron_" + safe(mode) + "_" + safe(tenantId || "founder") + "_" + stamp;
+}
+
 export async function startProspectingRun(
   env: Env, 
   mode: string, 
@@ -4963,7 +5028,8 @@ export async function startProspectingRun(
     languages: string | null;
     min_score: string | null;
   },
-  force?: boolean
+  force?: boolean,
+  scheduledTime?: number
 ): Promise<{ run_id: string; jobs_enqueued: number; active_cities: string[]; active_trades: string[]; diagnostics: any }> {
   if (env.RADAR_GLOBAL_PAUSE === "true" || env.RADAR_GLOBAL_PAUSE === "1") {
     console.log("[startProspectingRun] RADAR_GLOBAL_PAUSE active. Prospecting run aborted.");
@@ -4980,7 +5046,10 @@ export async function startProspectingRun(
   const today = new Date().toISOString().split('T')[0];
 
   const tId = tenantId || "founder";
-  if (!force) {
+  // Manual/API runs keep the four-hour throttle. Scheduled invocations use
+  // their exact Cloudflare scheduledTime as an idempotency key instead, so a
+  // nearby manual run cannot suppress a real cron slot.
+  if (!force && !scheduledTime) {
     try {
       const existingRun = await db.prepare("SELECT id, created_at FROM runs WHERE day = ? AND mode = ? AND COALESCE(tenant_id,'founder') = ? ORDER BY created_at DESC LIMIT 1").bind(today, mode, tId).first() as any;
       if (existingRun) {
@@ -5003,7 +5072,9 @@ export async function startProspectingRun(
     }
   }
 
-  const runId = crypto.randomUUID();
+  const runId = scheduledTime
+    ? buildScheduledRunId(mode, tId, scheduledTime)
+    : crypto.randomUUID();
 
   const dayOfYear = getDayOfYear(new Date());
   const { activeCities, activeTrades, pairs } = await getPriorityTargets(dayOfYear, env, mode, tenantId, overrides);
@@ -5035,10 +5106,23 @@ export async function startProspectingRun(
     };
   }
 
-  // Register run record in D1
-  await db.prepare(
-    "INSERT INTO runs (id, day, mode, tenant_id, discovered, finalized, ai_calls, hunter_calls, errors_json, created_at) VALUES (?, ?, ?, ?, 0, 0, 0, 0, '[]', ?)"
-  ).bind(runId, today, mode, tId, new Date().toISOString()).run();
+  // The deterministic run id + INSERT OR IGNORE makes duplicate deliveries of
+  // the same Cloudflare cron event atomic across concurrent Worker instances.
+  const runInsert = await db.prepare(
+    scheduledTime
+      ? "INSERT OR IGNORE INTO runs (id, day, mode, tenant_id, discovered, finalized, ai_calls, hunter_calls, errors_json, created_at) VALUES (?, ?, ?, ?, 0, 0, 0, 0, '[]', ?)"
+      : "INSERT INTO runs (id, day, mode, tenant_id, discovered, finalized, ai_calls, hunter_calls, errors_json, created_at) VALUES (?, ?, ?, ?, 0, 0, 0, 0, '[]', ?)"
+  ).bind(runId, today, mode, tId, new Date().toISOString()).run() as any;
+  if (scheduledTime && runInsert?.meta?.changes !== undefined && Number(runInsert.meta.changes) === 0) {
+    console.log("[startProspectingRun] Scheduled slot already claimed; skipping duplicate trigger: " + runId);
+    return {
+      run_id: runId,
+      jobs_enqueued: 0,
+      active_cities: [],
+      active_trades: [],
+      diagnostics: { reason: "Scheduled slot already claimed (idempotent duplicate trigger)." }
+    };
+  }
 
   let jobsEnqueued = 0;
   const hasOverrides = !!(overrides && (overrides.cities || overrides.trades || overrides.countries || overrides.languages || overrides.min_score));
@@ -9666,7 +9750,12 @@ export function evaluateFounderOutreachEligibility(
 ): { allowed: boolean; reason: string; nextTouch: number } {
   const state = String(status || "").toLowerCase();
   if (["bounced", "unsubscribed", "complained", "suppressed", "replied", "blocked"].includes(state)) return { allowed: false, reason: "terminal_contact_state", nextTouch: 0 };
-  if (["queued", "scheduled", "provider_unknown", "provider_required", "hold", "held"].includes(state)) return { allowed: false, reason: "outreach_pending_or_held", nextTouch: 0 };
+  // `hold` / `held` are recoverable workflow states (e.g. missing postal address,
+  // temporary verification uncertainty, or an operator pause). Re-evaluate every
+  // hard gate below on retry instead of making a temporary hold permanent.
+  // Actual in-flight/ambiguous dispatch states remain blocked here and in the
+  // outreach_idempotency reservation check.
+  if (["queued", "scheduled", "provider_unknown", "provider_required"].includes(state)) return { allowed: false, reason: "outreach_pending_or_held", nextTouch: 0 };
   if (lastReplyContent && String(lastReplyContent).trim()) return { allowed: false, reason: "reply_received", nextTouch: 0 };
   const touches = Math.max(0, Math.floor(Number(historicalTouchCount) || 0));
   if (touches >= 3) return { allowed: false, reason: "three_touch_cap_reached", nextTouch: 0 };
@@ -10274,6 +10363,12 @@ export async function notifyOnce(
     if (env.RADAR_QUEUE && !dependencies.send) throw e;
   }
 }
+export function getCurrentDaySenderCount(state: any, day: string): number {
+  if (!state || String(state.last_reset_day || '') !== day) return 0;
+  const count = Number(state.sends_today || 0);
+  return Number.isFinite(count) ? Math.max(0, Math.floor(count)) : 0;
+}
+
 type RadarDigest = {
   verdict: "ok" | "idle" | "blocked";
   headline: string;
@@ -10296,12 +10391,12 @@ export async function collectRadarDigest(env: Env): Promise<RadarDigest> {
     try { return ((await db.prepare(sql).bind(...binds).all()).results || []) as any[]; } catch { return []; }
   };
 
-  const runsRow = await q<any>("SELECT COUNT(*) AS runs, COALESCE(SUM(discovered),0) AS discovered FROM runs WHERE mode = 'founder' AND created_at >= ?", since);
-  const discJobs = await q<any>("SELECT COUNT(*) AS c FROM queue_jobs WHERE job_type = 'discovery' AND created_at >= ?", since);
-  const zeroJobs = await q<any>("SELECT COUNT(*) AS c FROM queue_jobs WHERE status = 'completed_zero_prospects' AND created_at >= ?", since);
-  const failedJobs = await q<any>("SELECT COUNT(*) AS c FROM queue_jobs WHERE status = 'failed' AND created_at >= ?", since);
-  const lastFail = await q<any>("SELECT error FROM queue_jobs WHERE status = 'failed' AND error IS NOT NULL AND created_at >= ? ORDER BY created_at DESC LIMIT 1", since);
-  const zeroRows = await qAll("SELECT error FROM queue_jobs WHERE status = 'completed_zero_prospects' AND error IS NOT NULL AND created_at >= ? LIMIT 40", since);
+  const runsRow = await q<any>("SELECT COUNT(*) AS runs, COALESCE(SUM(discovered),0) AS discovered FROM runs WHERE mode = 'founder' AND COALESCE(NULLIF(TRIM(tenant_id),''),'founder') = 'founder' AND created_at >= ?", since);
+  const discJobs = await q<any>("SELECT COUNT(*) AS c FROM queue_jobs q INNER JOIN runs r ON r.id = q.run_id WHERE r.mode = 'founder' AND COALESCE(NULLIF(TRIM(r.tenant_id),''),'founder') = 'founder' AND q.job_type = 'discovery' AND q.created_at >= ?", since);
+  const zeroJobs = await q<any>("SELECT COUNT(*) AS c FROM queue_jobs q INNER JOIN runs r ON r.id = q.run_id WHERE r.mode = 'founder' AND COALESCE(NULLIF(TRIM(r.tenant_id),''),'founder') = 'founder' AND q.status = 'completed_zero_prospects' AND q.job_type = 'discovery' AND q.created_at >= ?", since);
+  const failedJobs = await q<any>("SELECT COUNT(*) AS c FROM queue_jobs q INNER JOIN runs r ON r.id = q.run_id WHERE r.mode = 'founder' AND COALESCE(NULLIF(TRIM(r.tenant_id),''),'founder') = 'founder' AND q.status = 'failed' AND q.created_at >= ?", since);
+  const lastFail = await q<any>("SELECT q.error FROM queue_jobs q INNER JOIN runs r ON r.id = q.run_id WHERE r.mode = 'founder' AND COALESCE(NULLIF(TRIM(r.tenant_id),''),'founder') = 'founder' AND q.status = 'failed' AND q.error IS NOT NULL AND q.created_at >= ? ORDER BY q.created_at DESC LIMIT 1", since);
+  const zeroRows = await qAll("SELECT q.error FROM queue_jobs q INNER JOIN runs r ON r.id = q.run_id WHERE r.mode = 'founder' AND COALESCE(NULLIF(TRIM(r.tenant_id),''),'founder') = 'founder' AND q.job_type = 'discovery' AND q.status = 'completed_zero_prospects' AND q.error IS NOT NULL AND q.created_at >= ? LIMIT 40", since);
   const zeroReasonCounts = new Map<string, number>();
   for (const zr of zeroRows) {
     const txt = String(zr.error || "");
@@ -10312,16 +10407,22 @@ export async function collectRadarDigest(env: Env): Promise<RadarDigest> {
     zeroReasonCounts.set(k, (zeroReasonCounts.get(k) || 0) + 1);
   }
   const zeroReasonTop = Array.from(zeroReasonCounts.entries()).sort((a, b) => b[1] - a[1]).slice(0, 3);
-  const created = await q<any>("SELECT COUNT(*) AS c FROM prospects WHERE COALESCE(tenant_id,'founder') = 'founder' AND created_at >= ?", since);
+  const created = await q<any>("SELECT COUNT(*) AS c FROM prospects WHERE COALESCE(NULLIF(TRIM(tenant_id),''),'founder') = 'founder' AND created_at >= ?", since);
   const withEmail = await q<any>("SELECT COUNT(*) AS c FROM prospects WHERE COALESCE(tenant_id,'founder') = 'founder' AND created_at >= ? AND email IS NOT NULL AND email != ''", since);
-  const sent = await q<any>("SELECT COUNT(*) AS c FROM prospects WHERE COALESCE(tenant_id,'founder') = 'founder' AND status IN ('sent','scheduled') AND updated_at >= ?", since);
-  const waiting = await q<any>("SELECT COUNT(*) AS c FROM prospects WHERE COALESCE(tenant_id,'founder') = 'founder' AND status IN ('queued','notified')");
+  const sent = await q<any>("SELECT COUNT(*) AS c FROM prospects WHERE COALESCE(NULLIF(TRIM(tenant_id),''),'founder') = 'founder' AND lower(status) IN ('sent','scheduled','delivered','opened','clicked') AND updated_at >= ?", since);
+  const waiting = await q<any>("SELECT COUNT(*) AS c FROM prospects WHERE COALESCE(NULLIF(TRIM(tenant_id),''),'founder') = 'founder' AND status IN ('queued','notified')");
   const blockedRows = await qAll(
     `SELECT COALESCE(outcome,'sin_motivo') AS outcome, COUNT(*) AS c FROM prospects
-     WHERE COALESCE(tenant_id,'founder') = 'founder' AND updated_at >= ?
+     WHERE COALESCE(NULLIF(TRIM(tenant_id),''),'founder') = 'founder' AND updated_at >= ?
        AND status IN ('hold','held','disqualified','provider_required','provider_error','provider_unknown','blocked')
      GROUP BY outcome ORDER BY c DESC LIMIT 5`, since);
-  const gov = await q<any>("SELECT sends_today, status FROM sender_governor_state WHERE id = 'global_governor'");
+  const govRow = await q<any>("SELECT sends_today, status, last_reset_day FROM sender_governor_state WHERE id = 'global_governor'");
+  // Never display yesterday's (or older) counter as today's sends.
+  const gov = govRow ? {
+    ...govRow,
+    sends_today: getCurrentDaySenderCount(govRow, day),
+    status: String(govRow.last_reset_day || '') === day ? govRow.status : 'active'
+  } : null;
   const cb = await getCircuitBreakerStatus(db);
   const remDisc = await getRemainingBudget(db, "founder", "discovery_units");
   const remOut = await getRemainingBudget(db, "founder", "outreach_units");

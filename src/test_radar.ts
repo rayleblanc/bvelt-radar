@@ -1,6 +1,6 @@
 declare const process: any;
 
-import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, resolveTenantBuyerSegments, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey, notifyOnce, isVerifiedDeliverableEmail, evaluateFounderOutreachEligibility, buildTechnicalAuditSnapshot, isEmailValidatedForOutreach, isCompletePostalAddress, sendTelegramWithRetry, extractEmailAddress, evaluateResearchEvidenceQuality, classifyReplyText, getTelegramApprovalFeedback, getManualSendPreflightError } from './worker';
+import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, resolveTenantBuyerSegments, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey, notifyOnce, isVerifiedDeliverableEmail, evaluateFounderOutreachEligibility, buildTechnicalAuditSnapshot, isEmailValidatedForOutreach, isCompletePostalAddress, sendTelegramWithRetry, extractEmailAddress, evaluateResearchEvidenceQuality, classifyReplyText, getTelegramApprovalFeedback, getManualSendPreflightError, buildScheduledRunId, getCurrentDaySenderCount } from './worker';
 import { DEFAULT_FOUNDER_MISSION, MissionConfig } from './worker';
 import { buildResendIdempotencyKey, buildBrandedEmailHtml, resolveBveltSender, inspectOutboundEmailAuth, normalizeOutreachBody } from './emailDispatcher';
 import { fetchPermitContractors } from './permitSources';
@@ -373,6 +373,13 @@ tests.push({
     assert(!evaluateFounderOutreachEligibility("sent", null, 0, null, null, null, now).allowed, "Sent state without reliable send history must not resend");
     assert(!evaluateFounderOutreachEligibility("delivered", null, 1, "2026-09-01T12:00:00.000Z", "2026-09-01T12:00:00.000Z", null, now).allowed, "Expired follow-up window must not send");
     assert(!evaluateFounderOutreachEligibility("queued", null, 0, null, null, null, now).allowed, "Queued outreach must not trigger another send");
+    assert(buildScheduledRunId("founder", null, 1794765600000) === buildScheduledRunId("founder", "founder", 1794765600000), "Scheduled run identity normalizes the Founder scope");
+    assert(buildScheduledRunId("founder", null, 1794765600000) !== buildScheduledRunId("founder", null, 1794783600000), "Each scheduled cron slot receives a distinct run identity");
+    assert(getCurrentDaySenderCount({ sends_today: 4, last_reset_day: "2026-11-08" }, "2026-11-15") === 0, "Stale sender counters must not be displayed as today");
+    assert(getCurrentDaySenderCount({ sends_today: 4, last_reset_day: "2026-11-15" }, "2026-11-15") === 4, "Current-day sender counter remains visible");
+    assert(evaluateFounderOutreachEligibility("hold", null, 0, null, null, null, now).allowed, "Temporary hold can be retried after its blocking condition is corrected; downstream hard gates still apply");
+    assert(evaluateFounderOutreachEligibility("held", null, 0, null, null, null, now).allowed, "Compliance or operational hold must not become a permanent lock");
+    assert(!evaluateFounderOutreachEligibility("provider_required", null, 0, null, null, null, now).allowed, "Provider-required state remains blocked until dispatch reconciliation/configuration");
     assert(!evaluateFounderOutreachEligibility("provider_unknown", null, 1, fiveDaysAgo, fiveDaysAgo, null, now).allowed, "Unknown provider acceptance requires reconciliation");
     assert(isEmailValidatedForOutreach({ is_email_validated: true }), "Only provider-verified email metadata may pass");
     assert(!isEmailValidatedForOutreach({ is_email_validated: false }), "Explicitly unverified email must be blocked");
