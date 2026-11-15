@@ -6984,7 +6984,7 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
       `📞 <code>${waPhone ? "+" + waPhone : escapeHtml(String(prospect.phone || phoneDigits))}</code>\n` +
       `🟡 WhatsApp: <b>no verificado</b> · ${waPhone ? "chat directo listo" : "selección manual de contacto"}\n\n` +
       `<b>Mensaje sugerido:</b>\n<pre>${escapeHtml(whatsappBody)}</pre>\n\n` +
-      `<i>Abrir WhatsApp no confirma que la cuenta exista ni envía el mensaje. Revisa el destinatario y envíalo manualmente solo si el contacto es apropiado.</i>`;
+      `<i>Abrir WhatsApp no confirma que la cuenta exista ni envía el mensaje. La política de WhatsApp Business exige consentimiento explícito para recibir mensajes posteriores: un teléfono publicado no basta. Envía solo si tienes una invitación o consentimiento verificable; si no, usa otro canal permitido.</i>`;
     const buttons = [
       [{ text: "💬 Abrir WhatsApp", url: whatsappUrl }],
       [
