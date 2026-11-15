@@ -243,7 +243,7 @@ const NON_BUSINESS_ENTITY_REGEX =
 
 /**
  * Detect name vs claimed trade/category incoherence.
- * Prefix matches (landscap*, electric*) — avoid \b after stem so landscaping/electrician work.
+ * Prefix matches (landscap*, electric*) — avoid \\b after stem so landscaping/electrician work.
  */
 export function isCategoryNameMismatch(
   name: string | null | undefined,
@@ -295,7 +295,11 @@ export function isOffIcpName(
 
   if (NON_BUSINESS_ENTITY_REGEX.test(clean)) return true;
 
-  if (isCategoryNameMismatch(name, categoryOrTrade)) return true;
+  // Category mismatch is intentionally NOT a hard isOffIcpName failure.
+  // checkTradeCoherence must be allowed to reclassify stale labels
+  // (e.g. restaurant evidence correcting a landscaping declaration).
+  // Hard block for outreach remains in outreachQualityBlocked().
+  void categoryOrTrade;
 
   if (allowTenantBuyer) return false;
 
@@ -313,6 +317,8 @@ export function outreachQualityBlocked(input: {
 }): { blocked: boolean; reasons: string[] } {
   const reasons: string[] = [];
   if (isOffIcpName(input.name, Boolean(input.allowTenantBuyer), input.categoryOrTrade)) {
+    reasons.push('off_icp_or_category_mismatch');
+  } else if (isCategoryNameMismatch(input.name, input.categoryOrTrade)) {
     reasons.push('off_icp_or_category_mismatch');
   }
   const trust =
