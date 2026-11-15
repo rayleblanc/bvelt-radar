@@ -2465,9 +2465,11 @@ tests.push({
     };
     const missedKit = buildAttackKit(verifiedMissedCallProspect);
     assert(missedKit.angle === "missed_calls", "Verified friction must select missed_calls angle");
-    assert(missedKit.sms.length > 0, "SMS must be generated for verified angle");
-    assert(missedKit.sms.includes("Rainer"), "Must sign as Rainer");
-    assert(missedKit.sms.includes("https://bvelt.app/"), "Must include mandatory CTA link https://bvelt.app/");
+    assert(missedKit.sms.length > 0, "A short manual outreach message must be generated for verified angle");
+    assert(missedKit.sms.includes("Rainer"), "Must identify the sender");
+    assert(!/SMS|instant text|under a minute|60 seconds/i.test(missedKit.sms), "Must not promise unsupported SMS automation or response times");
+    assert(!/voicemail|rarely leave|call the next contractor/i.test(missedKit.email.body), "Must not invent caller behavior or lost jobs");
+    assert(!missedKit.email.body.includes("https://bvelt.app/"), "First-touch email should ask permission before sending a demo link");
 
     // 3. Candidate with verified quote request friction -> stale_quotes angle
     const verifiedQuoteProspect = {
@@ -2496,6 +2498,7 @@ tests.push({
     };
     const noSmsKit = buildAttackKit(verifiedNoSmsProspect);
     assert(noSmsKit.angle === "no_sms", "Verified no_sms signal must select no_sms angle");
+    assert(!/Bvelt (?:replies|responds|texts) by SMS|instant text|under a minute/i.test(noSmsKit.sms), "No-SMS signal must not trigger a false Bvelt SMS capability claim");
 
     // 5. Off-ICP prospect (e.g. Barbershop) -> hard gate disqualified
     const offIcpProspect = {
