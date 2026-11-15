@@ -4205,18 +4205,18 @@ async function recordManualWhatsAppSent(prospectId: string, env: Env): Promise<{
     .bind(prospectId).first() as any;
   if (!prospect) return { success: false, reason: "prospect_not_found" };
   if (!prospect.phone || !normalizeWhatsAppPhone(prospect.phone)) return { success: false, reason: "valid_international_phone_required" };
-  if (String(prospect.outcome || "") !== "whatsapp_manual_ready") {
-    return { success: false, reason: "whatsapp_draft_not_pending" };
-  }
 
   const already = await db.prepare(
     "SELECT id FROM prospect_events WHERE prospect_id = ? AND event_type = 'whatsapp_manual_sent' LIMIT 1"
   ).bind(prospectId).first();
   if (already) return { success: true, reason: "already_recorded" };
+  if (String(prospect.outcome || "") !== "whatsapp_manual_ready") {
+    return { success: false, reason: "whatsapp_draft_not_pending" };
+  }
 
   const now = new Date().toISOString();
   const cooldownUntil = new Date(Date.now() + 30 * 86400000).toISOString();
-  const phoneKey = String(prospect.phone).replace(/\\D/g, "");
+  const phoneKey = String(prospect.phone).replace(/\D/g, "");
   await db.prepare(`
     UPDATE prospects
     SET status = 'contacted', outcome = 'whatsapp_manual_sent',
