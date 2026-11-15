@@ -3852,16 +3852,25 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
       const [action, prospectId] = callbackData.split(":");
 
       if (action && prospectId) {
-        // Execute decision (approve maps to sent/approved, discard to discard, suppress to suppress)
-        const decisionAction = (action === "approve" || action === "sent") ? "sent" : (action === "discard" ? "discard" : action);
-        const decisionRes = await handleDecision(prospectId, decisionAction, `Triggered via Telegram Button (${action})`, env, {});
-        const decisionJson: any = await decisionRes.json().catch(() => ({}));
+        // WhatsApp is a manual action: opening wa.me never records a send.
+        const isWhatsAppSentAction = action === "wa_sent";
+        let decisionJson: any;
+        if (isWhatsAppSentAction) {
+          const result = await recordManualWhatsAppSent(prospectId, env);
+          decisionJson = { success: result.success, reason: result.reason };
+        } else {
+          const decisionAction = (action === "approve" || action === "sent") ? "sent" : (action === "discard" ? "discard" : action);
+          const decisionRes = await handleDecision(prospectId, decisionAction, `Triggered via Telegram Button (${action})`, env, {});
+          decisionJson = await decisionRes.json().catch(() => ({}));
+        }
         const isSendAction = action === "approve" || action === "sent";
         const sendFeedback = isSendAction ? getTelegramApprovalFeedback(decisionJson) : null;
 
         // Answer callback query so Telegram never reports a send that was blocked or simulated.
         if (botToken) {
-          const actionText = isSendAction
+          const actionText = isWhatsAppSentAction
+            ? (decisionJson?.success ? "✅ Contacto WhatsApp registrado" : "⛔ No se pudo registrar el contacto")
+            : isSendAction
             ? sendFeedback!.title
             : action === "discard"
             ? "❌ Descartado"
@@ -3892,7 +3901,7 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               chat_id: chatId,
-              text: `<b>${actionText}</b>: ID <code>${escapeHtml(prospectId)}</code>. ${decisionJson?.success === true ? "Estado actualizado." : "No se registró como enviado."}${dispatchInfo}`,
+              text: `<b>${actionText}</b>: ID <code>${escapeHtml(prospectId)}</code>. ${decisionJson?.success === true ? (isWhatsAppSentAction ? "Se aplicó un cooldown de 30 días al número." : "Estado actualizado.") : escapeHtml(String(decisionJson?.reason || "No se registró la acción."))}${dispatchInfo}`,
               parse_mode: "HTML"
             }),
             signal: AbortSignal.timeout(15000)
@@ -4188,6 +4197,36 @@ export function getTelegramApprovalFeedback(result: any): { title: string; detai
 export function getManualSendPreflightError(prospect: any): string | null {
   const parsed = sanitizeEmail(prospect?.email);
   return parsed.valid && parsed.email ? null : "valid_email_required";
+}
+
+async function recordManualWhatsAppSent(prospectId: string, env: Env): Promise<{ success: boolean; reason: string }> {
+  const db = env.RADAR_DB;
+  const prospect = await db.prepare("SELECT * FROM prospects WHERE id = ? AND COALESCE(tenant_id,'founder') = 'founder'")
+    .bind(prospectId).first() as any;
+  if (!prospect) return { success: false, reason: "prospect_not_found" };
+  if (!prospect.phone || !normalizeWhatsAppPhone(prospect.phone)) return { success: false, reason: "valid_international_phone_required" };
+
+  const already = await db.prepare(
+    "SELECT id FROM prospect_events WHERE prospect_id = ? AND event_type = 'whatsapp_manual_sent' LIMIT 1"
+  ).bind(prospectId).first();
+  if (already) return { success: true, reason: "already_recorded" };
+
+  const now = new Date().toISOString();
+  const cooldownUntil = new Date(Date.now() + 30 * 86400000).toISOString();
+  const phoneKey = String(prospect.phone).replace(/\\D/g, "");
+  await db.prepare(`
+    UPDATE prospects
+    SET status = 'contacted', outcome = 'whatsapp_manual_sent',
+        last_contact_at = ?, cooldown_until = ?, updated_at = ?
+    WHERE id = ?
+  `).bind(now, cooldownUntil, now, prospectId).run();
+  await db.prepare(
+    "INSERT INTO prospect_events (prospect_id, event_type, content, created_at) VALUES (?, 'whatsapp_manual_sent', ?, ?)"
+  ).bind(prospectId, "Founder confirmed manual WhatsApp message sent; 30-day phone cooldown", now).run();
+  await db.prepare(
+    "INSERT OR REPLACE INTO suppression (key, reason, created_at) VALUES (?, ?, ?)"
+  ).bind(phoneKey, `Contacted on ${now} (cooldown until ${cooldownUntil})`, now).run();
+  return { success: true, reason: "whatsapp_manual_sent_recorded" };
 }
 
 /**
