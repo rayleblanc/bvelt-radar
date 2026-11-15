@@ -37,6 +37,7 @@ declare global {
   interface ScheduledEvent {
     cron: string;
     type: string;
+    scheduledTime: number;
   }
   interface Queue<Message = any> {
     send(message: Message, options?: any): Promise<void>;
@@ -3109,7 +3110,9 @@ export default {
   // Daily Scheduled Trigger (Cron: "0 12 * * *")
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
     console.log(`[Radar Cron] Scheduled trigger initiated at ${new Date().toISOString()}`);
-    const run = startProspectingRun(env, "founder", null);
+    const scheduledAt = Number(event?.scheduledTime);
+    const scheduledTime = Number.isFinite(scheduledAt) && scheduledAt > 0 ? scheduledAt : Date.now();
+    const run = startProspectingRun(env, "founder", null, undefined, false, scheduledTime);
     // After discovery wave, repair opportunities table from scored prospects (guerrilla self-heal)
     const heal = (async () => {
       try {
@@ -4952,6 +4955,14 @@ export async function bootstrapBveltTenant(
   };
 }
 
+/** Stable D1 run identity for one Cloudflare ScheduledEvent delivery slot. */
+export function buildScheduledRunId(mode: string, tenantId: string | null, scheduledTime: number): string {
+  const stamp = Math.floor(Number(scheduledTime));
+  if (!Number.isFinite(stamp) || stamp <= 0) throw new Error("A valid Cloudflare scheduledTime is required");
+  const safe = (value: string) => value.toLowerCase().replace(/[^a-z0-9_-]+/g, "_").slice(0, 48) || "unknown";
+  return "cron_" + safe(mode) + "_" + safe(tenantId || "founder") + "_" + stamp;
+}
+
 export async function startProspectingRun(
   env: Env, 
   mode: string, 
@@ -4963,7 +4974,8 @@ export async function startProspectingRun(
     languages: string | null;
     min_score: string | null;
   },
-  force?: boolean
+  force?: boolean,
+  scheduledTime?: number
 ): Promise<{ run_id: string; jobs_enqueued: number; active_cities: string[]; active_trades: string[]; diagnostics: any }> {
   if (env.RADAR_GLOBAL_PAUSE === "true" || env.RADAR_GLOBAL_PAUSE === "1") {
     console.log("[startProspectingRun] RADAR_GLOBAL_PAUSE active. Prospecting run aborted.");
@@ -4980,7 +4992,10 @@ export async function startProspectingRun(
   const today = new Date().toISOString().split('T')[0];
 
   const tId = tenantId || "founder";
-  if (!force) {
+  // Manual/API runs keep the four-hour throttle. Scheduled invocations use
+  // their exact Cloudflare scheduledTime as an idempotency key instead, so a
+  // nearby manual run cannot suppress a real cron slot.
+  if (!force && !scheduledTime) {
     try {
       const existingRun = await db.prepare("SELECT id, created_at FROM runs WHERE day = ? AND mode = ? AND COALESCE(tenant_id,'founder') = ? ORDER BY created_at DESC LIMIT 1").bind(today, mode, tId).first() as any;
       if (existingRun) {
@@ -5003,7 +5018,9 @@ export async function startProspectingRun(
     }
   }
 
-  const runId = crypto.randomUUID();
+  const runId = scheduledTime
+    ? buildScheduledRunId(mode, tId, scheduledTime)
+    : crypto.randomUUID();
 
   const dayOfYear = getDayOfYear(new Date());
   const { activeCities, activeTrades, pairs } = await getPriorityTargets(dayOfYear, env, mode, tenantId, overrides);
@@ -5035,10 +5052,23 @@ export async function startProspectingRun(
     };
   }
 
-  // Register run record in D1
-  await db.prepare(
-    "INSERT INTO runs (id, day, mode, tenant_id, discovered, finalized, ai_calls, hunter_calls, errors_json, created_at) VALUES (?, ?, ?, ?, 0, 0, 0, 0, '[]', ?)"
-  ).bind(runId, today, mode, tId, new Date().toISOString()).run();
+  // The deterministic run id + INSERT OR IGNORE makes duplicate deliveries of
+  // the same Cloudflare cron event atomic across concurrent Worker instances.
+  const runInsert = await db.prepare(
+    scheduledTime
+      ? "INSERT OR IGNORE INTO runs (id, day, mode, tenant_id, discovered, finalized, ai_calls, hunter_calls, errors_json, created_at) VALUES (?, ?, ?, ?, 0, 0, 0, 0, '[]', ?)"
+      : "INSERT INTO runs (id, day, mode, tenant_id, discovered, finalized, ai_calls, hunter_calls, errors_json, created_at) VALUES (?, ?, ?, ?, 0, 0, 0, 0, '[]', ?)"
+  ).bind(runId, today, mode, tId, new Date().toISOString()).run() as any;
+  if (scheduledTime && runInsert?.meta?.changes !== undefined && Number(runInsert.meta.changes) === 0) {
+    console.log("[startProspectingRun] Scheduled slot already claimed; skipping duplicate trigger: " + runId);
+    return {
+      run_id: runId,
+      jobs_enqueued: 0,
+      active_cities: [],
+      active_trades: [],
+      diagnostics: { reason: "Scheduled slot already claimed (idempotent duplicate trigger)." }
+    };
+  }
 
   let jobsEnqueued = 0;
   const hasOverrides = !!(overrides && (overrides.cities || overrides.trades || overrides.countries || overrides.languages || overrides.min_score));
