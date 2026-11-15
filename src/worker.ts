@@ -10351,10 +10351,7 @@ export function buildAttackKit(p: any): {
     };
   }
 
-  const demoUrl = "https://bvelt.app/";
-  const senderSignature = "Rainer — Bvelt";
   const firstName = name.split(/\s+/)[0] || name;
-  const variantIndex = hashCode(String(p.id || name + city)) % 3;
 
   const reasons: string[] = [];
   if (selectedAngle === 'weather_surge') reasons.push(`señal climática/demanda: ${p.signal_event || 'alerta meteorológica'}`);
@@ -10392,7 +10389,7 @@ export function buildAttackKit(p: any): {
   const next =
     phone && !p.email ? "Llamar o contactar por WhatsApp primero (solo teléfono)." :
     p.email ? "Enviar correo + registrar decisión Enviar." :
-    "Buscar contacto y luego kit SMS/llamada.";
+    "Buscar contacto y luego preparar un mensaje manual o una llamada.";
 
   return {
     prospect_id: String(p.id || ""),
