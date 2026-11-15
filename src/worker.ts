@@ -4263,8 +4263,12 @@ async function handleDecision(
       const draftBody = prospect.draft_body || `Hola equipo de ${prospect.name},\n\nSoy Rainer, fundador de Bvelt. Ayudo a negocios de servicios a dar seguimiento a llamadas no atendidas y presupuestos pendientes.\n\n¿Tienen hoy un proceso para contactar a esas personas después? Si le sirve, puedo enviarle un ejemplo breve.`;
       const safeBody = typeof normalizeOutreachBody === 'function' ? normalizeOutreachBody(draftBody) : draftBody;
 
+      const manualHasLiveProvider = !!(env.RESEND_API_KEY?.trim() || env.BREVO_API_KEY?.trim());
+      const manualTenantId = prospect.tenant_id || "founder";
+      let manualBudgetReserved = false;
+
       // Compliance Hard Gate: missing sender postal address MUST block outbound dispatch
-      if ((env.RESEND_API_KEY || env.BREVO_API_KEY) && !isCompletePostalAddress(env.SENDER_POSTAL_ADDRESS)) {
+      if (manualHasLiveProvider && !isCompletePostalAddress(env.SENDER_POSTAL_ADDRESS)) {
         await notifyOnce(
           env,
           "missing_sender_postal_address",
@@ -4277,6 +4281,25 @@ async function handleDecision(
         }, { status: 400, headers });
       }
 
+      // Manual Telegram approval is still subject to the same sender governor
+      // and daily outreach budget as autonomous dispatch. Approval is not a cap bypass.
+      if (manualHasLiveProvider) {
+        const manualGovernor = await checkSenderGovernor(env);
+        if (!manualGovernor.allowed) {
+          await db.prepare("UPDATE prospects SET status = 'held', outcome = 'sender_governor_limit', updated_at = ? WHERE id = ?")
+            .bind(timestamp, id).run();
+          await notifyOnce(env, "sender_governor_blocked", "⚠️ <b>Outreach en HOLD:</b> Sender Governor límite diario alcanzado (" + manualGovernor.reason + ").");
+          return Response.json({ success: false, blocked: true, reason: manualGovernor.reason, id }, { status: 429, headers });
+        }
+        manualBudgetReserved = await reserveBudget(db, manualTenantId, 'outreach_units', 1);
+        if (!manualBudgetReserved) {
+          await db.prepare("UPDATE prospects SET status = 'held', outcome = 'outreach_budget_limit_exceeded', updated_at = ? WHERE id = ?")
+            .bind(timestamp, id).run();
+          await notifyOnce(env, "outreach_budget_exhausted", "⚠️ <b>Outreach en HOLD:</b> Presupuesto diario agotado para '" + manualTenantId + "'.");
+          return Response.json({ success: false, blocked: true, reason: "outreach_budget_limit_exceeded", id }, { status: 429, headers });
+        }
+      }
+
       const manualReservation = await db.prepare(`
         INSERT INTO outreach_idempotency (idempotency_key, prospect_id, tenant_id, email, status, created_at, updated_at)
         VALUES (?, ?, ?, ?, 'reserved', ?, ?)
@@ -4284,6 +4307,7 @@ async function handleDecision(
         WHERE outreach_idempotency.status = 'failed'
       `).bind(manualIdempotencyKey, prospect.id, prospect.tenant_id || "founder", prospect.email, timestamp, timestamp).run() as any;
       if (!(Number(manualReservation?.meta?.changes || 0) > 0)) {
+        if (manualBudgetReserved) await releaseBudget(db, manualTenantId, 'outreach_units', 1);
         return Response.json({ success: false, blocked: true, reason: "outreach_reservation_conflict", id }, { status: 409, headers });
       }
 
@@ -4303,6 +4327,7 @@ async function handleDecision(
       });
 
       if (dispatchOutcome.status !== "dispatched" || !String(dispatchOutcome.messageId || "").trim()) {
+        if (manualBudgetReserved) await releaseBudget(db, manualTenantId, 'outreach_units', 1);
         const dispatchError = dispatchOutcome.error || (
           dispatchOutcome.status === "simulated"
             ? "email_provider_not_configured"
@@ -4353,6 +4378,14 @@ async function handleDecision(
       try {
         await db.prepare("UPDATE outreach_idempotency SET status = 'sent', provider_reference = ?, updated_at = ? WHERE idempotency_key = ?")
           .bind(dispatchOutcome.messageId || null, timestamp, manualIdempotencyKey).run();
+      } catch (e) {}
+    }
+    if (manualBudgetReserved) {
+      await incrementSenderSends(db);
+      await commitBudget(db, manualTenantId, 'outreach_units', 1);
+      try {
+        await db.prepare("UPDATE daily_missions SET outreach_count = outreach_count + 1 WHERE tenant_id = ? AND day = ?")
+          .bind(manualTenantId, new Date().toISOString().slice(0, 10)).run();
       } catch (e) {}
     }
 
@@ -10331,12 +10364,12 @@ export async function collectRadarDigest(env: Env): Promise<RadarDigest> {
     try { return ((await db.prepare(sql).bind(...binds).all()).results || []) as any[]; } catch { return []; }
   };
 
-  const runsRow = await q<any>("SELECT COUNT(*) AS runs, COALESCE(SUM(discovered),0) AS discovered FROM runs WHERE mode = 'founder' AND created_at >= ?", since);
-  const discJobs = await q<any>("SELECT COUNT(*) AS c FROM queue_jobs WHERE job_type = 'discovery' AND created_at >= ?", since);
-  const zeroJobs = await q<any>("SELECT COUNT(*) AS c FROM queue_jobs WHERE status = 'completed_zero_prospects' AND created_at >= ?", since);
-  const failedJobs = await q<any>("SELECT COUNT(*) AS c FROM queue_jobs WHERE status = 'failed' AND created_at >= ?", since);
-  const lastFail = await q<any>("SELECT error FROM queue_jobs WHERE status = 'failed' AND error IS NOT NULL AND created_at >= ? ORDER BY created_at DESC LIMIT 1", since);
-  const zeroRows = await qAll("SELECT error FROM queue_jobs WHERE status = 'completed_zero_prospects' AND error IS NOT NULL AND created_at >= ? LIMIT 40", since);
+  const runsRow = await q<any>("SELECT COUNT(*) AS runs, COALESCE(SUM(discovered),0) AS discovered FROM runs WHERE mode = 'founder' AND COALESCE(NULLIF(TRIM(tenant_id),''),'founder') = 'founder' AND created_at >= ?", since);
+  const discJobs = await q<any>("SELECT COUNT(*) AS c FROM queue_jobs q INNER JOIN runs r ON r.id = q.run_id WHERE r.mode = 'founder' AND COALESCE(NULLIF(TRIM(r.tenant_id),''),'founder') = 'founder' AND q.job_type = 'discovery' AND q.created_at >= ?", since);
+  const zeroJobs = await q<any>("SELECT COUNT(*) AS c FROM queue_jobs q INNER JOIN runs r ON r.id = q.run_id WHERE r.mode = 'founder' AND COALESCE(NULLIF(TRIM(r.tenant_id),''),'founder') = 'founder' AND q.status = 'completed_zero_prospects' AND q.job_type = 'discovery' AND q.created_at >= ?", since);
+  const failedJobs = await q<any>("SELECT COUNT(*) AS c FROM queue_jobs q INNER JOIN runs r ON r.id = q.run_id WHERE r.mode = 'founder' AND COALESCE(NULLIF(TRIM(r.tenant_id),''),'founder') = 'founder' AND q.status = 'failed' AND q.created_at >= ?", since);
+  const lastFail = await q<any>("SELECT q.error FROM queue_jobs q INNER JOIN runs r ON r.id = q.run_id WHERE r.mode = 'founder' AND COALESCE(NULLIF(TRIM(r.tenant_id),''),'founder') = 'founder' AND q.status = 'failed' AND q.error IS NOT NULL AND q.created_at >= ? ORDER BY q.created_at DESC LIMIT 1", since);
+  const zeroRows = await qAll("SELECT q.error FROM queue_jobs q INNER JOIN runs r ON r.id = q.run_id WHERE r.mode = 'founder' AND COALESCE(NULLIF(TRIM(r.tenant_id),''),'founder') = 'founder' AND q.job_type = 'discovery' AND q.status = 'completed_zero_prospects' AND q.error IS NOT NULL AND q.created_at >= ? LIMIT 40", since);
   const zeroReasonCounts = new Map<string, number>();
   for (const zr of zeroRows) {
     const txt = String(zr.error || "");
@@ -10349,14 +10382,20 @@ export async function collectRadarDigest(env: Env): Promise<RadarDigest> {
   const zeroReasonTop = Array.from(zeroReasonCounts.entries()).sort((a, b) => b[1] - a[1]).slice(0, 3);
   const created = await q<any>("SELECT COUNT(*) AS c FROM prospects WHERE COALESCE(tenant_id,'founder') = 'founder' AND created_at >= ?", since);
   const withEmail = await q<any>("SELECT COUNT(*) AS c FROM prospects WHERE COALESCE(tenant_id,'founder') = 'founder' AND created_at >= ? AND email IS NOT NULL AND email != ''", since);
-  const sent = await q<any>("SELECT COUNT(*) AS c FROM prospects WHERE COALESCE(tenant_id,'founder') = 'founder' AND status IN ('sent','scheduled') AND updated_at >= ?", since);
+  const sent = await q<any>("SELECT COUNT(*) AS c FROM prospects WHERE COALESCE(NULLIF(TRIM(tenant_id),''),'founder') = 'founder' AND lower(status) IN ('sent','scheduled','delivered','opened','clicked') AND updated_at >= ?", since);
   const waiting = await q<any>("SELECT COUNT(*) AS c FROM prospects WHERE COALESCE(tenant_id,'founder') = 'founder' AND status IN ('queued','notified')");
   const blockedRows = await qAll(
     `SELECT COALESCE(outcome,'sin_motivo') AS outcome, COUNT(*) AS c FROM prospects
      WHERE COALESCE(tenant_id,'founder') = 'founder' AND updated_at >= ?
        AND status IN ('hold','held','disqualified','provider_required','provider_error','provider_unknown','blocked')
      GROUP BY outcome ORDER BY c DESC LIMIT 5`, since);
-  const gov = await q<any>("SELECT sends_today, status FROM sender_governor_state WHERE id = 'global_governor'");
+  const govRow = await q<any>("SELECT sends_today, status, last_reset_day FROM sender_governor_state WHERE id = 'global_governor'");
+  // Never display yesterday's (or older) counter as today's sends.
+  const gov = govRow ? {
+    ...govRow,
+    sends_today: String(govRow.last_reset_day || '') === day ? Number(govRow.sends_today || 0) : 0,
+    status: String(govRow.last_reset_day || '') === day ? govRow.status : 'active'
+  } : null;
   const cb = await getCircuitBreakerStatus(db);
   const remDisc = await getRemainingBudget(db, "founder", "discovery_units");
   const remOut = await getRemainingBudget(db, "founder", "outreach_units");
