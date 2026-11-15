@@ -1,1 +1,5 @@
-PLACEHOLDER_TOO_LARGE
+/**
+ * PLACEHOLDER - will be replaced
+ * See commit restore
+ */
+export {};
