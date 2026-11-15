@@ -9666,7 +9666,12 @@ export function evaluateFounderOutreachEligibility(
 ): { allowed: boolean; reason: string; nextTouch: number } {
   const state = String(status || "").toLowerCase();
   if (["bounced", "unsubscribed", "complained", "suppressed", "replied", "blocked"].includes(state)) return { allowed: false, reason: "terminal_contact_state", nextTouch: 0 };
-  if (["queued", "scheduled", "provider_unknown", "provider_required", "hold", "held"].includes(state)) return { allowed: false, reason: "outreach_pending_or_held", nextTouch: 0 };
+  // `hold` / `held` are recoverable workflow states (e.g. missing postal address,
+  // temporary verification uncertainty, or an operator pause). Re-evaluate every
+  // hard gate below on retry instead of making a temporary hold permanent.
+  // Actual in-flight/ambiguous dispatch states remain blocked here and in the
+  // outreach_idempotency reservation check.
+  if (["queued", "scheduled", "provider_unknown", "provider_required"].includes(state)) return { allowed: false, reason: "outreach_pending_or_held", nextTouch: 0 };
   if (lastReplyContent && String(lastReplyContent).trim()) return { allowed: false, reason: "reply_received", nextTouch: 0 };
   const touches = Math.max(0, Math.floor(Number(historicalTouchCount) || 0));
   if (touches >= 3) return { allowed: false, reason: "three_touch_cap_reached", nextTouch: 0 };
