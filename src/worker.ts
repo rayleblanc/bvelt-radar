@@ -6938,7 +6938,7 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
 
     let draft: { subject: string; body: string };
     try {
-      draft = await generateAICopy(prospect, prospect.variant_id || "missed_calls", env, missionConfig);
+      draft = await generateAICopy(prospect, prospect.variant_id || "missed_calls", env, missionConfig, "whatsapp");
       await commitBudget(env.RADAR_DB, "founder", "finalize_units", 1);
     } catch (error: any) {
       await releaseBudget(env.RADAR_DB, "founder", "finalize_units", 1);
@@ -9976,7 +9976,8 @@ async function generateAICopy(
   prospect: any, 
   variantId: string, 
   env: Env,
-  missionConfig?: MissionConfig
+  missionConfig?: MissionConfig,
+  channel: "email" | "whatsapp" = "email"
 ): Promise<{ subject: string; body: string }> {
   const language = (missionConfig?.languages && missionConfig.languages[0]) || "en";
   const isSpanish = language.toLowerCase().startsWith("es");
@@ -10032,6 +10033,7 @@ async function generateAICopy(
   }
 
   const prompt = isSpanish ? `
+    ${channel === "whatsapp" ? "OVERRIDE DE CANAL: Es un mensaje inicial de WhatsApp, no un correo. Máximo 35-45 palabras. Conversacional y natural, sin asunto, firma, pie legal, enlaces ni formato de email. Una observación verificable o una pregunta útil, una sola propuesta de valor y una pregunta de baja presión. No afirmes que el negocio usa WhatsApp ni que pierde llamadas." : ""}
     Eres un redactor publicitario experto en ventas (sales copywriter). Escribes correos fríos directos y profesionales.
     ${tenantInfo ? `Remitente: ${tenantInfo.tenant_name} (${tenantInfo.industry})` : "Remitente: Bvelt (https://bvelt.app)"}
     
@@ -10054,6 +10056,7 @@ async function generateAICopy(
     8. ${isFollowUp ? "Esto es SEGUIMIENTO toque #" + outreachTouch + " sin respuesta. Más corto, otro ángulo, sin culpar. Asunto sin Re: falso." : "Primer correo en frío."}
     9. Formato JSON: {"subject": "...", "body": "..."}
   ` : `
+    ${channel === "whatsapp" ? "CHANNEL OVERRIDE: This is a first-touch WhatsApp message, not an email. Maximum 35-45 words. Natural and conversational; no subject, signature, legal footer, links, or email formatting. Use one verified observation or useful question, one value proposition, and one low-pressure question. Never claim the business uses WhatsApp or misses calls." : ""}
     You are an expert sales copywriter writing cold outreach.
     ${tenantInfo ? `Sender: ${tenantInfo.tenant_name} (${tenantInfo.industry})` : "Sender: Bvelt (https://bvelt.app)"}
     
