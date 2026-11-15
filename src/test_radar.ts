@@ -28,7 +28,7 @@ function assert(condition: boolean, message: string) {
 }
 
 tests.push({
-  name: "WhatsApp click-to-chat requires an international number and never claims account verification",
+  name: "WhatsApp links use direct international chat or safe contact picker without claiming verification",
   run: () => {
     assert(normalizeWhatsAppPhone("+1 (813) 555-0100") === "18135550100", "International phone should normalize");
     assert(normalizeWhatsAppPhone("813-555-0100") === null, "Do not guess a country code for national numbers");
@@ -41,7 +41,7 @@ tests.push({
     const link = buildWhatsAppClickToChatUrl("+1 813 555 0100", "Hi team — quick question");
     assert(!!link && link.startsWith("https://wa.me/18135550100?text="), "Build a click-to-chat URL");
     assert(decodeURIComponent(link!.split("?text=")[1]) === "Hi team — quick question", "Preserve message text");
-    assert(buildWhatsAppClickToChatUrl("8135550100", "Hello") === null, "Do not create link from local number");
+    assert(buildWhatsAppClickToChatUrl("8135550100", "Hello")?.startsWith("https://wa.me/?text="), "Use contact picker rather than guessing a country code");
   }
 });
 
