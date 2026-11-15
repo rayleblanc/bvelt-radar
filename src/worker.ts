@@ -3853,13 +3853,13 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
         const decisionAction = (action === "approve" || action === "sent") ? "sent" : (action === "discard" ? "discard" : action);
         const decisionRes = await handleDecision(prospectId, decisionAction, `Triggered via Telegram Button (${action})`, env, {});
         const decisionJson: any = await decisionRes.json().catch(() => ({}));
+        const isSendAction = action === "approve" || action === "sent";
+        const sendFeedback = isSendAction ? getTelegramApprovalFeedback(decisionJson) : null;
 
-        // Answer callback query so Telegram spinner stops
+        // Answer callback query so Telegram never reports a send that was blocked or simulated.
         if (botToken) {
-          const actionText = (action === "approve" || action === "sent")
-            ? (decisionJson?.success === false && decisionJson?.dispatch?.error
-                ? "❌ No se pudo enviar"
-                : "✅ Aprobado y puesto en cola de envío")
+          const actionText = isSendAction
+            ? sendFeedback!.title
             : action === "discard"
             ? "❌ Descartado"
             : "🚫 Dominio Suprimido";
@@ -3876,12 +3876,11 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
           }).catch(e => console.warn("answerCallbackQuery warning: ", e));
 
           let dispatchInfo = "";
-          if (decisionJson?.dispatch?.status === "dispatched") {
-            dispatchInfo = `\n\n📧 <b>Email despachado de verdad</b> vía <code>${decisionJson.dispatch.provider}</code> (ID: <code>${escapeHtml(decisionJson.dispatch.messageId)}</code>).`;
-          } else if (decisionJson?.dispatch?.status === "simulated") {
-            dispatchInfo = `\n\n⚠️ <i>Email guardado en modo simulado. Configura RESEND_API_KEY en Cloudflare para envíos reales gratis (3,000/mes).</i>`;
-          } else if (decisionJson?.dispatch?.error) {
-            dispatchInfo = `\n\n❌ <i>Error al despachar email: ${escapeHtml(decisionJson.dispatch.error)}</i>`;
+          if (sendFeedback?.detail) {
+            dispatchInfo = `\n\n<i>${escapeHtml(sendFeedback.detail)}</i>`;
+          }
+          if (decisionJson?.dispatch?.status === "dispatched" && decisionJson?.dispatch?.messageId) {
+            dispatchInfo += `\n\nProveedor: <code>${escapeHtml(decisionJson.dispatch.provider || "email")}</code> · ID: <code>${escapeHtml(decisionJson.dispatch.messageId)}</code>`;
           }
 
           // Send confirmation text in chat
@@ -3890,7 +3889,7 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               chat_id: chatId,
-              text: `<b>${actionText}</b>: ID <code>${escapeHtml(prospectId)}</code> registrado en D1.${dispatchInfo}`,
+              text: `<b>${actionText}</b>: ID <code>${escapeHtml(prospectId)}</code>. ${decisionJson?.success === true ? "Estado actualizado." : "No se registró como enviado."}${dispatchInfo}`,
               parse_mode: "HTML"
             }),
             signal: AbortSignal.timeout(15000)
@@ -4155,6 +4154,40 @@ async function handleStats(env: Env, headers: Record<string, string>): Promise<R
 }
 
 /**
+ * Honest Telegram feedback: provider acceptance is not the same as inbox delivery.
+ */
+export function getTelegramApprovalFeedback(result: any): { title: string; detail: string } {
+  const dispatch = result?.dispatch || {};
+  if (result?.blocked === true || result?.success !== true) {
+    return {
+      title: "⛔ No enviado",
+      detail: String(result?.reason || dispatch?.error || result?.message || "El envío fue bloqueado o no pudo confirmarse.")
+    };
+  }
+  if (dispatch?.status === "dispatched" && String(dispatch?.messageId || "").trim()) {
+    return {
+      title: "📨 Aceptado por proveedor",
+      detail: "El proveedor aceptó el correo. La entrega al buzón se confirmará por separado."
+    };
+  }
+  if (dispatch?.status === "simulated") {
+    return {
+      title: "⚠️ No enviado: simulación",
+      detail: "El modo simulado no entrega correos. Configura un proveedor real antes de enviar."
+    };
+  }
+  return {
+    title: "⚠️ Envío no confirmado",
+    detail: String(dispatch?.error || "No existe confirmación de aceptación del proveedor; el prospecto no debe marcarse como enviado.")
+  };
+}
+
+export function getManualSendPreflightError(prospect: any): string | null {
+  const parsed = sanitizeEmail(prospect?.email);
+  return parsed.valid && parsed.email ? null : "valid_email_required";
+}
+
+/**
  * Handle Prospect Decision (sent | discard | suppress) & Record Learning Feedback
  */
 async function handleDecision(
@@ -4174,6 +4207,17 @@ async function handleDecision(
   const timestamp = new Date().toISOString();
 
   if (action === "sent" || action === "approve") {
+    const preflightError = getManualSendPreflightError(prospect);
+    if (preflightError) {
+      return Response.json({
+        success: false,
+        blocked: true,
+        reason: preflightError,
+        dispatch: { status: "not_attempted", provider: "none", error: preflightError },
+        id
+      }, { status: 409, headers });
+    }
+
     // Mandatory Trust-Stack Governor Firewall Gate Check
     const gate = await verifyTrustStackGate(prospect, 'manual_send', env);
     if (!gate.allowed) {
@@ -4255,11 +4299,16 @@ async function handleDecision(
         senderName: env.SENDER_NAME
       });
 
-      if (dispatchOutcome.status === "failed") {
+      if (dispatchOutcome.status !== "dispatched" || !String(dispatchOutcome.messageId || "").trim()) {
+        const dispatchError = dispatchOutcome.error || (
+          dispatchOutcome.status === "simulated"
+            ? "email_provider_not_configured"
+            : "provider_acceptance_not_confirmed"
+        );
         try {
           await db.prepare(
             "UPDATE prospects SET dispatch_provider = ?, dispatch_status = 'failed', dispatch_error = ?, updated_at = ? WHERE id = ?"
-          ).bind(dispatchOutcome.provider, dispatchOutcome.error || null, timestamp, id).run();
+          ).bind(dispatchOutcome.provider, dispatchError, timestamp, id).run();
         } catch (e) {}
 
         try {
@@ -4275,7 +4324,7 @@ async function handleDecision(
             dispatchOutcome.provider,
             'failed',
             dispatchOutcome.messageId || null,
-            dispatchOutcome.error || null,
+            dispatchError,
             (prospect.draft_body || '').substring(0, 150),
             timestamp
           ).run();
@@ -4289,9 +4338,9 @@ async function handleDecision(
           success: false,
           id,
           dispatch: {
-            status: "failed",
+            status: dispatchOutcome.status,
             provider: dispatchOutcome.provider,
-            error: dispatchOutcome.error
+            error: dispatchError
           }
         }, { status: 502, headers });
       }

@@ -1,6 +1,6 @@
 declare const process: any;
 
-import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, resolveTenantBuyerSegments, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey, notifyOnce, isVerifiedDeliverableEmail, evaluateFounderOutreachEligibility, buildTechnicalAuditSnapshot, isEmailValidatedForOutreach, isCompletePostalAddress, sendTelegramWithRetry, extractEmailAddress, evaluateResearchEvidenceQuality, classifyReplyText } from './worker';
+import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, resolveTenantBuyerSegments, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey, notifyOnce, isVerifiedDeliverableEmail, evaluateFounderOutreachEligibility, buildTechnicalAuditSnapshot, isEmailValidatedForOutreach, isCompletePostalAddress, sendTelegramWithRetry, extractEmailAddress, evaluateResearchEvidenceQuality, classifyReplyText, getTelegramApprovalFeedback, getManualSendPreflightError } from './worker';
 import { DEFAULT_FOUNDER_MISSION, MissionConfig } from './worker';
 import { buildResendIdempotencyKey, buildBrandedEmailHtml, resolveBveltSender, inspectOutboundEmailAuth, normalizeOutreachBody } from './emailDispatcher';
 import { fetchPermitContractors } from './permitSources';
@@ -76,6 +76,41 @@ tests.push({
     assert(!/<img\b/i.test(html), "Email HTML should not load remote images");
     assert(!/<a\b/i.test(html), "Email HTML should not add duplicate CTA links");
     assert(html.includes("https://bvelt.app/"), "Plain-text URL must remain visible in the body");
+  }
+});
+
+tests.push({
+  name: "Telegram approval feedback never claims a blocked or simulated email was sent",
+  run: () => {
+    const blocked = getTelegramApprovalFeedback({
+      success: false,
+      blocked: true,
+      reason: "email_not_provider_verified"
+    });
+    assert(blocked.title.includes("No enviado"), "Blocked sends must never display success");
+    assert(blocked.detail.includes("email_not_provider_verified"), "Blocked reason must be visible");
+
+    const simulated = getTelegramApprovalFeedback({
+      success: true,
+      dispatch: { status: "simulated", provider: "simulated" }
+    });
+    assert(simulated.title.includes("No enviado"), "Simulated sends must never display success");
+
+    const accepted = getTelegramApprovalFeedback({
+      success: true,
+      dispatch: { status: "dispatched", provider: "resend", messageId: "msg_123" }
+    });
+    assert(accepted.title.includes("Aceptado por proveedor"), "Provider acceptance must be distinct from inbox delivery");
+    assert(accepted.detail.includes("entrega al buzón"), "The feedback must not claim inbox delivery");
+  }
+});
+
+tests.push({
+  name: "Manual Founder send rejects missing or malformed email before state mutation",
+  run: () => {
+    assert(getManualSendPreflightError({ email: null }) === "valid_email_required", "Missing email must block send");
+    assert(getManualSendPreflightError({ email: "not-an-email" }) === "valid_email_required", "Malformed email must block send");
+    assert(getManualSendPreflightError({ email: "valid@acmeplumbing.com" }) === null, "Valid email must pass preflight");
   }
 });
 
