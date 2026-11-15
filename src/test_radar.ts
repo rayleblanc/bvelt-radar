@@ -373,6 +373,9 @@ tests.push({
     assert(!evaluateFounderOutreachEligibility("sent", null, 0, null, null, null, now).allowed, "Sent state without reliable send history must not resend");
     assert(!evaluateFounderOutreachEligibility("delivered", null, 1, "2026-09-01T12:00:00.000Z", "2026-09-01T12:00:00.000Z", null, now).allowed, "Expired follow-up window must not send");
     assert(!evaluateFounderOutreachEligibility("queued", null, 0, null, null, null, now).allowed, "Queued outreach must not trigger another send");
+    assert(evaluateFounderOutreachEligibility("hold", null, 0, null, null, null, now).allowed, "Temporary hold can be retried after its blocking condition is corrected; downstream hard gates still apply");
+    assert(evaluateFounderOutreachEligibility("held", null, 0, null, null, null, now).allowed, "Compliance or operational hold must not become a permanent lock");
+    assert(!evaluateFounderOutreachEligibility("provider_required", null, 0, null, null, null, now).allowed, "Provider-required state remains blocked until dispatch reconciliation/configuration");
     assert(!evaluateFounderOutreachEligibility("provider_unknown", null, 1, fiveDaysAgo, fiveDaysAgo, null, now).allowed, "Unknown provider acceptance requires reconciliation");
     assert(isEmailValidatedForOutreach({ is_email_validated: true }), "Only provider-verified email metadata may pass");
     assert(!isEmailValidatedForOutreach({ is_email_validated: false }), "Explicitly unverified email must be blocked");
