@@ -10342,6 +10342,12 @@ export async function notifyOnce(
     if (env.RADAR_QUEUE && !dependencies.send) throw e;
   }
 }
+export function getCurrentDaySenderCount(state: any, day: string): number {
+  if (!state || String(state.last_reset_day || '') !== day) return 0;
+  const count = Number(state.sends_today || 0);
+  return Number.isFinite(count) ? Math.max(0, Math.floor(count)) : 0;
+}
+
 type RadarDigest = {
   verdict: "ok" | "idle" | "blocked";
   headline: string;
@@ -10380,20 +10386,20 @@ export async function collectRadarDigest(env: Env): Promise<RadarDigest> {
     zeroReasonCounts.set(k, (zeroReasonCounts.get(k) || 0) + 1);
   }
   const zeroReasonTop = Array.from(zeroReasonCounts.entries()).sort((a, b) => b[1] - a[1]).slice(0, 3);
-  const created = await q<any>("SELECT COUNT(*) AS c FROM prospects WHERE COALESCE(tenant_id,'founder') = 'founder' AND created_at >= ?", since);
+  const created = await q<any>("SELECT COUNT(*) AS c FROM prospects WHERE COALESCE(NULLIF(TRIM(tenant_id),''),'founder') = 'founder' AND created_at >= ?", since);
   const withEmail = await q<any>("SELECT COUNT(*) AS c FROM prospects WHERE COALESCE(tenant_id,'founder') = 'founder' AND created_at >= ? AND email IS NOT NULL AND email != ''", since);
   const sent = await q<any>("SELECT COUNT(*) AS c FROM prospects WHERE COALESCE(NULLIF(TRIM(tenant_id),''),'founder') = 'founder' AND lower(status) IN ('sent','scheduled','delivered','opened','clicked') AND updated_at >= ?", since);
-  const waiting = await q<any>("SELECT COUNT(*) AS c FROM prospects WHERE COALESCE(tenant_id,'founder') = 'founder' AND status IN ('queued','notified')");
+  const waiting = await q<any>("SELECT COUNT(*) AS c FROM prospects WHERE COALESCE(NULLIF(TRIM(tenant_id),''),'founder') = 'founder' AND status IN ('queued','notified')");
   const blockedRows = await qAll(
     `SELECT COALESCE(outcome,'sin_motivo') AS outcome, COUNT(*) AS c FROM prospects
-     WHERE COALESCE(tenant_id,'founder') = 'founder' AND updated_at >= ?
+     WHERE COALESCE(NULLIF(TRIM(tenant_id),''),'founder') = 'founder' AND updated_at >= ?
        AND status IN ('hold','held','disqualified','provider_required','provider_error','provider_unknown','blocked')
      GROUP BY outcome ORDER BY c DESC LIMIT 5`, since);
   const govRow = await q<any>("SELECT sends_today, status, last_reset_day FROM sender_governor_state WHERE id = 'global_governor'");
   // Never display yesterday's (or older) counter as today's sends.
   const gov = govRow ? {
     ...govRow,
-    sends_today: String(govRow.last_reset_day || '') === day ? Number(govRow.sends_today || 0) : 0,
+    sends_today: getCurrentDaySenderCount(govRow, day),
     status: String(govRow.last_reset_day || '') === day ? govRow.status : 'active'
   } : null;
   const cb = await getCircuitBreakerStatus(db);
