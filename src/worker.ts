@@ -4241,6 +4241,9 @@ async function handleDecision(
     // Execute Outbound Email Dispatch
     let dispatchOutcome: any = { success: true, provider: 'simulated', status: 'simulated', messageId: `sim_${id.substring(0, 8)}` };
     let manualIdempotencyKey: string | null = null;
+    const manualHasLiveProvider = !!(env.RESEND_API_KEY?.trim() || env.BREVO_API_KEY?.trim());
+    const manualTenantId = prospect.tenant_id || "founder";
+    let manualBudgetReserved = false;
     if (prospect.email && prospect.email.includes('@')) {
       const manualEligibility = await getFounderOutreachEligibility(db, prospect);
       if (!manualEligibility.allowed) {
@@ -4253,7 +4256,7 @@ async function handleDecision(
       if (!isEmailValidatedForOutreach(prospect.signals_json || "{}")) {
         return Response.json({ success: false, blocked: true, reason: "email_not_provider_verified", id }, { status: 409, headers });
       }
-      const manualSequenceId = env.RESEND_API_KEY ? "resend_live" : env.BREVO_API_KEY ? "brevo_live" : "manual_simulated";
+      const manualSequenceId = env.RESEND_API_KEY?.trim() ? "resend_live" : env.BREVO_API_KEY?.trim() ? "brevo_live" : "manual_simulated";
       manualIdempotencyKey = buildOutreachIdempotencyKey(prospect.tenant_id || "founder", prospect.id, manualSequenceId, manualEligibility.nextTouch);
       const existingManual = await db.prepare("SELECT status FROM outreach_idempotency WHERE idempotency_key = ?").bind(manualIdempotencyKey).first() as any;
       if (existingManual && ["reserved", "sent", "scheduled", "queued", "provider_unknown"].includes(String(existingManual.status || "").toLowerCase())) {
@@ -4262,10 +4265,6 @@ async function handleDecision(
       const draftSubject = prospect.draft_subject || `Bvelt - Pregunta sobre llamadas de clientes (${prospect.name || 'su negocio'})`;
       const draftBody = prospect.draft_body || `Hola equipo de ${prospect.name},\n\nSoy Rainer, fundador de Bvelt. Ayudo a negocios de servicios a dar seguimiento a llamadas no atendidas y presupuestos pendientes.\n\n¿Tienen hoy un proceso para contactar a esas personas después? Si le sirve, puedo enviarle un ejemplo breve.`;
       const safeBody = typeof normalizeOutreachBody === 'function' ? normalizeOutreachBody(draftBody) : draftBody;
-
-      const manualHasLiveProvider = !!(env.RESEND_API_KEY?.trim() || env.BREVO_API_KEY?.trim());
-      const manualTenantId = prospect.tenant_id || "founder";
-      let manualBudgetReserved = false;
 
       // Compliance Hard Gate: missing sender postal address MUST block outbound dispatch
       if (manualHasLiveProvider && !isCompletePostalAddress(env.SENDER_POSTAL_ADDRESS)) {
