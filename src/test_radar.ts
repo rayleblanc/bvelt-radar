@@ -1,6 +1,6 @@
 declare const process: any;
 
-import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, resolveTenantBuyerSegments, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey, notifyOnce, isVerifiedDeliverableEmail, evaluateFounderOutreachEligibility, buildTechnicalAuditSnapshot, isEmailValidatedForOutreach, isCompletePostalAddress, sendTelegramWithRetry, extractEmailAddress, evaluateResearchEvidenceQuality, classifyReplyText, getTelegramApprovalFeedback, getManualSendPreflightError, buildScheduledRunId, getCurrentDaySenderCount } from './worker';
+import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, resolveTenantBuyerSegments, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey, notifyOnce, isVerifiedDeliverableEmail, evaluateFounderOutreachEligibility, buildTechnicalAuditSnapshot, isEmailValidatedForOutreach, isCompletePostalAddress, sendTelegramWithRetry, extractEmailAddress, evaluateResearchEvidenceQuality, classifyReplyText, getTelegramApprovalFeedback, getManualSendPreflightError, buildScheduledRunId, getCurrentDaySenderCount, normalizeWhatsAppPhone, buildWhatsAppClickToChatUrl, buildWhatsAppOutreachBody } from './worker';
 import { DEFAULT_FOUNDER_MISSION, MissionConfig } from './worker';
 import { buildResendIdempotencyKey, buildBrandedEmailHtml, resolveBveltSender, inspectOutboundEmailAuth, normalizeOutreachBody } from './emailDispatcher';
 import { fetchPermitContractors } from './permitSources';
@@ -26,6 +26,29 @@ function assert(condition: boolean, message: string) {
     throw new Error(message);
   }
 }
+
+tests.push({
+  name: "WhatsApp click-to-chat requires an international number and never claims account verification",
+  run: () => {
+    assert(normalizeWhatsAppPhone("+1 (813) 555-0100") === "18135550100", "International phone should normalize");
+    assert(normalizeWhatsAppPhone("813-555-0100") === null, "Do not guess a country code for national numbers");
+    assert(normalizeWhatsAppPhone("123") === null, "Reject short phone numbers");
+    const link = buildWhatsAppClickToChatUrl("+1 813 555 0100", "Hi team — quick question");
+    assert(!!link && link.startsWith("https://wa.me/18135550100?text="), "Build a click-to-chat URL");
+    assert(decodeURIComponent(link!.split("?text=")[1]) === "Hi team — quick question", "Preserve message text");
+    assert(buildWhatsAppClickToChatUrl("8135550100", "Hello") === null, "Do not create link from local number");
+  }
+});
+
+tests.push({
+  name: "WhatsApp message conversion strips email footer and limits length",
+  run: () => {
+    const body = buildWhatsAppOutreachBody("Hi team,\\n\\nWould a short example help?\\n\\n--\\nRainer\\nAddress\\nUnsubscribe");
+    assert(body.includes("Would a short example help?"), "Keep core message");
+    assert(!body.includes("Unsubscribe") && !body.includes("Address"), "Remove email-only footer");
+    assert(buildWhatsAppOutreachBody("x".repeat(1200)).length <= 900, "Keep WhatsApp draft compact");
+  }
+});
 
 tests.push({
   name: "Telegram notifyOnce only caches after confirmed delivery",
