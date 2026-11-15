@@ -110,7 +110,7 @@ tests.push({
   run: () => {
     assert(getManualSendPreflightError({ email: null }) === "valid_email_required", "Missing email must block send");
     assert(getManualSendPreflightError({ email: "not-an-email" }) === "valid_email_required", "Malformed email must block send");
-    assert(getManualSendPreflightError({ email: "valid@example.com" }) === null, "Valid email must pass preflight");
+    assert(getManualSendPreflightError({ email: "valid@acmeplumbing.com" }) === null, "Valid email must pass preflight");
   }
 });
 
