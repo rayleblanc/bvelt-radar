@@ -241,9 +241,13 @@ const FOUNDER_EXCLUSION_RULES: Array<{ category: string; pattern: RegExp }> = [
   { category: "low-value retail", pattern: /\b(dollar store|discount store|thrift store|pawn shop)\b/i },
 ];
 
-/** Institutions and non-commercial entities — always excluded from commercial ICP. */
+/**
+ * Institutions and non-commercial entities — always excluded from commercial ICP.
+ * Note: dental/medical clinics stay eligible (Bvelt-compatible healthcare segment).
+ * Do not add generic "clinic" here or healthcare Founder eligibility breaks.
+ */
 const NON_BUSINESS_ENTITY_REGEX =
-  /\b(church|iglesia|ministry|ministerio|chapel|temple|parish|cathedral|mosque|synagogue|school|college|university|library|museum|hospital(?!ity)|clinic\b|soccer|hockey|baseball|football club|minor (?:soccer|hockey|baseball)|sports? club|recreation centre|recreation center|community centre|community center|hoa\b|homeowners? association|city of\b|town of\b|municipality|charity|non[- ]?profit|ngo\b)\b/i;
+  /\b(church|iglesia|ministry|ministerio|chapel|temple|parish|cathedral|mosque|synagogue|school|college|university|library|museum|soccer|hockey|baseball|football club|minor (?:soccer|hockey|baseball)|sports? club|recreation centre|recreation center|community centre|community center|hoa\b|homeowners? association|city of\b|town of\b|municipality|charity|non[- ]?profit|ngo\b)\b/i;
 
 /**
  * Detect name vs claimed trade/category incoherence (production findings):
