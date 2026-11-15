@@ -4300,12 +4300,18 @@ async function handleDecision(
         }
       }
 
-      const manualReservation = await db.prepare(`
-        INSERT INTO outreach_idempotency (idempotency_key, prospect_id, tenant_id, email, status, created_at, updated_at)
-        VALUES (?, ?, ?, ?, 'reserved', ?, ?)
-        ON CONFLICT(idempotency_key) DO UPDATE SET status = 'reserved', email = excluded.email, updated_at = excluded.updated_at
-        WHERE outreach_idempotency.status = 'failed'
-      `).bind(manualIdempotencyKey, prospect.id, prospect.tenant_id || "founder", prospect.email, timestamp, timestamp).run() as any;
+      let manualReservation: any;
+      try {
+        manualReservation = await db.prepare(`
+          INSERT INTO outreach_idempotency (idempotency_key, prospect_id, tenant_id, email, status, created_at, updated_at)
+          VALUES (?, ?, ?, ?, 'reserved', ?, ?)
+          ON CONFLICT(idempotency_key) DO UPDATE SET status = 'reserved', email = excluded.email, updated_at = excluded.updated_at
+          WHERE outreach_idempotency.status = 'failed'
+        `).bind(manualIdempotencyKey, prospect.id, manualTenantId, prospect.email, timestamp, timestamp).run() as any;
+      } catch (reservationError) {
+        if (manualBudgetReserved) await releaseBudget(db, manualTenantId, 'outreach_units', 1);
+        throw reservationError;
+      }
       if (!(Number(manualReservation?.meta?.changes || 0) > 0)) {
         if (manualBudgetReserved) await releaseBudget(db, manualTenantId, 'outreach_units', 1);
         return Response.json({ success: false, blocked: true, reason: "outreach_reservation_conflict", id }, { status: 409, headers });
