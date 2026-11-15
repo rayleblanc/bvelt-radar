@@ -32,6 +32,8 @@ tests.push({
   run: () => {
     assert(normalizeWhatsAppPhone("+1 (813) 555-0100") === "18135550100", "International phone should normalize");
     assert(normalizeWhatsAppPhone("813-555-0100") === null, "Do not guess a country code for national numbers");
+    assert(normalizeWhatsAppPhone("18135550100") === null, "Require explicit international notation");
+    assert(normalizeWhatsAppPhone("0018135550100") === "18135550100", "Accept explicit 00 international prefix");
     assert(normalizeWhatsAppPhone("123") === null, "Reject short phone numbers");
     const link = buildWhatsAppClickToChatUrl("+1 813 555 0100", "Hi team — quick question");
     assert(!!link && link.startsWith("https://wa.me/18135550100?text="), "Build a click-to-chat URL");
