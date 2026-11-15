@@ -6774,16 +6774,28 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
     }
   }
 
-  // Rule: "Pending approve" / QUEUED / HOLD only if: score >= 45 AND email present AND not hard-rejected
-  if (finalScore >= 45 && prospect.email && !isHardRejectedChain(prospect.name)) {
-    await enqueueJob(env, {
-      run_id: job.run_id,
-      job_id: `approve_${prospect_id}`,
-      type: 'approve',
-      mode: job.mode,
-      tenant_id: job.tenant_id,
-      payload: { prospect_id, overrides }
-    });
+  // Email prospects retain the existing approval flow. Phone-only prospects
+  // receive a manual WhatsApp draft; the Worker never sends a WhatsApp message.
+  if (finalScore >= 45 && !isHardRejectedChain(prospect.name)) {
+    if (prospect.email) {
+      await enqueueJob(env, {
+        run_id: job.run_id,
+        job_id: `approve_${prospect_id}`,
+        type: 'approve',
+        mode: job.mode,
+        tenant_id: job.tenant_id,
+        payload: { prospect_id, overrides }
+      });
+    } else if (prospect.phone) {
+      await enqueueJob(env, {
+        run_id: job.run_id,
+        job_id: `whatsapp_draft_${prospect_id}`,
+        type: 'outreach',
+        mode: job.mode,
+        tenant_id: job.tenant_id,
+        payload: { prospect_id, overrides, manual_channel: 'whatsapp' }
+      });
+    }
   }
 }
 
