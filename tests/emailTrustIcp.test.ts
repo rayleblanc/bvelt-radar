@@ -38,9 +38,17 @@ describe("ICP / category coherence", () => {
     assert.equal(isOffIcpName("East York Minor Soccer Club"), true);
   });
 
-  it("flags restaurant labeled as landscaping", () => {
+  it("flags restaurant labeled as landscaping via mismatch + outreach gate", () => {
     assert.equal(isCategoryNameMismatch("Sun Garden Chinese", "landscaping"), true);
-    assert.equal(isOffIcpName("Sun Garden Chinese", false, "landscaping"), true);
+    // isOffIcpName stays soft so checkTradeCoherence can reclassify the trade
+    assert.equal(isOffIcpName("Sun Garden Chinese", false, "landscaping"), false);
+    const gate = outreachQualityBlocked({
+      name: "Sun Garden Chinese",
+      categoryOrTrade: "landscaping",
+      email: "hello@sungardenchinese.example",
+    });
+    assert.equal(gate.blocked, true);
+    assert.ok(gate.reasons.includes("off_icp_or_category_mismatch"));
   });
 
   it("flags wholesale lighting as contractor mismatch", () => {
