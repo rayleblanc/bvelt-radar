@@ -10307,6 +10307,27 @@ function getTradePsychologyFallback(
   return { subject, body: footer ? `${bodyBase}\n\n${footer}` : bodyBase };
 }
 
+export function normalizeWhatsAppPhone(value: string | null | undefined): string | null {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  const digits = raw.replace(/\D/g, "");
+  // Do not guess a country code for national/local numbers.
+  return /^[1-9]\d{7,14}$/.test(digits) && (raw.startsWith("+") || digits.length >= 11) ? digits : null;
+}
+
+export function buildWhatsAppClickToChatUrl(phone: string, message: string): string | null {
+  const normalized = normalizeWhatsAppPhone(phone);
+  const text = String(message || "").trim();
+  return normalized && text ? "https://wa.me/" + normalized + "?text=" + encodeURIComponent(text) : null;
+}
+
+export function buildWhatsAppOutreachBody(rawBody: string): string {
+  let body = String(rawBody || "").trim().split(/\n\s*--\s*\n/)[0].trim();
+  body = body.replace(/\n(?:Best|Regards|Sincerely|Saludos cordiales),?\s*\n[\s\S]*$/i, "").trim();
+  body = body.replace(/\n{3,}/g, "\n\n");
+  return body.length > 900 ? body.slice(0, 897).trimEnd() + "..." : body;
+}
+
 export function isCompletePostalAddress(value: string | null | undefined): boolean {
   const normalized = String(value || "").replace(/\s+/g, " ").trim();
   if (normalized.length < 20) return false;
