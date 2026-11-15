@@ -4,6 +4,8 @@ import marketUniverse from "../sidecar/config/market-universe.json";
  * Email Sanitizer & ICP Guard for Bvelt Radar
  * Prevents invalid emails (e.g. clock@2x.png, system mailboxes, disposables)
  * and filters out off-ICP consumer/retail businesses.
+ *
+ * Email trust is layered: syntax ≠ deliverable ≠ business-owned ≠ provider-verified.
  */
 
 const FILE_EXT_TLD_REGEX = /\.(png|jpe?g|svg|webp|gif|ico|woff2?|ttf|eot|css|js|json|map|xml|mp4|pdf|zip|tar|gz)$/i;
@@ -23,8 +25,17 @@ const DISPOSABLE_DOMAINS = new Set([
   'fakeinbox.com',
 ]);
 
-const PLACEHOLDER_LOCAL_PARTS = new Set(['example', 'test', 'yourname', 'your_name', 'your-email', 'your_email', 'email', 'name']);
-const PLACEHOLDER_DOMAINS = new Set(['example.com', 'example.org', 'example.net', 'example.test', 'invalid', 'localhost']);
+const PLACEHOLDER_LOCAL_PARTS = new Set([
+  'example', 'test', 'yourname', 'your_name', 'your-email', 'your_email',
+  'email', 'name', 'user', 'username', 'sample', 'demo', 'placeholder',
+  'changeme', 'me', 'foo', 'bar',
+]);
+
+const PLACEHOLDER_DOMAINS = new Set([
+  'example.com', 'example.org', 'example.net', 'example.test',
+  'invalid', 'localhost', 'test.com', 'email.com', 'domain.com',
+  'mail.com', 'mail.org', 'mail.net', 'email.org',
+]);
 
 const SYSTEM_LOCAL_PARTS = new Set([
   'noreply',
@@ -38,7 +49,6 @@ const SYSTEM_LOCAL_PARTS = new Set([
   'daemon',
 ]);
 
-// Basic RFC 5322 regex validation
 const RFC_EMAIL_REGEX = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$/;
 
 export interface SanitizeResult {
@@ -47,10 +57,22 @@ export interface SanitizeResult {
   email?: string;
 }
 
-/**
- * Sanitize and strictly validate an email address.
- * Rejects file TLDs (.png, .jpg, .svg), @2x assets, system locals, disposables, IP domains.
- */
+/** Layered commercial email trust — never treat syntax-only as verified. */
+export type EmailTrustLevel =
+  | 'rejected'
+  | 'syntax_ok'
+  | 'mx_ok'
+  | 'business_aligned'
+  | 'provider_verified';
+
+export interface EmailTrustAssessment {
+  level: EmailTrustLevel;
+  email: string | null;
+  reason?: string;
+  /** True only when level is at least syntax_ok and not placeholder/disposable. */
+  outreachEligible: boolean;
+}
+
 export function sanitizeEmail(rawEmail: string | null | undefined): SanitizeResult {
   if (!rawEmail || typeof rawEmail !== 'string') {
     return { valid: false, reason: 'empty_or_not_string' };
@@ -58,17 +80,14 @@ export function sanitizeEmail(rawEmail: string | null | undefined): SanitizeResu
 
   const email = rawEmail.trim().toLowerCase();
 
-  // 1. Length check
   if (email.length < 5 || email.length > 254) {
     return { valid: false, reason: 'invalid_length' };
   }
 
-  // 2. Reject @2x or asset-like strings (e.g. clock@2x.png, logo@2x.jpg)
   if (/@2x/i.test(email) || /@\d+x\./i.test(email)) {
     return { valid: false, reason: 'retina_asset_filename' };
   }
 
-  // 3. Must contain exactly one @ symbol
   const parts = email.split('@');
   if (parts.length !== 2) {
     return { valid: false, reason: 'invalid_at_syntax' };
@@ -80,7 +99,6 @@ export function sanitizeEmail(rawEmail: string | null | undefined): SanitizeResu
     return { valid: false, reason: 'placeholder_email' };
   }
 
-  // 4. Local part validation
   if (!localPart || localPart.length > 64) {
     return { valid: false, reason: 'invalid_local_part_length' };
   }
@@ -89,32 +107,26 @@ export function sanitizeEmail(rawEmail: string | null | undefined): SanitizeResu
     return { valid: false, reason: `system_mailbox_${localPart}` };
   }
 
-  // 5. Domain validation
   if (!domain || domain.length > 253 || !domain.includes('.')) {
     return { valid: false, reason: 'invalid_domain_format' };
   }
 
-  // Reject IP address domain format: @192.168.1.1 or @[192.168.1.1]
   if (/^\[?\d{1,3}(\.\d{1,3}){3}\]?$/.test(domain)) {
     return { valid: false, reason: 'ip_address_domain' };
   }
 
-  // Reject file extensions disguised as TLDs (e.g. user@site.png, clock@2x.png)
   if (FILE_EXT_TLD_REGEX.test(domain)) {
     return { valid: false, reason: 'file_extension_tld' };
   }
 
-  // Reject known disposable domains
   if (DISPOSABLE_DOMAINS.has(domain)) {
     return { valid: false, reason: 'disposable_domain' };
   }
 
-  // 6. Strict RFC format check
   if (!RFC_EMAIL_REGEX.test(email)) {
     return { valid: false, reason: 'rfc_syntax_failed' };
   }
 
-  // 7. Ensure valid TLD (at least 2 letters, not numeric)
   const tld = domain.split('.').pop();
   if (!tld || tld.length < 2 || /^\d+$/.test(tld)) {
     return { valid: false, reason: 'invalid_tld' };
@@ -123,17 +135,51 @@ export function sanitizeEmail(rawEmail: string | null | undefined): SanitizeResu
   return { valid: true, email };
 }
 
-/**
- * Gate helper: returns cleaned email if valid, or null if invalid.
- */
 export function sanitizeProspectEmail(email: string | null | undefined): string | null {
   const result = sanitizeEmail(email);
   return result.valid && result.email ? result.email : null;
 }
 
-/**
- * Checks if domain has valid MX records via Cloudflare DoH (fail-open).
- */
+export function assessEmailTrust(
+  rawEmail: string | null | undefined,
+  opts?: { websiteHost?: string | null; mxOk?: boolean | null }
+): EmailTrustAssessment {
+  const sanitized = sanitizeEmail(rawEmail);
+  if (!sanitized.valid || !sanitized.email) {
+    return {
+      level: 'rejected',
+      email: null,
+      reason: sanitized.reason || 'invalid',
+      outreachEligible: false,
+    };
+  }
+
+  const email = sanitized.email;
+  const domain = email.split('@')[1];
+
+  let level: EmailTrustLevel = 'syntax_ok';
+  if (opts?.mxOk === true) {
+    level = 'mx_ok';
+  }
+
+  const host = String(opts?.websiteHost || '')
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, '')
+    .replace(/^www\./, '')
+    .split('/')[0];
+
+  if (host && (host === domain || host.endsWith('.' + domain) || domain.endsWith('.' + host))) {
+    level = 'business_aligned';
+  }
+
+  return {
+    level,
+    email,
+    outreachEligible: true,
+  };
+}
+
 export async function hasMxRecords(domainOrEmail: string): Promise<boolean> {
   const domain = domainOrEmail.includes('@')
     ? domainOrEmail.split('@')[1].trim().toLowerCase()
@@ -151,7 +197,6 @@ export async function hasMxRecords(domainOrEmail: string): Promise<boolean> {
     });
 
     if (!res.ok) {
-      // Fail-open on HTTP errors from resolver
       return true;
     }
 
@@ -160,16 +205,12 @@ export async function hasMxRecords(domainOrEmail: string): Promise<boolean> {
       return true;
     }
 
-    // Check if domain itself has an A record fallback if no MX
     if (json && json.Status === 0 && (!json.Answer || json.Answer.length === 0)) {
-      // DoH returned NOERROR but no MX records
       return false;
     }
 
-    // Fail-open on unknown status
     return true;
-  } catch (err) {
-    // Fail-open on timeout or network error so DNS outage does not halt outreach
+  } catch {
     return true;
   }
 }
@@ -193,30 +234,92 @@ const FOUNDER_EXCLUSION_RULES: Array<{ category: string; pattern: RegExp }> = [
   { category: "low-value retail", pattern: /\b(dollar store|discount store|thrift store|pawn shop)\b/i },
 ];
 
+/**
+ * Institutions and non-commercial entities — always excluded from commercial ICP.
+ * Note: dental/medical clinics stay eligible (Bvelt-compatible healthcare segment).
+ */
 const NON_BUSINESS_ENTITY_REGEX =
-  /\b(church|iglesia|ministry|ministerio|chapel|temple|parish|cathedral)\b/i;
+  /\b(church|iglesia|ministry|ministerio|chapel|temple|parish|cathedral|mosque|synagogue|school|college|university|library|museum|soccer|hockey|baseball|football club|minor (?:soccer|hockey|baseball)|sports? club|recreation centre|recreation center|community centre|community center|hoa\b|homeowners? association|city of\b|town of\b|municipality|charity|non[- ]?profit|ngo\b)\b/i;
 
 /**
- * Non-business institutions (churches, ministries, etc.) are always excluded.
- * Founder consumer-category exclusions come from market-universe.json.
- * Tenant buyer mode bypasses those Founder category exclusions because the
- * tenant ICP is authoritative for commercial targets (gyms, grocery, etc.).
+ * Detect name vs claimed trade/category incoherence.
+ * Prefix matches (landscap*, electric*) — avoid \b after stem so landscaping/electrician work.
  */
-export function isOffIcpName(name: string | null | undefined, allowTenantBuyer: boolean = false): boolean {
+export function isCategoryNameMismatch(
+  name: string | null | undefined,
+  categoryOrTrade: string | null | undefined
+): boolean {
+  if (!name || typeof name !== 'string') return false;
+  const n = name.trim().toLowerCase();
+  const c = String(categoryOrTrade || '').trim().toLowerCase();
+  if (!n || !c) return false;
+
+  const tradeish =
+    /\b(landscap\w*|lawn\w*|garden\w*|electric\w*|electr\w*|plumb\w*|hvac|h\.?v\.?a\.?c|contractor\w*|roofer\w*|roofing|heating|cooling|pest\w*|cleaning|handyman)\b/i.test(
+      c
+    );
+
+  if (!tradeish) return false;
+
+  if (/\b(restaurant|cafe|caf[eé]|diner|pizzeria|chinese|sushi|bistro|bar\b|pub\b|grill|kitchen|food truck)\b/i.test(n)) {
+    return true;
+  }
+  if (/\b(soccer|hockey|baseball|football|sports?\s+club|minor\s+\w+|ymca|recreation)\b/i.test(n)) {
+    return true;
+  }
+  if (/\b(wholesale|distributor|distribution|supply\s+house|lighting\s+supply|building\s+supply)\b/i.test(n)) {
+    if (/\b(contractor|electrician|plumber|residential|service)\b/i.test(c)) {
+      return true;
+    }
+  }
+  if (
+    /\blighting\b/i.test(n) &&
+    !/\b(electric|electrical|electrician|electricians)\b/i.test(n) &&
+    /\b(electric\w*|contractor\w*)\b/i.test(c)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+export function isOffIcpName(
+  name: string | null | undefined,
+  allowTenantBuyer: boolean = false,
+  categoryOrTrade?: string | null
+): boolean {
   if (!name || typeof name !== "string") return true;
   const clean = name.trim().toLowerCase();
   if (!clean) return true;
 
-  // Synthetic variation labels are generated placeholders, never genuine businesses.
   if (/\b(?:variation|variant)\s*#?\s*\d+\b/i.test(clean)) return true;
 
-  // Churches and other non-business institutions stay excluded in every mode.
   if (NON_BUSINESS_ENTITY_REGEX.test(clean)) return true;
 
-  // Tenant ICP may intentionally target categories Founder excludes.
+  if (isCategoryNameMismatch(name, categoryOrTrade)) return true;
+
   if (allowTenantBuyer) return false;
 
   return FOUNDER_EXCLUSION_RULES.some((rule) =>
     MARKET_EXCLUSIONS.has(rule.category) && rule.pattern.test(clean)
   );
+}
+
+export function outreachQualityBlocked(input: {
+  name?: string | null;
+  categoryOrTrade?: string | null;
+  email?: string | null;
+  allowTenantBuyer?: boolean;
+  emailTrust?: EmailTrustAssessment | null;
+}): { blocked: boolean; reasons: string[] } {
+  const reasons: string[] = [];
+  if (isOffIcpName(input.name, Boolean(input.allowTenantBuyer), input.categoryOrTrade)) {
+    reasons.push('off_icp_or_category_mismatch');
+  }
+  const trust =
+    input.emailTrust ||
+    assessEmailTrust(input.email);
+  if (!trust.outreachEligible) {
+    reasons.push(`email_${trust.reason || trust.level}`);
+  }
+  return { blocked: reasons.length > 0, reasons };
 }
