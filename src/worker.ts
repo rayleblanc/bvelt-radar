@@ -5646,7 +5646,7 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
     // Descartes baratos ANTES de reservar presupuesto (evita 3 escrituras a D1 por cada candidato que se rechaza)
     const preName = (candidate.name || "").toLowerCase();
     const allowTenantBuyer = job.mode === 'tenant';
-    if (isOffIcpName(candidate.name, allowTenantBuyer)) {
+    if (isOffIcpName(candidate.name, allowTenantBuyer, candidate.trade || trade)) {
       console.log(`[ICP Gate: Discarded] "${candidate.name}" matched off-ICP exclusion in handleDiscoveryJob`);
       filteredCount++;
       continue;
@@ -5815,7 +5815,7 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
     }
 
     // Re-validate ICP and trade coherence right before database insertion
-    if (isOffIcpName(candidate.name, job.mode === 'tenant')) {
+    if (isOffIcpName(candidate.name, job.mode === 'tenant', candidate.trade)) {
       console.log(`[ICP Gate: Discarded before insert] "${candidate.name}" matched off-ICP`);
       continue;
     }
@@ -5953,7 +5953,7 @@ async function handleEnrichJob(job: RadarJobMessage, env: Env): Promise<void> {
   if (!prospect) return;
 
   // Off-ICP and Trade Coherence Gate
-  if (isOffIcpName(prospect.name, prospect.mode === 'tenant')) {
+  if (isOffIcpName(prospect.name, prospect.mode === 'tenant', prospect.trade)) {
     await env.RADAR_DB.prepare("UPDATE prospects SET status = 'disqualified', outcome = 'off_icp_name', updated_at = ? WHERE id = ?")
       .bind(new Date().toISOString(), prospect.id).run();
     return;
@@ -6750,7 +6750,7 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
   const prospect = await env.RADAR_DB.prepare("SELECT * FROM prospects WHERE id = ?").bind(prospect_id).first() as any;
   if (!prospect) return;
 
-  if (isHardRejectedChain(prospect.name) || isOffIcpName(prospect.name, job.mode === "tenant")) {
+  if (isHardRejectedChain(prospect.name) || isOffIcpName(prospect.name, job.mode === "tenant", prospect.trade)) {
     await env.RADAR_DB.prepare("UPDATE prospects SET status = 'disqualified', outcome = ?, updated_at = ? WHERE id = ?")
       .bind(isHardRejectedChain(prospect.name) ? "hard_rejected_chain" : "off_icp_name", new Date().toISOString(), prospect_id).run();
     return;
@@ -9353,7 +9353,7 @@ export async function fetchLocalBusinessesWithDiagnostics(
     const rawName = String(item.name || "").trim();
     const candTrade = item.trade || trade;
     const coherence = checkTradeCoherence(rawName, candTrade, item.website, JSON.stringify(item), mode);
-    if (isOffIcpName(rawName, mode === "tenant") || !coherence.coherent || coherence.disqualified) {
+    if (isOffIcpName(rawName, mode === "tenant", candTrade) || !coherence.coherent || coherence.disqualified) {
       console.log(`[ICP Gate: Discarded] "${rawName}" matched off-ICP/coherence filter in discovery for ${city} - ${candTrade}`);
       continue;
     }
@@ -11377,7 +11377,7 @@ export async function sendOrQueueOutreach(
   options: { governorSlotReserved?: boolean } = {}
 ): Promise<{ success: boolean; reason: string }> {
   // 0. Off-ICP and Trade Coherence Gate
-  if (isOffIcpName(prospect.name, prospect.mode === 'tenant')) {
+  if (isOffIcpName(prospect.name, prospect.mode === 'tenant', prospect.trade)) {
     await env.RADAR_DB.prepare("UPDATE prospects SET status = 'disqualified', outcome = 'off_icp_name', updated_at = ? WHERE id = ?")
       .bind(new Date().toISOString(), prospect.id).run();
     return { success: false, reason: "OFF_ICP_NAME" };
@@ -12210,7 +12210,7 @@ export function checkTradeCoherence(
   mode: string = 'founder'
 ): TradeCoherenceCheck {
   const allowTenantBuyer = mode === 'tenant';
-  if (isOffIcpName(name, allowTenantBuyer)) {
+  if (isOffIcpName(name, allowTenantBuyer, declaredTrade)) {
     return {
       coherent: false,
       verifiedTrade: null,
