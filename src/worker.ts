@@ -5410,12 +5410,19 @@ async function ensureOpportunitiesSchema(db: D1Database): Promise<void> {
     ["opportunity_signals", "observed_at TEXT"],
     ["opportunity_signals", "created_at TEXT"],
     ["opportunity_actions", "action_type TEXT"],
+    ["opportunity_actions", "action TEXT"],
+    ["opportunity_actions", "channel TEXT"],
     ["opportunity_actions", "details_json TEXT"],
+    ["opportunity_actions", "payload_json TEXT"],
+    ["opportunity_actions", "reason TEXT"],
     ["opportunity_actions", "proposed_at TEXT"],
+    ["opportunity_actions", "created_at TEXT"],
     ["opportunity_actions", "executed_at TEXT"],
     ["opportunity_outcomes", "action_id TEXT"],
     ["opportunity_outcomes", "outcome_type TEXT"],
+    ["opportunity_outcomes", "outcome TEXT"],
     ["opportunity_outcomes", "value_realized REAL"],
+    ["opportunity_outcomes", "value REAL"],
     ["opportunity_outcomes", "notes TEXT"],
     ["opportunity_outcomes", "created_at TEXT"]
   ];
@@ -5427,8 +5434,8 @@ async function ensureOpportunitiesSchema(db: D1Database): Promise<void> {
   // contain the legacy columns, so each compatibility update is isolated.
   for (const sql of [
     "UPDATE opportunity_signals SET observed_evidence = COALESCE(NULLIF(observed_evidence, ''), signal_value, '')",
-    "UPDATE opportunity_actions SET action_type = COALESCE(NULLIF(action_type, ''), action, 'outreach_draft'), details_json = COALESCE(details_json, payload_json, reason), proposed_at = COALESCE(proposed_at, created_at, datetime('now'))",
-    "UPDATE opportunity_outcomes SET outcome_type = COALESCE(NULLIF(outcome_type, ''), outcome, 'unknown'), value_realized = COALESCE(value_realized, value, 0)"
+    "UPDATE opportunity_actions SET action_type = COALESCE(NULLIF(action_type, ''), action, 'outreach_draft'), action = COALESCE(NULLIF(action, ''), action_type, 'outreach_draft'), details_json = COALESCE(details_json, payload_json, reason), payload_json = COALESCE(payload_json, details_json), proposed_at = COALESCE(proposed_at, created_at, datetime('now')), created_at = COALESCE(created_at, proposed_at, datetime('now'))",
+    "UPDATE opportunity_outcomes SET outcome_type = COALESCE(NULLIF(outcome_type, ''), outcome, 'unknown'), outcome = COALESCE(NULLIF(outcome, ''), outcome_type, 'unknown'), value_realized = COALESCE(value_realized, value, 0), value = COALESCE(value, value_realized, 0)"
   ]) {
     try { await db.prepare(sql).run(); } catch { /* legacy-only columns may differ */ }
   }
@@ -6823,14 +6830,16 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
         ).run();
       }
       const actionId = `act_${crypto.randomUUID().replace(/-/g, "")}`;
+      const recommendedAction = strat.why_now?.recommended_action || "Contact";
+      const actionPayload = JSON.stringify({ recommended: recommendedAction, angle: bveltAngle });
       await env.RADAR_DB.prepare(`
         INSERT INTO opportunity_actions (
-          id, opportunity_id, action_type, status, details_json, proposed_at, executed_at
-        ) VALUES (?, ?, 'outreach_draft', 'proposed', ?, ?, NULL)
+          id, opportunity_id, action_type, action, channel, status,
+          details_json, payload_json, reason, proposed_at, created_at, executed_at
+        ) VALUES (?, ?, 'outreach_draft', 'outreach_draft', ?, 'proposed', ?, ?, ?, ?, ?, NULL)
       `).bind(
-        actionId, oppId,
-        JSON.stringify({ recommended: strat.why_now?.recommended_action || "Contact", angle: bveltAngle }),
-        nowIso
+        actionId, oppId, prospect.email ? "email" : prospect.phone ? "whatsapp" : "manual_review",
+        actionPayload, actionPayload, recommendedAction, nowIso, nowIso
       ).run();
     } catch (inner) {
       console.warn("[Opportunity Intelligence] signals/actions optional fail:", inner);
@@ -8556,18 +8565,22 @@ export async function syncOpportunityDecision(
         .bind(state, nowIso, opp.id).run();
 
       const actId = `act_${crypto.randomUUID().replace(/-/g, "")}`;
+      const actionDetails = JSON.stringify({ notes: notes || action });
       await db.prepare(`
-        INSERT INTO opportunity_actions (id, opportunity_id, action_type, status, details_json, proposed_at, executed_at)
-        VALUES (?, ?, ?, 'executed', ?, ?, ?)
-      `).bind(actId, opp.id, action, JSON.stringify({ notes: notes || action }), nowIso, nowIso).run();
+        INSERT INTO opportunity_actions (
+          id, opportunity_id, action_type, action, channel, status,
+          details_json, payload_json, reason, proposed_at, created_at, executed_at
+        ) VALUES (?, ?, ?, ?, NULL, 'executed', ?, ?, ?, ?, ?, ?)
+      `).bind(actId, opp.id, action, action, actionDetails, actionDetails, notes || action, nowIso, nowIso, nowIso).run();
 
       if (['won', 'converted', 'replied', 'positive', 'demo'].includes(action)) {
         const outId = `out_${crypto.randomUUID().replace(/-/g, "")}`;
         const val = (action === 'won' || action === 'converted') ? 1800 : action === 'demo' ? 450 : 0;
         await db.prepare(`
-          INSERT INTO opportunity_outcomes (id, opportunity_id, action_id, outcome_type, value_realized, notes, created_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?)
-        `).bind(outId, opp.id, actId, action, val, notes || "", nowIso).run();
+          INSERT INTO opportunity_outcomes (
+            id, opportunity_id, action_id, outcome_type, outcome, value_realized, value, notes, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).bind(outId, opp.id, actId, action, action, val, val, notes || "", nowIso).run();
       }
     }
   } catch (e) {
