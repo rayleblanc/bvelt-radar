@@ -2565,15 +2565,22 @@ export default {
           const { missionConfig } = await getPriorityTargets(dayOfYear, env, mode, targetTenant, undefined, true);
           const generated = await generateAICopy(p, p.variant_id || p.bvelt_angle || "missed_calls", env, missionConfig, channel);
           const timestamp = new Date().toISOString();
-          await env.RADAR_DB.prepare("UPDATE prospects SET draft_subject = ?, draft_body = ?, status = CASE WHEN status IN ('discovered','enriched','qualified','scouted','scored') THEN 'drafted' ELSE status END, updated_at = ? WHERE id = ? AND mode = ? AND COALESCE(tenant_id,'founder') = ?")
+          await env.RADAR_DB.prepare("UPDATE prospects SET draft_subject = ?, draft_body = ?, updated_at = ? WHERE id = ? AND mode = ? AND COALESCE(tenant_id,'founder') = ?")
             .bind(generated.subject || "", generated.body || "", timestamp, prospectId, p.mode, targetTenant).run();
-          await env.RADAR_DB.prepare("INSERT INTO prospect_events (id, prospect_id, event_type, content, created_at) VALUES (?, ?, 'message_generated', ?, ?)")
-            .bind("msg_" + crypto.randomUUID(), prospectId, JSON.stringify({ channel, source: generated.source, subject: generated.subject || "", body_length: String(generated.body || "").length }), timestamp).run();
+          let generationEventLogged = false;
+          try {
+            await env.RADAR_DB.prepare("INSERT INTO prospect_events (id, prospect_id, event_type, content, created_at) VALUES (?, ?, 'message_generated', ?, ?)")
+              .bind("msg_" + crypto.randomUUID(), prospectId, JSON.stringify({ channel, source: generated.source, subject: generated.subject || "", body_length: String(generated.body || "").length }), timestamp).run();
+            generationEventLogged = true;
+          } catch (eventError: any) {
+            console.warn("[ProspectMessage] generation event log failed:", String(eventError?.message || eventError).slice(0, 160));
+          }
           return Response.json({
             success: true,
             ...buildAttackKit({ ...p, draft_subject: generated.subject, draft_body: generated.body }),
             generated_message: { subject: generated.subject || "", body: generated.body || "", channel, source: generated.source, generated_at: timestamp },
-            contactability
+            contactability,
+            generation_event_logged: generationEventLogged
           }, { headers: corsHeaders });
         } catch (e: any) {
           console.error("[ProspectMessage] generation failed:", String(e?.message || e).slice(0, 240));
