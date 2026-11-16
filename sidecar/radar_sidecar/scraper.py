@@ -260,7 +260,6 @@ def _extract_contact_candidates(html: str) -> tuple[set[str], set[str], list[dic
     """Collect contacts from explicit links, JSON-LD and visible contact context only."""
     emails: set[str] = set()
     phones: set[str] = set()
-    contact_provenance: list[dict[str, str]] = []
     provenance: list[dict[str, str]] = []
     visible_html = re.sub(r"(?is)<(script|style|noscript|svg|template|canvas)[^>]*>.*?</\1>", " ", html)
     visible_text = _strip_html(visible_html)
@@ -272,7 +271,7 @@ def _extract_contact_candidates(html: str) -> tuple[set[str], set[str], list[dic
             provenance.append({"type": "email", "value": value, "source": "mailto"})
 
     # Structured business data is extracted separately from executable scripts.
-    for block in re.findall(r"(?is)<script\b[^>]*type\s*=\s*['\\"]application/ld\+json['\\"][^>]*>(.*?)</script>", html):
+    for block in re.findall(r"""(?is)<script\b[^>]*type\s*=\s*['"]application/ld\+json['"][^>]*>(.*?)</script>""", html):
         for key, raw in re.findall(r"""(?is)["'](email|telephone|phone)["']\s*:\s*["']([^"']+)["']""", block):
             value = raw.strip()
             if key.lower() == "email":
