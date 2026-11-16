@@ -66,7 +66,7 @@ FOUNDING_MIN_SCORE = "50"
 
 No configures FOUNDING_CITIES ni FOUNDING_COUNTRIES para la rotación automática. Founder toma sus ciudades de los archivos incluidos en el Worker: src/geoData.ts y src/geoDataAnglosphere.ts. Los cuatro mercados principales son US, CA, GB y AU; aproximadamente el 75% de los objetivos se distribuye entre ellos y el 25% restante explora otros países presentes en el gazetteer.
 
-La cobertura no es mundial todavía: geoData.ts contiene la cobertura extensa de US/CA y el archivo suplementario añade centros urbanos de GB, AU, IE, NZ y ZA. Las coordenadas son centros urbanos aproximados y las poblaciones son pesos redondeados para priorización, no datos censales. Para añadir más países hay que ampliar los archivos geográficos con datos redistribuibles y atribución verificable; no basta con añadir un código de país a la configuración.
+La cobertura no es mundial todavía: geoData.ts contiene la cobertura extensa de US/CA y el archivo suplementario añade centros urbanos de GB, AU, IE, NZ y ZA. Las coordenadas son centros urbanos aproximados y las poblaciones son pesos redondeados para priorización, no datos censales. Para añadir más países hay que ampliar los archivos geográficos con datos redistribuibles y atribución verificable; no basta con añadir un código de país a la configuración. Founder también descarta antes de reservar presupuesto los POI sin email válido, teléfono válido o sitio web real; los candidatos con sitio web siguen habilitados para scraping/enriquecimiento.
 
 ### 4. Configurar el Webhook de Telegram (Botones Interactivos)
 Para que los botones `[✅ Mark Sent]`, `[❌ Discard]` y `[🚫 Suppress]` funcionen directamente desde Telegram:
