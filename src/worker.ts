@@ -99,7 +99,6 @@ export interface Env {
   WEBHOOK_SECRET?: string; // token para webhooks de correo (?token=...)
   FOUNDING_CITIES?: string; // semicolon-separated explicit city labels; no implicit defaults
   FOUNDING_TRADES?: string; // semicolon-separated explicit niches; no implicit defaults
-  FOUNDING_COUNTRIES?: string; // ISO country codes used only for automatic geo rotation
   FOUNDING_LANGUAGES?: string;
   FOUNDING_MIN_SCORE?: string;
   FOUNDER_AUTO_OUTREACH?: string;
@@ -7891,9 +7890,9 @@ export async function getPriorityTargets(
     if (env.FOUNDING_TRADES) {
       config.niches = env.FOUNDING_TRADES.split(";").map(t => t.trim()).filter(Boolean);
     }
-    if ((env as any).FOUNDING_COUNTRIES) {
-      config.countries = String((env as any).FOUNDING_COUNTRIES).split(";").map(c => c.trim().toUpperCase()).filter(Boolean);
-    }
+    // Founder geography comes from the bundled gazetteer and market-universe policy.
+    // Do not require FOUNDING_COUNTRIES in Cloudflare: an empty country scope keeps
+    // every available GeoPlace eligible and lets the rotation balance core markets.
     if ((env as any).FOUNDING_LANGUAGES) {
       config.languages = String((env as any).FOUNDING_LANGUAGES).split(";").map(l => l.trim().toLowerCase()).filter(Boolean);
     }
