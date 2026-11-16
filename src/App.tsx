@@ -413,7 +413,7 @@ export default function App() {
   const [showConfig, setShowConfig] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [inspectedProspect, setInspectedProspect] = useState<Prospect | null>(null);
-  const [contactedProspects, setContactedProspects] = useState<Record<string, boolean>>({});
+  const [showOutcomeControls, setShowOutcomeControls] = useState<Record<string, boolean>>({});
   
   // PWA Install prompt trigger states
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
@@ -708,6 +708,22 @@ export default function App() {
     setShowConfig(false);
     setLoading(true);
     fetchTelemetry();
+  };
+
+  const recordProspectMessageEvent = async (prospectId: string, eventType: 'message_copied' | 'message_channel_opened', channel: string) => {
+    try {
+      await fetch(apiUrl + "/api/prospects/message-event", {
+        method: "POST", credentials: "include", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prospect_id: prospectId, event_type: eventType, channel })
+      });
+    } catch { /* telemetry never blocks the user's action */ }
+  };
+
+  const isValidEmailRecipient = (value?: string | null) => Boolean(value && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim()));
+  const hasDirectWhatsAppRecipient = (value?: string | null) => {
+    if (!value) return false;
+    const link = toWhatsAppUrl(value, "");
+    return Boolean(link && /^https:\/\/wa\.me\/\d{8,15}(?:\?|$)/i.test(link));
   };
 
   // Copy proposal draft trigger
@@ -2183,7 +2199,7 @@ const submitDecision = async (prospectId: string, action: string) => {
                           </div>
 
                           <div className="flex flex-wrap items-center gap-2 pt-1 font-mono text-[11px]">
-                            {p.email && (
+                            {isValidEmailRecipient(p.email) && (
                               <a 
                                 href={`mailto:${p.email}?subject=${encodeURIComponent(p.draft_subject || '')}&body=${encodeURIComponent(p.draft_body || '')}`}
                                 target="_blank" 
@@ -2191,14 +2207,15 @@ const submitDecision = async (prospectId: string, action: string) => {
                                 className="px-2.5 py-1 rounded-lg bg-blue-950/50 border border-blue-800/40 text-blue-300 hover:bg-blue-900/60 flex items-center gap-1 font-bold"
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  setContactedProspects(prev => ({ ...prev, [p.id]: true }));
+                                  setShowOutcomeControls(prev => ({ ...prev, [p.id]: true }));
+                                   void recordProspectMessageEvent(p.id, 'message_channel_opened', 'email');
                                 }}
                               >
                                 <Mail className="w-3.5 h-3.5 text-blue-400" />
                                 Correo
                               </a>
                             )}
-                            {p.phone && toWhatsAppUrl(p.phone, p.draft_body || '') && (
+                            {p.phone && hasDirectWhatsAppRecipient(p.phone) && toWhatsAppUrl(p.phone, p.draft_body || '') && (
                               <a 
                                 href={toWhatsAppUrl(p.phone, p.draft_body || '')!}
                                 target="_blank" 
@@ -2206,7 +2223,8 @@ const submitDecision = async (prospectId: string, action: string) => {
                                 className="px-2.5 py-1 rounded-lg bg-emerald-950/50 border border-emerald-800/40 text-emerald-300 hover:bg-emerald-900/60 flex items-center gap-1 font-bold"
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  setContactedProspects(prev => ({ ...prev, [p.id]: true }));
+                                  setShowOutcomeControls(prev => ({ ...prev, [p.id]: true }));
+                                   void recordProspectMessageEvent(p.id, 'message_channel_opened', 'whatsapp');
                                 }}
                               >
                                 <MessageSquare className="w-3.5 h-3.5 text-emerald-400" />
@@ -2219,7 +2237,8 @@ const submitDecision = async (prospectId: string, action: string) => {
                                 className="px-2.5 py-1 rounded-lg bg-sky-950/50 border border-sky-800/40 text-sky-300 hover:bg-sky-900/60 flex items-center gap-1 font-bold"
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  setContactedProspects(prev => ({ ...prev, [p.id]: true }));
+                                  setShowOutcomeControls(prev => ({ ...prev, [p.id]: true }));
+                                   void recordProspectMessageEvent(p.id, 'message_channel_opened', 'sms');
                                 }}
                               >
                                 <MessageSquare className="w-3.5 h-3.5 text-sky-400" />
@@ -2232,7 +2251,8 @@ const submitDecision = async (prospectId: string, action: string) => {
                                 className="px-2.5 py-1 rounded-lg bg-indigo-950/50 border border-indigo-800/40 text-indigo-300 hover:bg-indigo-900/60 flex items-center gap-1 font-bold"
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  setContactedProspects(prev => ({ ...prev, [p.id]: true }));
+                                  setShowOutcomeControls(prev => ({ ...prev, [p.id]: true }));
+                                   void recordProspectMessageEvent(p.id, 'message_channel_opened', 'phone');
                                 }}
                               >
                                 <Phone className="w-3.5 h-3.5 text-indigo-400" />
@@ -2253,7 +2273,7 @@ const submitDecision = async (prospectId: string, action: string) => {
                             )}
                           </div>
 
-                          {(contactedProspects[p.id] || isExpanded) && (
+                          {(showOutcomeControls[p.id] || isExpanded) && (
                             <div className="pt-2 border-t border-slate-900/80 space-y-2" onClick={(e) => e.stopPropagation()}>
                               <span className="text-[10px] font-mono text-slate-400 font-bold uppercase block">Registrar Resultado:</span>
                               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
@@ -2320,7 +2340,11 @@ const submitDecision = async (prospectId: string, action: string) => {
                                     onClick={async () => {
                                       if (attackKits[p.id]) return;
                                       try {
-                                        const r = await fetch(`${apiUrl}/api/prospects/attack-kit?id=${encodeURIComponent(p.id)}`, { credentials: 'include' });
+                                         const channel = isValidEmailRecipient(p.email) ? 'email' : 'whatsapp';
+                                         const r = await fetch(`${apiUrl}/api/prospects/attack-kit`, {
+                                           method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+                                           body: JSON.stringify({ prospect_id: p.id, channel })
+                                         });
                                         if (r.ok) {
                                           const kit = await r.json();
                                           setAttackKits(prev => ({ ...prev, [p.id]: kit }));
@@ -2328,11 +2352,25 @@ const submitDecision = async (prospectId: string, action: string) => {
                                       } catch { /* ignore */ }
                                     }}
                                   >
-                                    {attackKits[p.id] ? 'Listo' : 'Generar kit'}
+                                    {attackKits[p.id] ? 'Regenerar mensaje IA' : 'Generar mensaje IA'}
                                   </button>
                                 </div>
                                 {attackKits[p.id] ? (
                                   <div className="space-y-2 text-[10px] text-slate-300 font-mono">
+                                    {attackKits[p.id].generated_message && (
+                                      <div className="rounded-lg border border-blue-800/50 bg-slate-950 p-3 space-y-2">
+                                        <div className="flex items-center justify-between gap-2">
+                                          <span className="text-[10px] font-bold uppercase text-blue-300">Mensaje {attackKits[p.id].generated_message.channel} · {attackKits[p.id].generated_message.source === 'template' ? 'plantilla de respaldo' : 'IA · ' + attackKits[p.id].generated_message.source}</span>
+                                          <button type="button" className="text-[10px] text-blue-300 font-bold" onClick={() => {
+                                            copyToClipboard([attackKits[p.id].generated_message.subject, attackKits[p.id].generated_message.body].filter(Boolean).join('\n\n'), p.id);
+                                            void recordProspectMessageEvent(p.id, 'message_copied', 'clipboard');
+                                          }}>Copiar</button>
+                                        </div>
+                                        {attackKits[p.id].generated_message.subject && <p className="text-slate-400">Asunto: {attackKits[p.id].generated_message.subject}</p>}
+                                        <p className="whitespace-pre-wrap text-[11px]">{attackKits[p.id].generated_message.body}</p>
+                                        <p className="text-[9px] text-slate-500">Generar o copiar no significa contactar ni autoriza un envío. Canal directo disponible: {attackKits[p.id].contactability?.contact_available ? 'sí' : 'no'}.</p>
+                                      </div>
+                                    )}
                                     {attackKits[p.id].next_action?.includes("DO_NOT_CONTACT") ? (
                                       <div className="p-2.5 rounded-lg bg-rose-950/50 border border-rose-800/60 text-rose-300 font-sans space-y-1">
                                         <div className="font-bold uppercase text-[10px] text-rose-200">⛔ {attackKits[p.id].next_action}</div>
