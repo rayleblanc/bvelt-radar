@@ -85,6 +85,12 @@ interface Prospect {
   decision_state?: string;
   why_now_json?: string;
   attack_kit?: any;
+  contactability?: {
+    commercial_prospect: boolean;
+    contact_available: boolean;
+    channels: { email: boolean; phone: boolean; whatsapp_direct: boolean; website: boolean };
+    send_authorized: boolean;
+  };
 }
 
 export interface Opportunity {
@@ -2136,6 +2142,7 @@ const submitDecision = async (prospectId: string, action: string) => {
                       const messageBody = attackKits[p.id]?.generated_message?.body || p.draft_body || "";
                       const messageSubject = attackKits[p.id]?.generated_message?.subject || p.draft_subject || "";
                       const emailRecipient = p.email && isValidEmailRecipient(p.email) ? p.email.trim() : null;
+                      const contactability = p.contactability;
 
                       return (
                         <div 
@@ -2215,6 +2222,13 @@ const submitDecision = async (prospectId: string, action: string) => {
                             )}
                           </div>
 
+                          {contactability && (
+                            <div className="text-[9px] text-slate-500 font-mono">
+                              {contactability.commercial_prospect ? "Prospecto comercial" : "No elegible"} ·
+                              {contactability.contact_available ? "Contacto directo disponible" : contactability.channels.website ? "Web disponible, sin destinatario directo" : "Sin canal directo"} ·
+                              {contactability.send_authorized ? "Envío autorizado" : "Envío pendiente de autorización"}
+                            </div>
+                          )}
                           <div className="flex flex-wrap items-center gap-2 pt-1 font-mono text-[11px]">
                             {emailRecipient && (
                               <a 
