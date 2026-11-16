@@ -378,6 +378,10 @@ const MARKET_UNIVERSE_POLICY = marketUniverse as {
   excluded_business_categories?: string[];
 };
 
+// Founder discovery is intentionally balanced across these four commercial markets.
+// The list is a rotation preference, never an allowlist; the full gazetteer stays eligible.
+const FOUNDER_PRIMARY_COUNTRIES = ["US", "CA", "GB", "AU"];
+
 const MARKET_PRIORITY_COUNTRIES = Array.from(new Set([
   ...(MARKET_UNIVERSE_POLICY.market_tiers?.core_english_commercial || []),
   ...(MARKET_UNIVERSE_POLICY.market_tiers?.additional_english_commercial || []),
@@ -5172,7 +5176,7 @@ export async function startProspectingRun(
   if ((!activeCities || activeCities.length === 0 || !activeTrades || activeTrades.length === 0) && (!pairs || pairs.length === 0)) {
     const reason = mode === "tenant"
       ? `Tenant "${tId}" no tiene mercados o segmentos compradores válidos. Configura cities_json e ICP buyer segments antes de correr el Radar.`
-      : "No hay mercados y nichos activos para discovery. Configura FOUNDING_CITIES + FOUNDING_TRADES, o FOUNDING_COUNTRIES + FOUNDING_TRADES.";
+      : "No hay mercados y nichos activos para discovery. Revisa el catálogo geográfico y los segmentos de market-universe.json; FOUNDING_CITIES/COUNTRIES son filtros opcionales.";
     console.warn(`[startProspectingRun] ${reason}`);
     return {
       run_id: "no_targets",
@@ -8063,7 +8067,8 @@ export async function getPriorityTargets(
         trades: sortedNiches,
         count: Math.min(20, Number(env.RADAR_JOBS_PER_RUN || 15)),
         countries: config.countries,
-        priorityCountries: MARKET_PRIORITY_COUNTRIES
+        priorityCountries: MARKET_PRIORITY_COUNTRIES,
+        countryRotation: FOUNDER_PRIMARY_COUNTRIES
       });
     } catch (e) {
       console.warn("[getPriorityTargets] pickTargets error:", e);
@@ -10628,7 +10633,7 @@ export async function collectRadarDigest(env: Env): Promise<RadarDigest> {
   if (!hasProvider) blockers.push("Sin proveedor de email (RESEND_API_KEY / BREVO_API_KEY / Hunter)");
   if (autoOn && !isCompletePostalAddress(env.SENDER_POSTAL_ADDRESS)) blockers.push("SENDER_POSTAL_ADDRESS ausente o incompleta: bloquea todo envío automático");
   if (gov && gov.status && gov.status !== "active") blockers.push(`Sender governor en estado "${gov.status}"`);
-  if (!has(env.FOUNDING_CITIES)) blockers.push("FOUNDING_CITIES vacío (OK: rotación geoData/geoFrontier activa — no hace falta lista manual)");
+  if (!has(env.FOUNDING_CITIES)) blockers.push("FOUNDING_CITIES vacío (OK: rotación automática del catálogo global activa — no hace falta lista manual)");
 
   const hardBlock = blockers.filter(b => !b.startsWith("FOUNDING_CITIES"));
   let verdict: RadarDigest["verdict"] = "ok";
