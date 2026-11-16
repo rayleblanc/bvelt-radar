@@ -14,7 +14,7 @@
   },
   "geography_policy": {
     "primary_source": "Existing Radar geoData.ts and geoFrontier.ts",
-    "current_dataset_note": "The public geoData.ts describes approximately 7,600 US and Canadian places; it is not global coverage.",
+    "current_dataset_note": "Founder/Tenant use a unified runtime gazetteer: approximately 7,600 US/CA places from geoData.ts plus supplemental GB/AU/IE/NZ/ZA urban centres from geoDataAnglosphere.ts. This is a curated expansion, not exhaustive global coverage.",
     "expansion_source": "GeoNames/all-the-cities with attribution, or an equivalent redistributable global gazetteer",
     "minimum_population_hint": 5000,
     "fallback": "Geocode configured city + country with a compliant geocoding provider when no local GeoPlace record exists.",
