@@ -1150,7 +1150,8 @@ export default {
       // reach that guard instead of being rejected by the Founder-only gate.
       const isTenantScopedRequest =
         ((method === "GET" || method === "POST") && ["/api/tenants/config", "/tenants/config"].includes(path)) ||
-        (method === "POST" && ["/api/tenants/search", "/tenants/search", "/api/bvelt/bootstrap", "/bvelt/bootstrap", "/api/prospects/outcome", "/prospects/outcome"].includes(path)) ||
+        (method === "POST" && ["/api/tenants/search", "/tenants/search", "/api/bvelt/bootstrap", "/bvelt/bootstrap", "/api/prospects/outcome", "/prospects/outcome", "/api/prospects/attack-kit", "/prospects/attack-kit", "/api/prospects/message-event", "/prospects/message-event"].includes(path)) ||
+        (method === "GET" && ["/api/prospects/attack-kit", "/prospects/attack-kit"].includes(path)) ||
         (method === "GET" && ["/api/tenants/leads.csv", "/tenants/leads.csv", "/api/tenants/roi", "/tenants/roi", "/api/bvelt/leads", "/bvelt/leads"].includes(path));
 
       if (isResearchCallbackPath) {
@@ -2544,20 +2545,60 @@ export default {
         }
       }
 
-      // (b2) GET /api/prospects/attack-kit?id= — call + SMS + email kit for one lead
-      if ((path === "/api/prospects/attack-kit" || path === "/prospects/attack-kit") && method === "GET") {
-        const prospectId = url.searchParams.get("id");
-        if (!prospectId) {
-          return Response.json({ error: "Missing id" }, { status: 400, headers: corsHeaders });
-        }
+      // Scoped message generation: GET is a read-only kit; POST uses the shared AI generator.
+      if ((path === "/api/prospects/attack-kit" || path === "/prospects/attack-kit") && (method === "GET" || method === "POST")) {
+        const auth = resolveTenantAuthContext(request, env, serviceKey, validSessionHash);
+        if (!auth.authorized) return Response.json({ error: "unauthorized" }, { status: 401, headers: corsHeaders });
+        const body: any = method === "POST" ? await request.json().catch(() => ({})) : {};
+        const prospectId = String(method === "GET" ? url.searchParams.get("id") || "" : body.prospect_id || body.id || "").trim();
+        if (!prospectId) return Response.json({ error: "prospect_id_required" }, { status: 400, headers: corsHeaders });
         try {
           const p = await env.RADAR_DB.prepare("SELECT * FROM prospects WHERE id = ?").bind(prospectId).first() as any;
-          if (!p) return Response.json({ error: "Not found" }, { status: 404, headers: corsHeaders });
-          const kit = buildAttackKit(p);
-          return Response.json(kit, { headers: corsHeaders });
+          if (!p) return Response.json({ error: "prospect_not_found" }, { status: 404, headers: corsHeaders });
+          const targetTenant = String(p.tenant_id || "founder");
+          if (!auth.canAccessTenant(targetTenant)) return Response.json({ error: "tenant_scope_forbidden" }, { status: 403, headers: corsHeaders });
+          const contactability = resolveProspectContactability(p);
+          if (method === "GET") return Response.json({ ...buildAttackKit(p), contactability }, { headers: corsHeaders });
+          const channel = body.channel === "whatsapp" ? "whatsapp" : "email";
+          const dayOfYear = getDayOfYear(new Date());
+          const mode = p.mode === "tenant" ? "tenant" : "founder";
+          const { missionConfig } = await getPriorityTargets(dayOfYear, env, mode, targetTenant, undefined, true);
+          const generated = await generateAICopy(p, p.variant_id || p.bvelt_angle || "missed_calls", env, missionConfig, channel);
+          const timestamp = new Date().toISOString();
+          await env.RADAR_DB.prepare("UPDATE prospects SET draft_subject = ?, draft_body = ?, status = CASE WHEN status IN ('discovered','enriched','qualified','scouted','scored') THEN 'drafted' ELSE status END, updated_at = ? WHERE id = ? AND mode = ? AND COALESCE(tenant_id,'founder') = ?")
+            .bind(generated.subject || "", generated.body || "", timestamp, prospectId, p.mode, targetTenant).run();
+          await env.RADAR_DB.prepare("INSERT INTO prospect_events (id, prospect_id, event_type, content, created_at) VALUES (?, ?, 'message_generated', ?, ?)")
+            .bind("msg_" + crypto.randomUUID(), prospectId, JSON.stringify({ channel, source: generated.source, subject: generated.subject || "", body_length: String(generated.body || "").length }), timestamp).run();
+          return Response.json({
+            success: true,
+            ...buildAttackKit({ ...p, draft_subject: generated.subject, draft_body: generated.body }),
+            generated_message: { subject: generated.subject || "", body: generated.body || "", channel, source: generated.source, generated_at: timestamp },
+            contactability
+          }, { headers: corsHeaders });
         } catch (e: any) {
-          return Response.json({ error: e.message }, { status: 500, headers: corsHeaders });
+          console.error("[ProspectMessage] generation failed:", String(e?.message || e).slice(0, 240));
+          return Response.json({ error: "message_generation_failed" }, { status: 500, headers: corsHeaders });
         }
+      }
+
+      // Copy and channel handoff are separate events; neither event marks a prospect contacted.
+      if ((path === "/api/prospects/message-event" || path === "/prospects/message-event") && method === "POST") {
+        const auth = resolveTenantAuthContext(request, env, serviceKey, validSessionHash);
+        if (!auth.authorized) return Response.json({ error: "unauthorized" }, { status: 401, headers: corsHeaders });
+        const body: any = await request.json().catch(() => ({}));
+        const prospectId = String(body.prospect_id || "").trim();
+        const eventType = String(body.event_type || "").trim();
+        const channel = String(body.channel || "").trim().toLowerCase();
+        if (!prospectId || !["message_copied", "message_channel_opened"].includes(eventType) || !["email", "whatsapp", "sms", "phone", "website", "clipboard"].includes(channel)) {
+          return Response.json({ error: "invalid_message_event" }, { status: 400, headers: corsHeaders });
+        }
+        const p = await env.RADAR_DB.prepare("SELECT id, mode, tenant_id FROM prospects WHERE id = ?").bind(prospectId).first() as any;
+        if (!p) return Response.json({ error: "prospect_not_found" }, { status: 404, headers: corsHeaders });
+        if (!auth.canAccessTenant(String(p.tenant_id || "founder"))) return Response.json({ error: "tenant_scope_forbidden" }, { status: 403, headers: corsHeaders });
+        const timestamp = new Date().toISOString();
+        await env.RADAR_DB.prepare("INSERT INTO prospect_events (id, prospect_id, event_type, content, created_at) VALUES (?, ?, ?, ?, ?)")
+          .bind("msg_" + crypto.randomUUID(), prospectId, eventType, JSON.stringify({ channel, mode: p.mode, tenant_id: p.tenant_id || "founder" }), timestamp).run();
+        return Response.json({ success: true, recorded: true }, { headers: corsHeaders });
       }
 
       // (b3) GET /api/digest/weekly — founder or tenant weekly summary (productizable)
