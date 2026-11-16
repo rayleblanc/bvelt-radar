@@ -1971,17 +1971,31 @@ tests.push({
                     id: args[0],
                     run_id: args[1],
                     mode: args[2],
-                    tenant_id: args[3],
-                    prospect_id: args[4],
-                    source_id: args[5],
-                    source_url: args[6],
-                    evidence_type: args[7],
-                    evidence_json: args[8],
-                    content_hash: args[9],
-                    extractor_version: args[10],
-                    confidence: args[11],
-                    observed_at: args[12],
-                    created_at: args[13]
+                    realm: args[3],
+                    tenant_id: args[4],
+                    prospect_id: args[5],
+                    subject_id: args[6],
+                    source_id: args[7],
+                    source_label: args[8],
+                    source_url: args[9],
+                    evidence_type: args[10],
+                    evidence_status: args[11],
+                    method: args[12],
+                    evidence_json: args[13],
+                    content_hash: args[14],
+                    extractor_version: args[15],
+                    confidence: args[16],
+                    unit: args[17],
+                    period_json: args[18],
+                    sample_size: args[19],
+                    observed_at: args[20],
+                    fetched_at: args[21],
+                    valid_until: args[22],
+                    limitations_json: args[23],
+                    usage_policy_json: args[24],
+                    profile_snapshot_version: args[25],
+                    schema_version: args[26],
+                    created_at: args[27]
                   });
                 } else if (sqlLower.includes("update prospects set signals_json")) {
                   const p = prospectsStore.find(x => x.id === args[2]);
@@ -2009,7 +2023,7 @@ tests.push({
                   const p = prospectsStore.find(x => x.id === args[0] && x.mode === args[1] && (x.tenant_id || "founder") === args[2]);
                   return p ? { id: p.id, name: p.name, status: p.status, trade: p.trade, email: p.email, signals_json: p.signals_json, website: p.website } : null;
                 } else if (sqlLower.includes("select id from source_evidence")) {
-                  const ev = evidenceStore.find(x => x.prospect_id === args[0] && x.source_id === args[1] && x.evidence_type === args[2] && x.content_hash === args[3]);
+                  const ev = evidenceStore.find(x => x.mode === args[0] && x.realm === args[1] && x.tenant_id === args[2] && x.prospect_id === args[3] && x.source_id === args[4] && x.evidence_type === args[5] && x.content_hash === args[6]);
                   return ev ? { id: ev.id } : null;
                 }
                 return null;
@@ -2422,37 +2436,42 @@ tests.push({
         })
       }
     };
+    const tenantId = "bvelt_user_alpha";
+    const profileId = "user_alpha";
+    const contract = {
+      contract_version: 1, realm: "TENANT", tenant_id: tenantId, profile_id: profileId,
+      business_id: "business_alpha", profile_snapshot_version: "a".repeat(64),
+      profile_snapshot_at: "2026-11-16T12:00:00.000Z", profile_source: "FIRESTORE_PROFILE",
+      location_source: "UNKNOWN", verification_state: "UNKNOWN",
+      correlation_id: "550e8400-e29b-41d4-a716-446655440000",
+      idempotency_key: "bootstrap:v1:user_alpha:snapshot", territory: {},
+    };
     const headers = {
       "Authorization": "Bearer radar-service-secret",
-      "X-Tenant-Id": "tenant_alpha",
+      "X-Tenant-Id": tenantId,
       "Content-Type": "application/json"
     };
     const missingCity = await worker.fetch(new Request("https://radar.test/api/tenants/config", {
-      method: "POST", headers, body: JSON.stringify({
-        tenant_id: "tenant_alpha", industry: "plumbing", niche: "plumbing"
-      })
+      method: "POST", headers, body: JSON.stringify({ ...contract, industry: "plumbing", niche: "plumbing" })
     }), env, {} as any);
     assert(missingCity.status === 409, "Tenant profile without a city must return 409");
     const missingCityBody = await missingCity.json() as any;
     assert(missingCityBody.error === "tenant_profile_incomplete" && missingCityBody.missing_fields.includes("cities"), "Missing city must be explicit");
 
     const missingTrade = await worker.fetch(new Request("https://radar.test/api/tenants/config", {
-      method: "POST", headers, body: JSON.stringify({
-        tenant_id: "tenant_alpha", cities: ["Austin, TX"]
-      })
+      method: "POST", headers, body: JSON.stringify({ ...contract, cities: ["Austin, TX"] })
     }), env, {} as any);
     assert(missingTrade.status === 409, "Tenant profile without industry/niche must return 409");
 
     const founderScope = await worker.fetch(new Request("https://radar.test/api/tenants/config", {
-      method: "POST", headers, body: JSON.stringify({
-        tenant_id: "founder", industry: "plumbing", niche: "plumbing", cities: ["Austin, TX"]
-      })
+      method: "POST", headers, body: JSON.stringify({ ...contract, realm: "FOUNDER", industry: "plumbing", niche: "plumbing", cities: ["Austin, TX"] })
     }), env, {} as any);
     assert(founderScope.status === 400, "Tenant config must never write into Founder scope");
 
     const valid = await worker.fetch(new Request("https://radar.test/api/tenants/config", {
       method: "POST", headers, body: JSON.stringify({
-        tenant_id: "tenant_alpha",
+        ...contract,
+        tenant_id: tenantId,
         tenant_name: "Local Plumbing Co",
         industry: "plumbing",
         niche: "plumbing",
