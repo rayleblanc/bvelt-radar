@@ -2492,7 +2492,7 @@ export default {
             SELECT 
               COUNT(*) as total,
               SUM(CASE WHEN status IN ('scouted','qualified','scored','enriched') THEN 1 ELSE 0 END) as pipeline,
-              SUM(CASE WHEN status IN ('sent','delivered','opened','clicked','contacted') THEN 1 ELSE 0 END) as outreach,
+              SUM(CASE WHEN status IN ('sent','delivered','opened','clicked','contacted','replied','booked','converted','won','lost') OR outcome IN ('sent','delivered','opened','clicked','whatsapp_manual_sent','positive','replied','booked','won','lost','converted') OR tenant_outcome IN ('contacted','replied','booked','won','lost') THEN 1 ELSE 0 END) as outreach,
               SUM(CASE WHEN status IN ('sent','delivered','opened','clicked','contacted','replied','booked','converted','won','lost')
                          OR outcome IN ('sent','delivered','opened','clicked','whatsapp_manual_sent','positive','replied','booked','won','lost','converted')
                          OR tenant_outcome IN ('contacted','replied','booked','won','lost') THEN 1 ELSE 0 END) as conversion_denominator,
