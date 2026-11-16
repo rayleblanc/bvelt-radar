@@ -319,6 +319,33 @@ tests.push({
 });
 
 tests.push({
+  name: "Explicit country filters still narrow Founder discovery and Tenant geography stays scoped",
+  run: async () => {
+    const founderGb = await pickTargets({} as any, {
+      tenantId: "founder",
+      trades: ["plumbing", "hvac"],
+      count: 4,
+      countries: ["GB"],
+      priorityCountries: ["US", "CA", "GB", "AU"],
+      countryRotation: ["US", "CA", "GB", "AU"]
+    });
+    assert(founderGb.length > 0, "An explicit GB filter must still produce eligible GB targets");
+    assert(founderGb.every(item => String(item.place.country || item.place[2]).toUpperCase() === "GB"), "Explicit country filters must remain restrictive");
+
+    const tenantGb = await pickTargets({} as any, {
+      tenantId: "tenant_gb",
+      trades: ["plumbing", "hvac"],
+      count: 3,
+      centerLabel: "London, England",
+      serviceRadiusKm: 60,
+      countries: ["GB"]
+    });
+    assert(tenantGb.length > 0, "Tenant discovery must resolve UK cities from the unified gazetteer");
+    assert(tenantGb.every(item => String(item.place.country || item.place[2]).toUpperCase() === "GB"), "Tenant scope must not leak into other countries");
+  }
+});
+
+tests.push({
   name: "Founder market segments expand into searchable niches without closing custom targeting",
   run: async () => {
     const expanded = expandFounderDiscoveryNiches([
