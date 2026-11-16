@@ -2928,6 +2928,8 @@ tests.push({
       service_terms_observed: ["repair", "installation"]
     }, "electrical");
     assert(electrical.allowed, "Matching electrical contractor evidence must remain eligible");
+    const tenantBuyer = evaluateResearchEvidenceQuality("Sun Garden Chinese", { page_title: "Sun Garden Chinese Restaurant" }, "landscaping", "tenant");
+    assert(tenantBuyer.allowed, "Founder category veto must not leak into Tenant mode");
   }
 });
 
