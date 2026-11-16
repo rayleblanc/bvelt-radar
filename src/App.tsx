@@ -713,13 +713,17 @@ export default function App() {
   const recordProspectMessageEvent = async (prospectId: string, eventType: 'message_copied' | 'message_channel_opened', channel: string) => {
     try {
       await fetch(apiUrl + "/api/prospects/message-event", {
-        method: "POST", credentials: "include", headers: { "Content-Type": "application/json", "X-Tenant-Id": selectedTenantId || "founder" },
+        method: "POST", credentials: "include", keepalive: true, headers: { "Content-Type": "application/json", "X-Tenant-Id": selectedTenantId || "founder" },
         body: JSON.stringify({ prospect_id: prospectId, event_type: eventType, channel })
       });
     } catch { /* telemetry never blocks the user's action */ }
   };
 
   const isValidEmailRecipient = (value?: string | null) => Boolean(value && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim()));
+  const isVerifiedEmailRecipient = (prospect: Prospect) => {
+    try { return JSON.parse(prospect.signals_json || "{}").is_email_validated === true; }
+    catch { return false; }
+  };
   const hasDirectWhatsAppRecipient = (value?: string | null) => {
     if (!value) return false;
     const link = toWhatsAppUrl(value, "");
@@ -2435,6 +2439,10 @@ const submitDecision = async (prospectId: string, action: string) => {
                                       >
                                         ⛔ DO NOT CONTACT
                                       </button>
+                                    ) : !isValidEmailRecipient(p.email) ? (
+                                      <button disabled className="h-10 px-2 rounded-lg bg-slate-900 border border-slate-800 text-slate-500 text-[10px] font-bold">SIN EMAIL VÁLIDO</button>
+                                    ) : !isVerifiedEmailRecipient(p) ? (
+                                      <button disabled className="h-10 px-2 rounded-lg bg-amber-950/30 border border-amber-900/40 text-amber-400 text-[10px] font-bold">EMAIL SIN VERIFICAR</button>
                                     ) : (
                                       <button
                                         onClick={() => submitDecision(p.id, 'sent')}
