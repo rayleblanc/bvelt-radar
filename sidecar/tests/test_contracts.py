@@ -2,7 +2,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from sidecar.radar_sidecar.scraper import _extract_contact_candidates, _fetch, _normalize_url, _strip_html
+from sidecar.radar_sidecar.scraper import _extract_contact_candidates, _valid_email_candidate, _fetch, _normalize_url, _strip_html
 
 
 class ScraperContractTests(unittest.TestCase):
@@ -43,6 +43,12 @@ class ScraperContractTests(unittest.TestCase):
         )
         self.assertIsNone(_fetch("https://example.com/"))
         mock_get.assert_called_once()
+
+    def test_rejects_placeholder_and_asset_emails(self):
+        self.assertFalse(_valid_email_candidate("example@mail.com"))
+        self.assertFalse(_valid_email_candidate("group-1671@2x.png"))
+        self.assertFalse(_valid_email_candidate("test@test.com"))
+        self.assertTrue(_valid_email_candidate("office@realbusiness.ca"))
 
     def test_contact_extraction_ignores_svg_and_unrelated_numeric_markup(self):
         html = """
