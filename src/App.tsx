@@ -1193,6 +1193,7 @@ const submitDecision = async (prospectId: string, action: string) => {
   const [tenantCitiesText, setTenantCitiesText] = useState('Austin, TX; Round Rock, TX');
   const [roiStats, setRoiStats] = useState<any>(null);
   const [attackKits, setAttackKits] = useState<Record<string, any>>({});
+  const [generatingMessageIds, setGeneratingMessageIds] = useState<Record<string, boolean>>({});
 
   const saveTenantConfig = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -2353,21 +2354,34 @@ const submitDecision = async (prospectId: string, action: string) => {
                                   <button
                                     type="button"
                                     className="text-[10px] text-indigo-400 font-bold"
+                                    disabled={Boolean(generatingMessageIds[p.id])}
                                     onClick={async () => {
+                                      setGeneratingMessageIds(prev => ({ ...prev, [p.id]: true }));
+                                      setErrorState(null);
                                       try {
-                                         const channel = isValidEmailRecipient(p.email) || !hasDirectWhatsAppRecipient(p.phone) ? 'email' : 'whatsapp';
-                                         const r = await fetch(`${apiUrl}/api/prospects/attack-kit`, {
-                                           method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': selectedTenantId || 'founder' },
-                                           body: JSON.stringify({ prospect_id: p.id, channel })
-                                         });
-                                        if (r.ok) {
-                                          const kit = await r.json();
-                                          setAttackKits(prev => ({ ...prev, [p.id]: kit }));
+                                        const channel = isValidEmailRecipient(p.email) || !hasDirectWhatsAppRecipient(p.phone) ? 'email' : 'whatsapp';
+                                        const r = await fetch(apiUrl + "/api/prospects/attack-kit", {
+                                          method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': selectedTenantId || 'founder' },
+                                          body: JSON.stringify({ prospect_id: p.id, channel })
+                                        });
+                                        const data = await r.json().catch(() => ({}));
+                                        if (!r.ok) {
+                                          setErrorState(data.error === 'unauthorized' ? 'Sesión expirada: vuelve a autenticarte.' : 'No se pudo generar el mensaje: ' + (data.error || r.status));
+                                          return;
                                         }
-                                      } catch { /* ignore */ }
+                                        if (!data.generated_message?.body) {
+                                          setErrorState('El generador no devolvió un mensaje utilizable.');
+                                          return;
+                                        }
+                                        setAttackKits(prev => ({ ...prev, [p.id]: data }));
+                                      } catch (error: any) {
+                                        setErrorState('Error de conexión al generar el mensaje: ' + (error?.message || 'desconocido'));
+                                      } finally {
+                                        setGeneratingMessageIds(prev => ({ ...prev, [p.id]: false }));
+                                      }
                                     }}
                                   >
-                                    {attackKits[p.id] ? 'Regenerar mensaje IA' : 'Generar mensaje IA'}
+                                    {generatingMessageIds[p.id] ? 'Generando…' : attackKits[p.id] ? 'Regenerar mensaje IA' : 'Generar mensaje IA'}
                                   </button>
                                 </div>
                                 {attackKits[p.id] ? (
