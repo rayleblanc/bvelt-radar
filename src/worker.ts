@@ -10409,7 +10409,7 @@ export function evaluateFounderOutreachEligibility(
   if (["queued", "scheduled", "provider_unknown", "provider_required"].includes(state)) return { allowed: false, reason: "outreach_pending_or_held", nextTouch: 0 };
   if (lastReplyContent && String(lastReplyContent).trim()) return { allowed: false, reason: "reply_received", nextTouch: 0 };
   const touches = Math.max(0, Math.floor(Number(historicalTouchCount) || 0));
-  if (touches >= 3) return { allowed: false, reason: "three_touch_cap_reached", nextTouch: 0 };
+  if (touches >= 2) return { allowed: false, reason: "two_touch_cap_reached", nextTouch: 0 };
   const cooldown = Date.parse(String(cooldownUntil || ""));
   if (Number.isFinite(cooldown) && cooldown > now) return { allowed: false, reason: "cooldown_active", nextTouch: 0 };
   const contactStates = ["sent", "delivered", "opened", "clicked", "scheduled"];
@@ -10463,7 +10463,7 @@ export function shouldSendFounderFollowUp(status: string, lastContactAt: string 
   const age = now - parsed;
   if (age < 5 * 86400000 || age > 45 * 86400000) return false;
   const touch = Number(touchCount);
-  return Number.isFinite(touch) && touch >= 1 && touch < 3;
+  return Number.isFinite(touch) && touch >= 1 && touch < 2;
 }
 
 export function buildOutreachIdempotencyKey(tenantId: string, prospectId: string, sequenceId: string, touchCount: number): string {
