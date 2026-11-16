@@ -2195,8 +2195,8 @@ export default {
             updated_at = excluded.updated_at
         `).bind(
           tenantId,
-          1,
-          'TENANT',
+          contractVersion,
+          realm,
           profileId,
           businessId || profileId,
           profileSnapshotVersion,
@@ -2233,7 +2233,7 @@ export default {
 
         // Saving a profile must never launch discovery. Tenant discovery is
         // explicitly requested by the user or triggered by a recent app session.
-        return Response.json({ success: true, tenant_id: tenantId, realm: 'TENANT', contract_version: 1, profile_id: profileId, profile_snapshot_version: profileSnapshotVersion, correlation_id: correlationId, idempotency_key: idempotencyKey, run_id: null, message: "Tenant profile contract synchronized. Prospecting has not started." }, { headers: corsHeaders });
+        return Response.json({ success: true, tenant_id: tenantId, realm: 'TENANT', contract_version: contractVersion, profile_id: profileId, profile_snapshot_version: profileSnapshotVersion, correlation_id: correlationId, idempotency_key: idempotencyKey, run_id: null, message: "Tenant profile contract synchronized. Prospecting has not started." }, { headers: corsHeaders });
       }
 
       // 16a2. Explicit and activity-triggered Tenant prospecting.
