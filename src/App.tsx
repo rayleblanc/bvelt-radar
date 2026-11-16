@@ -2134,7 +2134,7 @@ const submitDecision = async (prospectId: string, action: string) => {
                       const websiteHref = getWebsiteUrl(p.website);
                       const messageBody = attackKits[p.id]?.generated_message?.body || p.draft_body || "";
                       const messageSubject = attackKits[p.id]?.generated_message?.subject || p.draft_subject || "";
-                      const emailRecipient = isValidEmailRecipient(p.email) ? p.email.trim() : null;
+                      const emailRecipient = p.email && isValidEmailRecipient(p.email) ? p.email.trim() : null;
 
                       return (
                         <div 

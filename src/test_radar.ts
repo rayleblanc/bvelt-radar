@@ -79,7 +79,7 @@ tests.push({
     const direct = toWhatsAppUrl("+1 416 555 0100", "Hello");
     assert(Boolean(direct && direct.startsWith("https://wa.me/14165550100?text=")), "Explicit international WhatsApp numbers must create direct links");
     assert(toWhatsAppUrl("416-555-0100", "Hello") === null, "National numbers must not receive a guessed WhatsApp country code");
-    assert(toWhatsAppUrl("001 416 555 0100", "Hello")?.startsWith("https://wa.me/14165550100"), "Explicit 00 international prefixes must work");
+    assert(Boolean(toWhatsAppUrl("001 416 555 0100", "Hello")?.startsWith("https://wa.me/14165550100")), "Explicit 00 international prefixes must work");
     assert(toSmsUrl("123", "Hello") === null && toTelUrl("123") === null, "Malformed numbers must not create SMS or dialer links");
   }
 });
