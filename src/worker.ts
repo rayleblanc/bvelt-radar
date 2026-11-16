@@ -1326,7 +1326,11 @@ export default {
         params.push(parseInt(limit, 10));
 
         const results = await env.RADAR_DB.prepare(queryStr).bind(...params).all();
-        return Response.json(results.results || [], { headers: corsHeaders });
+        const prospects = (results.results || []).map((prospect: any) => ({
+          ...prospect,
+          contactability: resolveProspectContactability(prospect)
+        }));
+        return Response.json(prospects, { headers: corsHeaders });
       }
 
       // 8b. Opportunity Intelligence Endpoints
