@@ -4,7 +4,7 @@ import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter
 import { DEFAULT_FOUNDER_MISSION, MissionConfig } from './worker';
 import { buildResendIdempotencyKey, buildBrandedEmailHtml, resolveBveltSender, inspectOutboundEmailAuth, normalizeOutreachBody } from './emailDispatcher';
 import { fetchPermitContractors } from './permitSources';
-import { pickTargets } from './geoFrontier';
+import { pickTargets, findPlace } from './geoFrontier';
 import { isOffIcpName, sanitizeEmail } from './emailSanitizer';
 import { learningCounterDelta, readScopedLearningStats, recordScopedLearningEvent } from './learningIntegrity';
 
@@ -288,6 +288,25 @@ tests.push({
       countries: []
     });
     assert(picks.length === 0, "GeoFrontier must not invent a trade when none is supplied");
+
+    assert(findPlace("London, England")?.country === "GB", "Supplemental UK gazetteer places must be resolvable");
+    assert(findPlace("Sydney, NSW")?.country === "AU", "Supplemental Australian gazetteer places must be resolvable");
+
+    const balanced = await pickTargets({} as any, {
+      tenantId: "founder",
+      trades: ["plumbing"],
+      count: 8,
+      countries: [],
+      priorityCountries: ["US", "CA", "GB", "AU"]
+    });
+    const countryCounts = balanced.reduce((counts: Record<string, number>, item) => {
+      counts[item.place.country] = (counts[item.place.country] || 0) + 1;
+      return counts;
+    }, {});
+    assert(balanced.length === 8, "Founder should fill the requested target count from the merged gazetteer");
+    for (const country of ["US", "CA", "GB", "AU"]) {
+      assert((countryCounts[country] || 0) >= 2, "Each primary market must receive two targets per 8-target selection: " + country);
+    }
   }
 });
 
