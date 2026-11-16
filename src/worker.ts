@@ -10240,7 +10240,7 @@ async function generateAICopy(
   env: Env,
   missionConfig?: MissionConfig,
   channel: "email" | "whatsapp" = "email"
-): Promise<{ subject: string; body: string }> {
+): Promise<{ subject: string; body: string; source: "gemini" | "groq" | "workers_ai" | "template" }> {
   const language = (missionConfig?.languages && missionConfig.languages[0]) || "en";
   const isSpanish = language.toLowerCase().startsWith("es");
   const outreachTouch = getOutreachTouch(prospect);
@@ -10249,6 +10249,7 @@ async function generateAICopy(
     : "";
   const isFollowUp = outreachTouch >= 2;
   const demoLink = "https://bvelt.app/";
+  const evidenceContext = buildProspectEvidenceContext(prospect);
 
   let tenantInfo: any = null;
   if (prospect.mode === 'tenant' && prospect.tenant_id) {
@@ -10274,7 +10275,7 @@ async function generateAICopy(
     const footer = buildLegalFooter(env);
     const fullBody = footer ? `${bodyBase}\n\n${footer}` : bodyBase;
 
-    return { subject, body: fullBody };
+    return { subject, body: fullBody, source: "template" };
   }
 
   let rawAngle = (prospect.bvelt_angle || prospect.bveltAngle || "missed_calls").toLowerCase().trim();
@@ -10294,8 +10295,8 @@ async function generateAICopy(
   } else {
     // Founder mode: evidence-first copy. No prospect-specific facts are supplied unless independently verified.
     angleFocus = isSpanish
-      ? "No hay hallazgos específicos verificados sobre este negocio. No afirmes que su web es lenta, que pierde llamadas, que tiene presupuestos abandonados ni que pierde ingresos. Pregunta de forma natural cómo hacen seguimiento cuando no pueden atender una llamada o queda un presupuesto pendiente."
-      : "No verified prospect-specific findings are available. Do not claim their website is slow, that they miss calls, have stale estimates, or lose revenue. Ask naturally how they follow up when they cannot answer a call or an estimate is left pending.";
+      ? "No hay hallazgos específicos verificados sobre este negocio. No afirmes que su web es lenta, que pierde llamadas, que pierde ingresos. Pregunta de forma natural cómo hacen seguimiento cuando no pueden atender una llamada o queda un presupuesto pendiente."
+      : "No verified prospect-specific findings are available. Do not claim their website is slow, that they miss calls, or lose revenue. Ask naturally how they follow up when they cannot answer a call or an estimate is left pending.";
   }
 
   const prompt = isSpanish ? `
@@ -10307,6 +10308,7 @@ async function generateAICopy(
     - Empresa: ${prospect.name}
     - Ubicación: ${prospect.city}
     - Trade: ${prospect.trade}
+    - Observed evidence / Evidencia observada (JSON): ${evidenceContext}
  
     Instrucciones del ángulo de prospección:
     ${angleFocus}
@@ -10315,8 +10317,8 @@ async function generateAICopy(
     1. Idioma: Español técnico y profesional.
     2. Longitud: 45 a 65 palabras en el primer contacto; 35 a 55 en seguimiento.
     3. Tono: Respetuoso, directo, mentalidad de emprendedor de guerrilla.
-    4. Explica el valor sin prometer resultados: "${tenantInfo ? `Bvelt ayuda a dar seguimiento a solicitudes y clientes.` : "Bvelt ayuda a negocios de servicios a organizar el seguimiento de consultas y presupuestos pendientes mediante los canales que ya tienen disponibles."}"
-    5. Primer contacto: pregunta si quiere recibir un ejemplo breve; no incluyas enlaces. Seguimiento: puedes incluir un único enlace simple a ${demoLink}.
+    4. Explica el valor sin prometer resultados: "${tenantInfo ? `Bvelt ayuda a dar seguimiento a solicitudes y clientes.` : "Bvelt ayuda a negocios de servicios a organizar el seguimiento de consultas de clientes mediante los canales que ya tienen disponibles."}"
+    5. Primer contacto: una sola pregunta sencilla y de baja presión; no solicites listas de presupuestos, inventarios de cotizaciones ni auditorías; no incluyas enlaces. Seguimiento: puedes incluir un único enlace simple a ${demoLink}.
     6. No inventes hechos, porcentajes, velocidad web, llamadas perdidas ni pérdidas de ingresos. No uses "auditoría gratis", "garantizado", "instantáneo" ni promesas de 60 segundos sin evidencia explícita. Sin emojis ni signos de exclamación. SIN FIRMA NI PIE DE PÁGINA (el sistema añade el legal).
     7. ${!tenantInfo && founderLine ? `FRASE FUNDADOR (úsala una vez, natural, no inventes otra biografía): "${founderLine}"` : "No inventes historia personal del fundador."}
     8. ${isFollowUp ? "Esto es SEGUIMIENTO toque #" + outreachTouch + " sin respuesta. Más corto, otro ángulo, sin culpar. Asunto sin Re: falso." : "Primer correo en frío."}
@@ -10330,6 +10332,7 @@ async function generateAICopy(
     - Business: ${prospect.name}
     - Location: ${prospect.city}
     - Trade: ${prospect.trade}
+    - Observed evidence / Evidencia observada (JSON): ${evidenceContext}
 
     Outreach Angle Instructions:
     ${angleFocus}
@@ -10337,8 +10340,8 @@ async function generateAICopy(
     RULES:
     1. Length: ${isFollowUp ? "35 to 55" : "45 to 65"} words. Contractor-friendly and concise.
     2. Tone: Respectful, direct, guerrilla entrepreneur mindset. Never beg. Never play for pity.
-    3. Explain value without promising outcomes: "${tenantInfo ? `Bvelt helps manage follow-up with enquiries and customers.` : "Bvelt helps service businesses organize follow-up for enquiries and pending estimates through the communication channels they already use."}"
-    4. First touch: ask whether a short example would be useful; include no URL. Follow-up: one plain-text link to ${demoLink} is allowed.
+    3. Explain value without promising outcomes: "${tenantInfo ? `Bvelt helps manage follow-up with enquiries and customers.` : "Bvelt helps service businesses organize follow-up for customer enquiries through the communication channels they already use."}"
+    4. First touch: ask one simple low-pressure question; do not request an estimate checklist, quote inventory, or audit; include no URL. Follow-up: one plain-text link to ${demoLink} is allowed.
     5. Never invent facts, percentages, site-speed measurements, missed calls, or lost revenue. Do not use "free audit", "guaranteed", "instant", or 60-second promises without explicit evidence. No emoji, hype, or exclamation marks. NO SIGNATURE OR FOOTER (system adds legal footer).
     6. ${!tenantInfo && founderLine ? `FOUNDER LINE (use once, natural English, do not invent a different bio): "${founderLine}"` : "Do not invent a personal founder story."}
     7. ${isFollowUp ? "This is FOLLOW-UP touch #" + outreachTouch + " after no reply. Different angle from a first cold email. Shorter. Do not guilt-trip. Subject must NOT start with Re: unless truly a thread. Mention you are checking in once, then offer the demo link again." : "This is the FIRST outreach email."}
@@ -10365,7 +10368,7 @@ async function generateAICopy(
         const res = await tryGemini(model, apiKey, prompt);
         if (res) {
           await commitBudget(env.RADAR_DB, tenantId, 'ai_units', 1);
-          return res;
+          return { subject: String(res.subject), body: String(res.body), source: "gemini" };
         }
       }
     }
@@ -10398,7 +10401,7 @@ async function generateAICopy(
               if (content.subject && content.body) {
                 console.log(`[Gemini Cascade] Success using Groq ${groqModel}`);
                 await commitBudget(env.RADAR_DB, tenantId, 'ai_units', 1);
-                return { subject: content.subject, body: content.body };
+                return { subject: content.subject, body: content.body, source: "groq" };
               }
             }
           } else {
@@ -10433,7 +10436,7 @@ async function generateAICopy(
           if (content.subject && content.body) {
             console.log(`[Gemini Cascade] Success using Workers AI backup`);
             await commitBudget(env.RADAR_DB, tenantId, 'ai_units', 1);
-            return { subject: String(content.subject), body: String(content.body) };
+            return { subject: String(content.subject), body: String(content.body), source: "workers_ai" };
           }
         }
       } catch (e: any) {
@@ -10447,7 +10450,8 @@ async function generateAICopy(
 
   // 4. Static High-Converting Template Fallback (always works offline)
   console.log(`[Gemini Cascade] All AI pipelines failed or budget exceeded. Reverting to deterministic backup template.`);
-  return getTradePsychologyFallback(prospect.name, prospect.trade, prospect.city, bveltAngle, language, prospect.phone, prospect.demo_token, prospect.signal_event, prospect.signal_area, env, prospect.signals_json || prospect.signals);
+  const fallback = getTradePsychologyFallback(prospect.name, prospect.trade, prospect.city, bveltAngle, language, prospect.phone, prospect.demo_token, prospect.signal_event, prospect.signal_area, env, prospect.signals_json || prospect.signals);
+  return { ...fallback, source: "template" };
 }
 
 /**
@@ -10602,7 +10606,7 @@ export function buildAttackKit(p: any): {
 
   // Product capability statement deliberately avoids SMS automation claims:
   // SMS is not an active Bvelt delivery channel in this release.
-  const valueProp = `Bvelt helps service businesses organize enquiries and pending estimates so follow-up is easier to manage.`;
+  const valueProp = `Bvelt helps service businesses organize customer enquiries so follow-up is easier to manage.`;
   subject = `${name} — a question about enquiry follow-up`;
   sms = `Hi ${firstName} — Rainer from Bvelt. ${question} ${valueProp} Would a short example be useful?`;
   emailBody = `Hi ${name} team,\n\n${question}\n\n${valueProp}\n\nWould a short example be useful?`;
