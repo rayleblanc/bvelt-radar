@@ -1,6 +1,6 @@
 declare const process: any;
 
-import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, resolveTenantBuyerSegments, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey, notifyOnce, isVerifiedDeliverableEmail, evaluateFounderOutreachEligibility, buildTechnicalAuditSnapshot, isEmailValidatedForOutreach, isCompletePostalAddress, sendTelegramWithRetry, extractEmailAddress, evaluateResearchEvidenceQuality, classifyReplyText, getTelegramApprovalFeedback, getManualSendPreflightError, buildScheduledRunId, getCurrentDaySenderCount, normalizeWhatsAppPhone, extractPhoneDigits, hasUsableContactChannel, hasEnrichableContactData, buildWhatsAppClickToChatUrl, buildWhatsAppOutreachBody, shouldUseManualWhatsAppFallback } from './worker';
+import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, resolveTenantBuyerSegments, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey, notifyOnce, isVerifiedDeliverableEmail, evaluateFounderOutreachEligibility, buildTechnicalAuditSnapshot, isEmailValidatedForOutreach, isCompletePostalAddress, sendTelegramWithRetry, extractEmailAddress, evaluateResearchEvidenceQuality, classifyReplyText, getTelegramApprovalFeedback, getManualSendPreflightError, resolveProspectContactability, buildProspectEvidenceContext, buildScheduledRunId, getCurrentDaySenderCount, normalizeWhatsAppPhone, extractPhoneDigits, hasUsableContactChannel, hasEnrichableContactData, buildWhatsAppClickToChatUrl, buildWhatsAppOutreachBody, shouldUseManualWhatsAppFallback } from './worker';
 import { DEFAULT_FOUNDER_MISSION, MissionConfig } from './worker';
 import { buildResendIdempotencyKey, buildBrandedEmailHtml, resolveBveltSender, inspectOutboundEmailAuth, normalizeOutreachBody } from './emailDispatcher';
 import { fetchPermitContractors } from './permitSources';
@@ -26,6 +26,38 @@ function assert(condition: boolean, message: string) {
     throw new Error(message);
   }
 }
+
+
+tests.push({
+  name: "Commercial prospect, contact availability and send authorization stay separate",
+  run: () => {
+    const none = resolveProspectContactability({ name: "Lead", website: null, phone: null, email: null });
+    assert(none.commercial_prospect && !none.contact_available && !none.send_authorized, "A commercial prospect can exist without a direct channel or send authorization");
+    const webOnly = resolveProspectContactability({ website: "https://northstarplumbing.com" });
+    assert(webOnly.channels.website && !webOnly.contact_available && !webOnly.channels.email && !webOnly.channels.phone, "A website is research context, not a message recipient");
+    const emailOnly = resolveProspectContactability({ email: "owner@northstarplumbing.com" });
+    assert(emailOnly.contact_available && emailOnly.channels.email && !emailOnly.channels.phone && !emailOnly.send_authorized, "Email availability is not permission to send");
+    const phoneOnly = resolveProspectContactability({ phone: "+1 416 234 5678" });
+    assert(phoneOnly.contact_available && phoneOnly.channels.phone && phoneOnly.channels.whatsapp_direct && !phoneOnly.send_authorized, "Phone availability is distinct from authorization");
+    const combined = resolveProspectContactability({ email: "owner@northstarplumbing.com", phone: "+1 416 234 5678", website: "northstarplumbing.com" });
+    assert(combined.channels.email && combined.channels.phone && combined.channels.whatsapp_direct && combined.channels.website, "All valid channels must be represented independently");
+  }
+});
+
+tests.push({
+  name: "AI prompt context includes structured signals and research provenance",
+  run: () => {
+    const context = buildProspectEvidenceContext({
+      name: "Northstar Plumbing", city: "Toronto", trade: "plumbing", source: "scrapling",
+      signals_json: JSON.stringify({
+        signals: { contact_form: true },
+        scrapling: { page_title: "Emergency Plumbing", contact_provenance: [{ type: "phone", source: "tel_link" }] }
+      })
+    });
+    assert(context.includes("contact_form") && context.includes("contact_provenance") && context.includes("tel_link"), "The prompt context must include observed signals and provenance");
+    assert(context.length <= 7000, "Evidence context must be bounded for provider quotas");
+  }
+});
 
 tests.push({
   name: "WhatsApp links use direct international chat or safe contact picker without claiming verification",
