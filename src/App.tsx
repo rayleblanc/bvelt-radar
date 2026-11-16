@@ -713,7 +713,7 @@ export default function App() {
   const recordProspectMessageEvent = async (prospectId: string, eventType: 'message_copied' | 'message_channel_opened', channel: string) => {
     try {
       await fetch(apiUrl + "/api/prospects/message-event", {
-        method: "POST", credentials: "include", headers: { "Content-Type": "application/json" },
+        method: "POST", credentials: "include", headers: { "Content-Type": "application/json", "X-Tenant-Id": selectedTenantId || "founder" },
         body: JSON.stringify({ prospect_id: prospectId, event_type: eventType, channel })
       });
     } catch { /* telemetry never blocks the user's action */ }
@@ -724,6 +724,14 @@ export default function App() {
     if (!value) return false;
     const link = toWhatsAppUrl(value, "");
     return Boolean(link && /^https:\/\/wa\.me\/\d{8,15}(?:\?|$)/i.test(link));
+  };
+  const getWebsiteUrl = (value?: string | null) => {
+    if (!value) return null;
+    try {
+      const raw = value.trim();
+      const parsed = new URL(/^https?:\/\//i.test(raw) ? raw : "https://" + raw);
+      return ["http:", "https:"].includes(parsed.protocol) && parsed.hostname ? parsed.toString() : null;
+    } catch { return null; }
   };
 
   // Copy proposal draft trigger
@@ -2119,6 +2127,7 @@ const submitDecision = async (prospectId: string, action: string) => {
                       const badge = getStatusBadge(p);
                       const signalsList = parseSignals(p);
                       const isExpanded = inspectedProspect?.id === p.id;
+                      const websiteHref = getWebsiteUrl(p.website);
 
                       return (
                         <div 
@@ -2259,9 +2268,9 @@ const submitDecision = async (prospectId: string, action: string) => {
                                 Llamar
                               </a>
                             )}
-                            {p.website && (
+                            {websiteHref && (
                               <a 
-                                href={`https://${p.website}`} 
+                                href={websiteHref} 
                                 target="_blank" 
                                 rel="noreferrer" 
                                 className="px-2.5 py-1 rounded-lg bg-slate-900 border border-slate-800 text-slate-400 hover:text-blue-400 flex items-center gap-1" 
@@ -2338,11 +2347,10 @@ const submitDecision = async (prospectId: string, action: string) => {
                                     type="button"
                                     className="text-[10px] text-indigo-400 font-bold"
                                     onClick={async () => {
-                                      if (attackKits[p.id]) return;
                                       try {
                                          const channel = isValidEmailRecipient(p.email) ? 'email' : 'whatsapp';
                                          const r = await fetch(`${apiUrl}/api/prospects/attack-kit`, {
-                                           method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+                                           method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': selectedTenantId || 'founder' },
                                            body: JSON.stringify({ prospect_id: p.id, channel })
                                          });
                                         if (r.ok) {
@@ -2382,7 +2390,7 @@ const submitDecision = async (prospectId: string, action: string) => {
                                         <p><span className="text-slate-500">SMS:</span> {attackKits[p.id].sms}</p>
                                         <p className="whitespace-pre-wrap"><span className="text-slate-500">Llamada:</span>{'\n'}{attackKits[p.id].call_script}</p>
                                         <p><span className="text-slate-500">Siguiente:</span> {attackKits[p.id].next_action}</p>
-                                        {p.phone && toWhatsAppUrl(p.phone, attackKits[p.id].sms || '') && (
+                                        {p.phone && hasDirectWhatsAppRecipient(p.phone) && toWhatsAppUrl(p.phone, attackKits[p.id].sms || '') && (
                                           <a
                                             href={toWhatsAppUrl(p.phone, attackKits[p.id].sms || '')!}
                                             target="_blank"
