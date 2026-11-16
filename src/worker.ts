@@ -11,6 +11,7 @@
  * - D1 Feedback loop & Outcome learning engine
  */
 
+import { buildRadarEvidenceProvenance } from './evidenceProvenance.js';
 import { getAlerts, tradeForEvent, eventAppliesToTrade, WeatherAlert } from './weatherSignals';
 import { dispatchEmail, normalizeOutreachBody, BVELT_SITE, EmailDispatchResult, inspectOutboundEmailAuth } from './emailDispatcher';
 import { auditDomainSecurityAndMx, auditWebsitePerformance, auditCityWeatherEmergency } from './openAudits';
@@ -3134,17 +3135,18 @@ export default {
           } else {
             // 4. Insert into source_evidence
             try {
-              const sourceLabel = new URL(String(sourceUrl)).hostname.toLowerCase().replace(/^www\\./, '');
-              const realm = mode === 'tenant' ? 'TENANT' : 'FOUNDER';
-              const unit = typeof item.unit === 'string' ? item.unit.trim().slice(0, 40) || null : null;
-              const period = item.period && typeof item.period === 'object' ? {
-                start: typeof item.period.start === 'string' && Number.isFinite(Date.parse(item.period.start)) ? item.period.start : null,
-                end: typeof item.period.end === 'string' && Number.isFinite(Date.parse(item.period.end)) ? item.period.end : null,
-              } : null;
-              const sampleSize = Number.isInteger(item.sample_size) && item.sample_size >= 0 ? item.sample_size : null;
-              const limitations = Array.isArray(item.limitations)
-                ? item.limitations.filter((v: any) => typeof v === 'string').slice(0, 20).map((v: string) => v.slice(0, 240))
-                : [];
+              const provenance = buildRadarEvidenceProvenance({
+                mode,
+                tenantId,
+                prospectId,
+                sourceId,
+                sourceUrl,
+                observedAt,
+                fetchedAt: now,
+                profileSnapshotVersion,
+                confidence,
+                item,
+              });
               await env.RADAR_DB.prepare(`
                 INSERT INTO source_evidence (
                   id, run_id, mode, realm, tenant_id, prospect_id, subject_id, source_id, source_label, source_url,
@@ -3156,30 +3158,30 @@ export default {
                 evidenceId,
                 runId,
                 mode,
-                realm,
+                provenance.realm,
                 tenantId,
                 prospectId,
-                prospectId,
+                provenance.subject_id,
                 sourceId,
-                sourceLabel,
+                provenance.source_label,
                 sourceUrl,
                 evidenceType,
-                'DECLARED',
-                'WEBSITE_SCRAPE',
+                provenance.evidence_status,
+                provenance.method,
                 evidenceJson,
                 contentHash,
                 extractorVersion,
-                confidence,
-                unit,
-                period ? JSON.stringify(period) : null,
-                sampleSize,
-                observedAt,
-                now,
-                null,
-                JSON.stringify(limitations),
-                null,
-                profileSnapshotVersion,
-                1,
+                provenance.confidence,
+                provenance.unit,
+                provenance.period_json,
+                provenance.sample_size,
+                provenance.observed_at,
+                provenance.fetched_at,
+                provenance.valid_until,
+                provenance.limitations_json,
+                provenance.usage_policy_json,
+                provenance.profile_snapshot_version,
+                provenance.schema_version,
                 now
               ).run();
               insertedCount++;
