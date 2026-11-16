@@ -4399,6 +4399,8 @@ async function recordManualWhatsAppSent(prospectId: string, env: Env): Promise<{
   await db.prepare(
     "INSERT INTO prospect_events (prospect_id, event_type, content, created_at) VALUES (?, 'whatsapp_manual_sent', ?, ?)"
   ).bind(prospectId, "Founder confirmed manual WhatsApp message sent; 30-day phone cooldown", now).run();
+  await db.prepare("INSERT INTO prospect_events (id, prospect_id, event_type, content, created_at) VALUES (?, ?, ?, ?, ?)")
+    .bind("msg_" + crypto.randomUUID(), prospectId, "message_send_confirmed", JSON.stringify({ channel: "whatsapp", confirmation: "founder_manual" }), now).run();
   await db.prepare(
     "INSERT OR REPLACE INTO suppression (key, reason, created_at) VALUES (?, ?, ?)"
   ).bind(phoneKey, `Contacted on ${now} (cooldown until ${cooldownUntil})`, now).run();
@@ -4494,7 +4496,7 @@ async function handleDecision(
         return Response.json({ success: false, blocked: true, reason: "already_processed_for_this_touch", id }, { status: 409, headers });
       }
       const draftSubject = prospect.draft_subject || `Bvelt - Pregunta sobre llamadas de clientes (${prospect.name || 'su negocio'})`;
-      const draftBody = prospect.draft_body || `Hola equipo de ${prospect.name},\n\nSoy Rainer, fundador de Bvelt. Ayudo a negocios de servicios a dar seguimiento a llamadas no atendidas y presupuestos pendientes.\n\n¿Tienen hoy un proceso para contactar a esas personas después? Si le sirve, puedo enviarle un ejemplo breve.`;
+      const draftBody = prospect.draft_body || `Hola equipo de ${prospect.name},\n\nSoy Rainer, fundador de Bvelt. Ayudo a negocios de servicios a dar seguimiento a consultas de clientes que necesitan seguimiento.\n\n¿Tienen hoy un proceso para contactar a esas personas después? Si le sirve, puedo enviarle un ejemplo breve.`;
       const safeBody = typeof normalizeOutreachBody === 'function' ? normalizeOutreachBody(draftBody) : draftBody;
 
       // Compliance Hard Gate: missing sender postal address MUST block outbound dispatch
@@ -10332,8 +10334,8 @@ async function generateAICopy(
         ? `Hola equipo de ${prospect.name}. Vi el aviso de ${prospect.signal_event} en ${prospect.signal_area}. ¿Cómo están respondiendo a clientes que no logran comunicarse durante la interrupción? Si les sirve, puedo compartir un ejemplo breve de seguimiento.`
         : `Hi ${prospect.name} team. I saw the ${prospect.signal_event} notice for ${prospect.signal_area}. How are you helping customers who cannot get through during the disruption? I can share a short follow-up example if useful.`
       : isSpanish
-        ? `Hola equipo de ${prospect.name}, vi el aviso de ${prospect.signal_event} para ${prospect.signal_area}. Soy Rainer, fundador de Bvelt. Ayudo a negocios de servicios a dar seguimiento a llamadas no atendidas y presupuestos pendientes. ¿Tienen un proceso para contactar a quienes no logran comunicarse durante una interrupción? Si le sirve, puedo enviarle un ejemplo breve.`
-        : `Hi ${prospect.name} team, I saw the ${prospect.signal_event} notice for ${prospect.signal_area}. I'm Rainer, founder of Bvelt. I work on follow-up for service businesses when calls go unanswered or estimates remain pending. Do you have a process for reaching people who could not get through during an interruption? I can send a short example if useful.`;
+        ? `Hola equipo de ${prospect.name}, vi el aviso de ${prospect.signal_event} para ${prospect.signal_area}. Soy Rainer, fundador de Bvelt. Ayudo a negocios de servicios a dar seguimiento a consultas de clientes que necesitan seguimiento. ¿Tienen un proceso para contactar a quienes no logran comunicarse durante una interrupción? Si le sirve, puedo enviarle un ejemplo breve.`
+        : `Hi ${prospect.name} team, I saw the ${prospect.signal_event} notice for ${prospect.signal_area}. I'm Rainer, founder of Bvelt. I work on follow-up for service businesses when customer enquiries need follow-up. Do you have a process for reaching people who could not get through during an interruption? I can send a short example if useful.`;
 
     const footer = buildLegalFooter(env);
     const fullBody = footer ? `${bodyBase}\n\n${footer}` : bodyBase;
@@ -10724,7 +10726,7 @@ function getTradePsychologyFallback(
     ? `Una pregunta sobre seguimiento de clientes en ${name}`
     : `A question about customer follow-up at ${name}`;
   let bodyBase = isSpanish
-    ? `Hola equipo de ${name},\n\nSoy Rainer, fundador de Bvelt. Ayudo a negocios de servicios como ${cTrade} a dar seguimiento a llamadas no atendidas y presupuestos pendientes.\n\n¿Tienen hoy un proceso para contactar a esas personas después? Si le sirve, puedo enviarle un ejemplo breve.`
+    ? `Hola equipo de ${name},\n\nSoy Rainer, fundador de Bvelt. Ayudo a negocios de servicios como ${cTrade} a dar seguimiento a consultas de clientes que necesitan seguimiento.\n\n¿Tienen hoy un proceso para contactar a esas personas después? Si le sirve, puedo enviarle un ejemplo breve.`
     : `Hi ${name} team,\n\nI'm Rainer, founder of Bvelt. I work on a tool that helps service businesses like yours follow up on calls they could not answer and estimates that are still pending.\n\nDo you have a process for reaching those people afterward? If useful, I can send a short example.`;
 
   if (signalEvent && signalArea) {
@@ -10732,8 +10734,8 @@ function getTradePsychologyFallback(
       ? `Consulta para ${name} sobre ${signalEvent}`
       : `A question for ${name} about ${signalEvent}`;
     bodyBase = isSpanish
-      ? `Hola equipo de ${name}, vi el aviso de ${signalEvent} relacionado con ${signalArea}. Soy Rainer, fundador de Bvelt. Ayudo a negocios de servicios a dar seguimiento a llamadas no atendidas y presupuestos pendientes. ¿Tienen un proceso para contactar a quienes no logran comunicarse durante una interrupción? Si le sirve, puedo enviarle un ejemplo breve.`
-      : `Hi ${name} team, I saw the ${signalEvent} notice for ${signalArea}. I'm Rainer, founder of Bvelt. I work on follow-up for service businesses when calls go unanswered or estimates remain pending. Do you have a process for reaching people who could not get through during an interruption? I can send a short example if useful.`;
+      ? `Hola equipo de ${name}, vi el aviso de ${signalEvent} relacionado con ${signalArea}. Soy Rainer, fundador de Bvelt. Ayudo a negocios de servicios a dar seguimiento a consultas de clientes que necesitan seguimiento. ¿Tienen un proceso para contactar a quienes no logran comunicarse durante una interrupción? Si le sirve, puedo enviarle un ejemplo breve.`
+      : `Hi ${name} team, I saw the ${signalEvent} notice for ${signalArea}. I'm Rainer, founder of Bvelt. I work on follow-up for service businesses when customer enquiries need follow-up. Do you have a process for reaching people who could not get through during an interruption? I can send a short example if useful.`;
   } else if (signals.no_own_website) {
     subject = isSpanish
       ? `Una pregunta sobre cómo recibe consultas ${name}`
@@ -12206,6 +12208,8 @@ export async function sendOrQueueOutreach(
         SET status = 'sent', outcome = 'sent', dispatch_provider = ?, dispatch_message_id = ?, dispatch_status = 'dispatched', last_contact_at = ?, updated_at = ?
         WHERE id = ?
       `).bind(dispatch.provider, dispatch.messageId, timestamp, timestamp, prospect.id).run();
+      await env.RADAR_DB.prepare("INSERT INTO prospect_events (id, prospect_id, event_type, content, created_at) VALUES (?, ?, ?, ?, ?)")
+        .bind("msg_" + crypto.randomUUID(), prospect.id, "message_send_confirmed", JSON.stringify({ channel: "email", provider: dispatch.provider, provider_message_id: dispatch.messageId || null }), timestamp).run();
 
       await env.RADAR_DB.prepare(`
         UPDATE outreach_idempotency
