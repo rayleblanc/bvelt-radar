@@ -10573,7 +10573,6 @@ export function buildAttackKit(p: any): {
   const name = String(p.name || "there");
   const city = String(p.city || "");
   const isTenantLead = p.mode === 'tenant' || (p.tenant_id && p.tenant_id !== 'founder');
-  const phone = p.phone ? String(p.phone) : null;
 
   // 1. Off-ICP and Trade Coherence Hard Gate (Barbers, Salons, etc. CANNOT get SMS)
   const coherence = checkTradeCoherence(
@@ -10621,7 +10620,8 @@ export function buildAttackKit(p: any): {
   if (isTenantLead) {
     const whyTenant = name + " en " + city + " (" + tradeLabel + "): comprador B2B potencial según el nicho y la ubicación configurados para este Tenant.";
     const callTenant = "- Presentar únicamente los servicios configurados por el Tenant.\n- Preguntar si tienen necesidades próximas relacionadas con " + tradeLabel + ".\n- No prometer disponibilidad, tiempos de respuesta, garantías ni precios no verificados.\n- Registrar el resultado real después del contacto.";
-    const nextTenant = p.email || phone
+    const contactAvailable = resolveProspectContactability(p).contact_available;
+    const nextTenant = contactAvailable
       ? "Generar y revisar el mensaje IA; abrir solo un canal con destinatario disponible."
       : p.website
         ? "Enriquecer un destinatario; la web es contexto, no un canal directo."
