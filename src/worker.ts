@@ -5423,8 +5423,8 @@ async function ensureOpportunitiesSchema(db: D1Database): Promise<void> {
     try { await db.prepare(`ALTER TABLE ${table} ADD COLUMN ${column}`).run(); } catch { /* already present */ }
   }
 
-  // Backfill old column names when they exist; these statements are intentionally
-  // isolated because fresh migration-0022 tables do not contain legacy columns.
+  // Backfill old column names when they exist; fresh migration-0022 tables do not
+  // contain the legacy columns, so each compatibility update is isolated.
   for (const sql of [
     "UPDATE opportunity_signals SET observed_evidence = COALESCE(NULLIF(observed_evidence, ''), signal_value, '')",
     "UPDATE opportunity_actions SET action_type = COALESCE(NULLIF(action_type, ''), action, 'outreach_draft'), details_json = COALESCE(details_json, payload_json, reason), proposed_at = COALESCE(proposed_at, created_at, datetime('now'))",
@@ -5658,11 +5658,6 @@ export async function reconcileResendDeliveries(env: Env): Promise<{ checked: nu
 
       if (ev === "bounced" || ev === "complained") {
         const email = String(p.email || "").trim().toLowerCase();
-        const logStatus = ev === "complained" ? "complained" : "bounced";
-        await env.RADAR_DB.prepare("UPDATE email_dispatch_logs SET status = ? WHERE message_id = ?")
-          .bind(logStatus, p.dispatch_message_id).run();
-        await recordNegativeSignal(env.RADAR_DB, ev === "complained" ? "complaint" : "bounce",
-          `Resend reconciliation: ${ev} for ${p.id}`);
         await env.RADAR_DB.prepare(
           "UPDATE prospects SET status = ?, outcome = ?, dispatch_status = ?, updated_at = ? WHERE id = ?"
         ).bind(ev === "complained" ? "suppressed" : "bounced", ev, ev, now, p.id).run();
@@ -5672,8 +5667,6 @@ export async function reconcileResendDeliveries(env: Env): Promise<{ checked: nu
         }
         if (ev === "bounced") out.bounced++; else out.complained++;
       } else if (["delivered", "opened", "clicked"].includes(ev)) {
-        await env.RADAR_DB.prepare("UPDATE email_dispatch_logs SET status = ? WHERE message_id = ?")
-          .bind(ev, p.dispatch_message_id).run();
         await env.RADAR_DB.prepare("UPDATE prospects SET dispatch_status = ?, updated_at = ? WHERE id = ?")
           .bind(ev, now, p.id).run();
       }
@@ -5835,8 +5828,8 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
     // Contactability first (email > phone > real website) — founder lives or dies by outreach
     const contactScore = (x: any) => {
       let s = 0;
-      if (sanitizeEmail(String(x.email || "")).valid) s += 8;
-      if (extractPhoneDigits(x.phone)) s += 4;
+      if (x.email && String(x.email).includes('@')) s += 8;
+      if (x.phone && String(x.phone).replace(/\D/g, '').length >= 7) s += 4;
       if (x.website && isRealWebsite(String(x.website))) s += 2;
       return s;
     };
@@ -5847,8 +5840,7 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
     return 0;
   });
 
-  // Raise the per-city ceiling modestly; the shared daily discovery budget remains authoritative.
-  const perJobCap = 5;
+  const perJobCap = 3;
   // BUG CORREGIDO: antes se cortaba la lista a los 3 primeros ANTES de filtrar duplicados. Cuando esos 3 ya eran
   // prospectos (lo normal desde la segunda corrida de una ciudad+oficio), el job daba 0 leads y los demás
   // candidatos nunca se miraban. Ahora se revisan hasta maxScan candidatos y se corta al llegar a perJobCap aceptados.
@@ -5857,7 +5849,6 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
   const bounded = ranked.slice(0, maxScan);
   let enqueuedEnrich = 0;
   let filteredCount = 0;
-  let contactlessFilteredCount = 0;
   let aiClassifyCalls = 0;
 
   for (const candidate of bounded) {
@@ -5894,17 +5885,7 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
       continue;
     }
 
-    // Founder budget is for actionable prospects, not map-only POIs. A real
-    // website is enough to attempt scraping/Hunter; a valid phone supports the
-    // reviewed WhatsApp path; a valid email supports email enrichment.
-    if (job.mode !== "tenant" && !hasEnrichableContactData(candidate.email, candidate.phone, candidate.website)) {
-      contactlessFilteredCount++;
-      filteredCount++;
-      console.log(`[Contact Gate: Skipped] "${candidate.name}" has no valid email, phone, or real website; discovery unit preserved.`);
-      continue;
-    }
-
-    // Atomically reserve a discovery unit only after the contactability gate.
+    // Atomically reserve a discovery unit before processing the candidate
     const reserved = await reserveBudget(env.RADAR_DB, tenantId, 'discovery_units', 1);
     if (!reserved) {
       console.log(`[Job: discovery] Failed to reserve discovery unit. Budget exhausted for tenant: ${tenantId}`);
@@ -6126,8 +6107,7 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
   try {
     diagnostics.discovered_raw = scraped.length;
     diagnostics.filtered = (scraped.length - bounded.length) + filteredCount;
-    diagnostics.contactless_filtered = contactlessFilteredCount;
-    diagnostics.reason = `Discovered ${scraped.length} raw, ${enqueuedEnrich} enqueued for enrichment, ${diagnostics.filtered} filtered (${contactlessFilteredCount} without usable contact data)`;
+    diagnostics.reason = `Discovered ${scraped.length} raw, ${enqueuedEnrich} enqueued for enrichment, ${diagnostics.filtered} filtered`;
 
     const existingRun = await env.RADAR_DB.prepare("SELECT errors_json FROM runs WHERE id = ?").bind(job.run_id).first() as any;
     let errorsArr: any[] = [];
@@ -7240,10 +7220,8 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
   const isElite = (scoreVal >= 80 && confVal >= 75) || (scoreVal >= 80 && !prospect.confidence_score);
   const isStrongAuto = scoreVal >= autoMinScore && Boolean(prospect.email);
   const autoFlag = String(env.FOUNDER_AUTO_OUTREACH !== undefined && env.FOUNDER_AUTO_OUTREACH !== "" ? env.FOUNDER_AUTO_OUTREACH : "true").toLowerCase();
-  const outreachPaused = ["true", "1", "yes"].includes(String(env.RADAR_OUTREACH_PAUSE || "").trim().toLowerCase());
   const isAutoOutreachEnabled =
     job.mode === "founder" &&
-    !outreachPaused &&
     (autoFlag === "true" || autoFlag === "1" || autoFlag === "yes") &&
     (isElite || isStrongAuto);
 
@@ -9245,7 +9223,6 @@ export interface DiscoveryDiagnostics {
   discovered_raw: number;
   filtered: number;
   viable_candidates?: number;
-  contactless_filtered?: number;
   reason: string;
   permits_found?: number;
   geoapify_status?: string;
@@ -9527,7 +9504,7 @@ export async function fetchLocalBusinessesWithDiagnostics(
     let count = 0;
     for (const item of items || []) {
       const name = String(item?.name || "").trim();
-      if (!name || /example\\.com/i.test(String(item.email || "") + " " + String(item.website || ""))) continue;
+      if (!name || /example\.com/i.test(String(item.email || "") + " " + String(item.website || ""))) continue;
       const candidateTrade = String(item.trade || trade);
       const coherence = checkTradeCoherence(name, candidateTrade, item.website, JSON.stringify(item), mode);
       if (
@@ -9640,7 +9617,38 @@ export async function fetchLocalBusinessesWithDiagnostics(
         knownPlace.lon + dLon
       ]
     };
-    nominatimStatus = `local_bbox r=${r  // Evaluate source coverage by unique, ICP-coherent and contactable businesses,
+    nominatimStatus = `local_bbox r=${r.toFixed(1)}km [${nominatimGeo.bbox.map(n => n.toFixed(3)).join(", ")}]`;
+  } else {
+    nominatimGeo = await fetchNominatimGeocoding(city);
+    nominatimStatus = nominatimGeo ? `resolved_bbox [${nominatimGeo.bbox.join(", ")}]` : "geocoding_fallback";
+  }
+
+  // 1.5 Municipal Permit Contractors Lookup (real-time building permits)
+  let permitCandidates: any[] = [];
+  try {
+    const permitContractors = await fetchPermitContractors(city, trade);
+    if (permitContractors && permitContractors.length > 0) {
+      permitCandidates = permitContractors.map((p: any) => ({
+        name: p.name,
+        phone: p.phone,
+        city: p.city || city,
+        website: null,
+        email: null,
+        source: "permits" as const,
+        permits_90d: p.permits_90d
+      }));
+    }
+  } catch (e) {
+    permitCandidates = [];
+  }
+  const permitsFound = permitCandidates.length;
+
+  // 2. Overpass Mirror Cascade
+  const overpassRes = await fetchOverpassBusinesses(city, trade, nominatimGeo, customOsmTags);
+  overpassStatus = overpassRes.status;
+  rawBusinesses.push(...overpassRes.businesses);
+
+  // Evaluate source coverage by unique, ICP-coherent and contactable businesses,
   // not raw map rows. A city can return 60 OSM objects but only 0-3 actionable leads.
   const targetPool = mode === 'tenant' ? 40 : 28;
   let viableCount = countViableCandidates([...permitCandidates, ...rawBusinesses]);
@@ -9655,8 +9663,8 @@ export async function fetchLocalBusinessesWithDiagnostics(
     const geoItems = (geoRes.businesses || []).filter((b: any) => {
       if (mode === 'tenant') return true;
       const n = String(b.name || '').toLowerCase();
-      if (/\\b(hotel|motel|resort|inn)\\b/i.test(n) && !/plumb|hvac|electric|roof|landscap|clean|pest/i.test(trade)) return false;
-      if (/\\b(restaurant|cafe|bar|grill)\\b/i.test(n) && !/clean|pest|hvac|plumb/i.test(trade)) return false;
+      if (/\b(hotel|motel|resort|inn)\b/i.test(n) && !/plumb|hvac|electric|roof|landscap|clean|pest/i.test(trade)) return false;
+      if (/\b(restaurant|cafe|bar|grill)\b/i.test(n) && !/clean|pest|hvac|plumb/i.test(trade)) return false;
       return true;
     });
     rawBusinesses.push(...geoItems);
@@ -9710,34 +9718,6 @@ export async function fetchLocalBusinessesWithDiagnostics(
     nominatimPoiStatus = nom.status;
     rawBusinesses.push(...nom.businesses);
     viableCount = countViableCandidates([...permitCandidates, ...rawBusinesses]);
-  }
-
--based text search worldwide
-  let photonStatus = "unattempted";
-  if (rawBusinesses.length < targetPool) {
-    const ph = await fetchPhotonBusinesses(city, trade);
-    photonStatus = ph.status;
-    rawBusinesses.push(...ph.businesses);
-  }
-
-  // 3. BizData — no key; still useful when OSM thin in US metros
-  const bizDataExplicitlyOff = env.ENABLE_BIZDATA === "0" || env.ENABLE_BIZDATA === "false";
-  if (rawBusinesses.length < Math.min(12, targetPool) && !bizDataExplicitlyOff) {
-    const bizDataRes = await fetchBizDataBusinesses(city, trade);
-    bizdataStatus = bizDataRes.status;
-    rawBusinesses.push(...bizDataRes.businesses);
-  } else {
-    bizdataStatus = rawBusinesses.length >= 12
-      ? `skipped (have ${rawBusinesses.length} results)`
-      : "disabled (ENABLE_BIZDATA=0)";
-  }
-
-  // 3.5 Nominatim POI text search — last resort only (fair-use 1 req/s)
-  let nominatimPoiStatus = "skipped";
-  if (rawBusinesses.length < 6) {
-    const nom = await fetchNominatimPoiBusinesses(city, trade);
-    nominatimPoiStatus = nom.status;
-    rawBusinesses.push(...nom.businesses);
   }
 
   // Deduplicate: permit candidates go first
@@ -12776,17 +12756,6 @@ function isRealWebsite(url: string): boolean {
   } catch {
     return false;
   }
-}
-
-export function hasEnrichableContactData(
-  email: string | null | undefined,
-  phone: string | null | undefined,
-  website: string | null | undefined
-): boolean {
-  const validEmail = sanitizeEmail(String(email || "")).valid;
-  const validPhone = !!extractPhoneDigits(phone);
-  const realWebsite = isRealWebsite(String(website || ""));
-  return validEmail || validPhone || realWebsite;
 }
 
 function getDomain(url: string): string | null {
