@@ -4239,6 +4239,56 @@ export function getManualSendPreflightError(prospect: any): string | null {
   return parsed.valid && parsed.email ? null : "valid_email_required";
 }
 
+export function resolveProspectContactability(prospect: any): {
+  commercial_prospect: boolean;
+  contact_available: boolean;
+  channels: { email: boolean; phone: boolean; whatsapp_direct: boolean; website: boolean };
+  send_authorized: boolean;
+} {
+  const email = sanitizeEmail(prospect?.email);
+  const phoneDigits = extractPhoneDigits(prospect?.phone);
+  const whatsappDirect = Boolean(normalizeWhatsAppPhone(prospect?.phone));
+  let website = false;
+  try {
+    const raw = String(prospect?.website || "").trim();
+    const parsed = new URL(/^https?:\/\//i.test(raw) ? raw : "https://" + raw);
+    website = ["http:", "https:"].includes(parsed.protocol) && !!parsed.hostname && !(/[\s<>]/.test(raw));
+  } catch { website = false; }
+  const emailAvailable = Boolean(email.valid && email.email);
+  const phoneAvailable = Boolean(phoneDigits);
+  return {
+    commercial_prospect: true,
+    contact_available: emailAvailable || phoneAvailable,
+    channels: { email: emailAvailable, phone: phoneAvailable, whatsapp_direct: whatsappDirect, website },
+    send_authorized: false
+  };
+}
+
+export function buildProspectEvidenceContext(prospect: any): string {
+  const parse = (value: any): any => {
+    if (!value) return {};
+    if (typeof value !== "string") return value;
+    try { return JSON.parse(value); } catch { return { raw_observation: value.slice(0, 1200) }; }
+  };
+  const signals = parse(prospect?.signals_json || prospect?.signals || {});
+  const evidence = {
+    business: {
+      name: prospect?.name || null, city: prospect?.city || null, trade: prospect?.trade || null,
+      website: prospect?.website || null, phone: prospect?.phone || null, email: prospect?.email || null,
+      address: prospect?.address || null, source: prospect?.source || null
+    },
+    declared_angle: prospect?.bvelt_angle || prospect?.angle || null,
+    score_breakdown: parse(prospect?.score_breakdown || {}),
+    why_now: parse(prospect?.why_now_json || {}),
+    signals,
+    research: parse(prospect?.research_json || prospect?.research || {}),
+    website_evidence: parse(prospect?.website_evidence_json || prospect?.website_evidence || {}),
+    opportunity_signals: parse(prospect?.opportunity_signals_json || prospect?.opportunity_signals || {})
+  };
+  return JSON.stringify(evidence).slice(0, 7000);
+}
+
+
 async function recordManualWhatsAppConfirmed(prospectId: string, env: Env): Promise<{ success: boolean; reason: string }> {
   const db = env.RADAR_DB;
   const prospect = await db.prepare("SELECT * FROM prospects WHERE id = ? AND COALESCE(tenant_id,'founder') = 'founder'")
