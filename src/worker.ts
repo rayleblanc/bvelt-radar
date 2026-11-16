@@ -10357,7 +10357,7 @@ export function buildOutreachIdempotencyKey(tenantId: string, prospectId: string
   return `idempotency:${tenantId}:${prospectId}:${sequenceId}:touch:${touch}`;
 }
 
-async function generateAICopy(
+export async function generateAICopy(
   prospect: any, 
   variantId: string, 
   env: Env,
@@ -10787,8 +10787,8 @@ function getTradePsychologyFallback(
     ? `Una pregunta sobre seguimiento de clientes en ${name}`
     : `A question about customer follow-up at ${name}`;
   let bodyBase = isSpanish
-    ? `Hola equipo de ${name},\\n\\nSoy Rainer, fundador de Bvelt. Estoy creando una herramienta para ayudar a negocios de servicios como el suyo a organizar el seguimiento de consultas de clientes.\\n\\n¿Cómo retoman hoy una consulta cuando no pueden atenderla en ese momento? Si le sirve, puedo compartir un ejemplo breve.`
-    : `Hi ${name} team,\\n\\nI'm Rainer, founder of Bvelt. I'm building a tool to help service businesses like yours organize follow-up for customer enquiries.\\n\\nHow do you currently pick up an enquiry when the team cannot respond straight away? If useful, I can share a short example.`;
+    ? `Hola equipo de ${name},\n\nSoy Rainer, fundador de Bvelt. Estoy creando una herramienta para ayudar a negocios de servicios como el suyo a organizar el seguimiento de consultas de clientes.\n\n¿Cómo retoman hoy una consulta cuando no pueden atenderla en ese momento? Si le sirve, puedo compartir un ejemplo breve.`
+    : `Hi ${name} team,\n\nI'm Rainer, founder of Bvelt. I'm building a tool to help service businesses like yours organize follow-up for customer enquiries.\n\nHow do you currently pick up an enquiry when the team cannot respond straight away? If useful, I can share a short example.`;
 
   if (signalEvent && signalArea) {
     subject = isSpanish

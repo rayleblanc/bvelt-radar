@@ -2570,6 +2570,25 @@ tests.push({
       rejected = String(error?.message || error).includes("tenant_configuration_missing");
     }
     assert(rejected, "Missing Tenant config must fail closed instead of using Founder/Bvelt messaging");
+
+    const tenantConfig = {
+      tenant_id: "tenant_alpha", tenant_name: "Apex Roofing", industry: "Commercial Roofing",
+      niche: "property_management", services_json: JSON.stringify(["Commercial roof maintenance", "Leak repair"]),
+      service_areas_json: JSON.stringify(["Tampa Bay"]), subniches_json: "[]", cities_json: "[]",
+      regions_json: "[]", countries_json: '["US"]', icp_description: "Commercial property managers",
+      icp_keywords_json: "[]", campaign_goal: "property maintenance contracts", messaging_angle: "service reliability",
+      allowed_markets_json: '["US"]'
+    };
+    const tenantEnv: any = {
+      RADAR_DB: { prepare: () => ({ bind: () => ({ first: async () => tenantConfig, run: async () => ({ success: true }) }) }) }
+    };
+    const tenantMessage = await generateAICopy(
+      { id: "tenant_p1", mode: "tenant", tenant_id: "tenant_alpha", name: "Downtown Property Group", city: "Tampa Bay", trade: "property_management" },
+      "tenant_b2b_service", tenantEnv, { languages: ["en"] } as any, "email"
+    );
+    assert(tenantMessage.source === "template", "No-provider fallback must be labelled as a template, not AI");
+    assert(tenantMessage.body.includes("Apex Roofing") && tenantMessage.body.includes("Commercial roof maintenance"), "Tenant fallback must use the configured tenant identity and services");
+    assert(!/Bvelt|missed calls|pending estimates/i.test(tenantMessage.body), "Tenant fallback must never pitch Bvelt or inherit Founder pain claims");
   }
 });
 
