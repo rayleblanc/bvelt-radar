@@ -7295,12 +7295,13 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
       await commitBudget(env.RADAR_DB, "founder", "finalize_units", 1);
     } catch (error: any) {
       await releaseBudget(env.RADAR_DB, "founder", "finalize_units", 1);
-      console.warn("[WhatsApp Draft] AI copy failed; using deterministic fallback:", error?.message || error);
-      draft = getTradePsychologyFallback(
-        prospect.name, prospect.trade, prospect.city, prospect.variant_id || "missed_calls",
-        (missionConfig.languages && missionConfig.languages[0]) || "en",
-        prospect.phone, prospect.demo_token, prospect.signal_event, prospect.signal_area, env, prospect.signals_json
-      );
+      const reason = String(error?.message || error || "message_generation_failed").slice(0, 180);
+      console.error("[WhatsApp Draft] Shared message generator failed; manual contact remains blocked:", reason);
+      await env.RADAR_DB.prepare("UPDATE prospects SET status = 'hold', outcome = 'whatsapp_copy_generation_failed', updated_at = ? WHERE id = ?")
+        .bind(new Date().toISOString(), prospect.id).run();
+      await notifyOnce(env, `whatsapp_copy_failed_${prospect.id}`,
+        `<b>⏸️ WhatsApp en HOLD</b>\n<b>Negocio:</b> ${escapeHtml(String(prospect.name || ""))}\n<b>Motivo:</b> No se pudo generar un mensaje seguro. No se creó un texto alternativo.`);
+      return;
     }
 
     try {
@@ -7429,16 +7430,13 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
     if (lowerSub.startsWith("re:") || lowerSub.startsWith("fwd:")) {
       throw new Error(`Subject rejected: Prohibited prefix detected ("${draft.subject}")`);
     }
-  } catch (e: any) {
-    console.warn(`[Copy/Subject Cascade Fallback] AI generation failed or rejected: ${e.message}`);
-    if (prospect.mode === "tenant" || tenantId !== "founder") {
-      await releaseBudget(env.RADAR_DB, tenantId, "finalize_units", 1);
-      await env.RADAR_DB.prepare("UPDATE prospects SET status = 'hold', outcome = 'tenant_copy_generation_failed', updated_at = ? WHERE id = ? AND COALESCE(tenant_id,'founder') = ?")
-        .bind(new Date().toISOString(), prospect.id, tenantId).run();
-      console.error("[Outreach Job] Tenant message generation failed; dispatch blocked to prevent Founder copy leakage.");
-      return;
-    }
-    draft = getTradePsychologyFallback(prospect.name, prospect.trade, prospect.city, prospect.variant_id || 'missed_calls', primaryLanguage, prospect.phone, prospect.demo_token, prospect.signal_event, prospect.signal_area, env, prospect.signals_json || prospect.signals);
+  } catch (error: any) {
+    await releaseBudget(env.RADAR_DB, tenantId, "finalize_units", 1);
+    const reason = String(error?.message || error || "message_generation_failed").slice(0, 180);
+    console.error(`[Outreach Job] Shared message generator failed; dispatch blocked for ${tenantId}:`, reason);
+    await env.RADAR_DB.prepare("UPDATE prospects SET status = 'hold', outcome = 'copy_generation_failed', updated_at = ? WHERE id = ? AND COALESCE(tenant_id,'founder') = ?")
+      .bind(new Date().toISOString(), prospect.id, tenantId).run();
+    return;
   }
 
   // Unconditionally strip "Re:" or "Fwd:" prefixes from draft.subject
