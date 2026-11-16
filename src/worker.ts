@@ -2263,10 +2263,12 @@ export default {
         await env.RADAR_DB.prepare("CREATE TABLE IF NOT EXISTS tenant_refresh_log (tenant_id TEXT PRIMARY KEY, last_at TEXT NOT NULL)").run();
         const previous: any = await env.RADAR_DB.prepare("SELECT last_at FROM tenant_refresh_log WHERE tenant_id = ?").bind(tenantId).first();
         if (trigger === "activity" && previous?.last_at && Date.now() - Date.parse(previous.last_at) < 6 * 60 * 60 * 1000) {
-          return Response.json({ success: true, status: "recent_results_available", tenant_id: tenantId, last_started_at: previous.last_at }, { headers: corsHeaders });
+          const retryAfterSeconds = Math.max(1, Math.ceil((6 * 60 * 60 * 1000 - (Date.now() - Date.parse(previous.last_at))) / 1000));
+          return Response.json({ success: true, status: "recent_attempt_throttled", tenant_id: tenantId, last_attempt_at: previous.last_at, retry_after_seconds: retryAfterSeconds }, { headers: corsHeaders });
         }
         if (previous?.last_at && Date.now() - Date.parse(previous.last_at) < 60 * 1000) {
-          return Response.json({ success: true, status: "already_started", tenant_id: tenantId }, { headers: corsHeaders });
+          const retryAfterSeconds = Math.max(1, Math.ceil((60 * 1000 - (Date.now() - Date.parse(previous.last_at))) / 1000));
+          return Response.json({ success: true, status: "recent_attempt_throttled", tenant_id: tenantId, last_attempt_at: previous.last_at, retry_after_seconds: retryAfterSeconds }, { headers: corsHeaders });
         }
         const now = new Date().toISOString();
         await env.RADAR_DB.prepare("INSERT INTO tenant_refresh_log (tenant_id, last_at) VALUES (?, ?) ON CONFLICT(tenant_id) DO UPDATE SET last_at = excluded.last_at").bind(tenantId, now).run();
@@ -2281,11 +2283,15 @@ export default {
           }, true);
 
           if (runResult.run_id === "no_buyer_segments" || runResult.run_id === "no_cities") {
-            await env.RADAR_DB.prepare("DELETE FROM tenant_refresh_log WHERE tenant_id = ? AND last_at = ?").bind(tenantId, now).run();
+            // Keep the failed-attempt timestamp so automatic dashboard activity cannot
+            // hammer an unchanged incomplete profile with repeated 409 responses.
+            // A manual retry remains available after the short 60-second guard.
             return Response.json({
               success: false,
               status: runResult.run_id,
               tenant_id: tenantId,
+              requires_profile_update: runResult.run_id === "no_buyer_segments",
+              retry_after_seconds: trigger === "activity" ? 21600 : 60,
               diagnostics: runResult.diagnostics
             }, { status: 409, headers: corsHeaders });
           }
