@@ -128,7 +128,8 @@ tests.push({
   run: () => {
     assert(!hasConfirmedWhatsAppOptIn({ manual_contact: { verification: "confirmed_by_founder" } }), "Confirming an active WhatsApp account must not imply consent");
     assert(!hasConfirmedWhatsAppOptIn({ manual_contact: { opt_in: { status: "confirmed", confirmed_at: "2026-01-01" } } }), "Opt-in without a recorded evidence source must remain unconfirmed");
-    assert(hasConfirmedWhatsAppOptIn({ manual_contact: { opt_in: { status: "confirmed", confirmed_at: "2026-01-01", evidence_source: "founder_attestation" } } }), "Explicitly attested opt-in with timestamp and evidence source may pass the manual gate");
+    assert(!hasConfirmedWhatsAppOptIn({ manual_contact: { opt_in: { status: "confirmed", confirmed_at: "2026-01-01", evidence_source: "founder_attestation" } } }), "A bare founder attestation without an evidence reference must not pass");
+    assert(hasConfirmedWhatsAppOptIn({ manual_contact: { opt_in: { status: "confirmed", confirmed_at: "2026-01-01", evidence_source: "operator_evidence_reference", evidence_ref: "crm:consent-123" } } }), "Documented opt-in with timestamp, source, and evidence reference may pass");
   }
 });
 
