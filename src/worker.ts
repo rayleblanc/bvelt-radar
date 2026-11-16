@@ -2109,7 +2109,49 @@ export default {
           return Response.json({ error: "Forbidden: cannot modify configuration for another tenant" }, { status: 403, headers: corsHeaders });
         }
 
-        const industry = String(body.industry || body.trade || "").trim();
+        const contractVersion = Number(body.contract_version);
+        const realm = String(body.realm || '').trim().toUpperCase();
+        const profileId = String(body.profile_id || '').trim();
+        const businessId = String(body.business_id || '').trim().slice(0, 180);
+        const profileSnapshotVersion = String(body.profile_snapshot_version || '').trim().toLowerCase();
+        const profileSnapshotAt = String(body.profile_snapshot_at || '').trim();
+        const profileSource = String(body.profile_source || '').trim().toUpperCase();
+        const locationSource = String(body.location_source || 'UNKNOWN').trim().toUpperCase();
+        const verificationState = String(body.verification_state || 'UNKNOWN').trim().toUpperCase();
+        const correlationId = String(body.correlation_id || '').trim().slice(0, 120);
+        const idempotencyKey = String(body.idempotency_key || '').trim().slice(0, 220);
+        const timezone = String(body.timezone || '').trim().slice(0, 80) || null;
+        const language = String(body.language || '').trim().slice(0, 20) || null;
+        const source = String(body.source || 'profile').trim().slice(0, 40);
+        const territory = body.territory && typeof body.territory === 'object' && !Array.isArray(body.territory) ? body.territory : {};
+        const territoryJson = JSON.stringify(territory);
+        const expectedProfileId = tenantId.startsWith('bvelt_') ? tenantId.slice('bvelt_'.length) : '';
+        const validLocationSources = new Set(['DEVICE', 'BROWSER_NETWORK', 'USER_ENTERED', 'DEMO_EXAMPLE', 'UNKNOWN']);
+        const validVerificationStates = new Set(['CONNECTED', 'PENDING_RE-AUTH', 'DISCONNECTED', 'DISCONNECTED_RE-AUTH_NEEDED', 'NOT_CONNECTED', 'VERIFIED', 'UNVERIFIED', 'UNKNOWN']);
+        if (contractVersion !== 1 || realm !== 'TENANT' || profileSource !== 'FIRESTORE_PROFILE') {
+          return Response.json({ error: 'tenant_profile_contract_invalid', required_contract_version: 1 }, { status: 400, headers: corsHeaders });
+        }
+        if (!expectedProfileId || profileId !== expectedProfileId) {
+          return Response.json({ error: 'profile_id_tenant_mismatch' }, { status: 403, headers: corsHeaders });
+        }
+        if (!/^[a-f0-9]{64}$/.test(profileSnapshotVersion) || !Number.isFinite(Date.parse(profileSnapshotAt)) ||
+            !/^[A-Za-z0-9-]{16,120}$/.test(correlationId) || !idempotencyKey || territoryJson.length > 8000 ||
+            !validLocationSources.has(locationSource) || !validVerificationStates.has(verificationState)) {
+          return Response.json({ error: 'tenant_profile_contract_metadata_invalid' }, { status: 400, headers: corsHeaders });
+        }
+
+        const previousConfig: any = await env.RADAR_DB.prepare(
+          'SELECT profile_snapshot_version, profile_snapshot_at, idempotency_key FROM tenant_config WHERE tenant_id = ?'
+        ).bind(tenantId).first();
+        if (previousConfig?.idempotency_key === idempotencyKey && previousConfig?.profile_snapshot_version === profileSnapshotVersion) {
+          return Response.json({ success: true, duplicate: true, tenant_id: tenantId, contract_version: 1, profile_snapshot_version: profileSnapshotVersion, correlation_id: correlationId }, { headers: corsHeaders });
+        }
+        const previousSnapshotAt = previousConfig?.profile_snapshot_at ? Date.parse(previousConfig.profile_snapshot_at) : NaN;
+        if (Number.isFinite(previousSnapshotAt) && Date.parse(profileSnapshotAt) < previousSnapshotAt) {
+          return Response.json({ error: 'stale_profile_snapshot', tenant_id: tenantId }, { status: 409, headers: corsHeaders });
+        }
+
+        const industry = String(body.industry || body.trade || '').trim();
         const niche = String(body.niche || body.trade || "").trim();
         const cities = (Array.isArray(body.cities) ? body.cities : body.city ? [body.city] : [])
           .map((value: any) => String(value || "").trim())
@@ -2130,11 +2172,28 @@ export default {
 
         await env.RADAR_DB.prepare(`
           INSERT INTO tenant_config (
-            tenant_id, tenant_name, industry, niche, subniches_json, services_json, service_areas_json,
+            tenant_id, contract_version, realm, profile_id, business_id, profile_snapshot_version, profile_snapshot_at,
+            profile_source, location_source, verification_state, territory_json, timezone, language, correlation_id,
+            idempotency_key, source, tenant_name, industry, niche, subniches_json, services_json, service_areas_json,
             countries_json, regions_json, cities_json, languages_json, icp_description, icp_keywords_json,
             minimum_score, daily_outreach_limit, allowed_markets_json, campaign_goal, messaging_angle, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(tenant_id) DO UPDATE SET
+            contract_version = excluded.contract_version,
+            realm = excluded.realm,
+            profile_id = excluded.profile_id,
+            business_id = excluded.business_id,
+            profile_snapshot_version = excluded.profile_snapshot_version,
+            profile_snapshot_at = excluded.profile_snapshot_at,
+            profile_source = excluded.profile_source,
+            location_source = excluded.location_source,
+            verification_state = excluded.verification_state,
+            territory_json = excluded.territory_json,
+            timezone = excluded.timezone,
+            language = excluded.language,
+            correlation_id = excluded.correlation_id,
+            idempotency_key = excluded.idempotency_key,
+            source = excluded.source,
             tenant_name = excluded.tenant_name,
             industry = excluded.industry,
             niche = excluded.niche,
@@ -2155,6 +2214,21 @@ export default {
             updated_at = excluded.updated_at
         `).bind(
           tenantId,
+          1,
+          'TENANT',
+          profileId,
+          businessId || profileId,
+          profileSnapshotVersion,
+          profileSnapshotAt,
+          profileSource,
+          locationSource,
+          verificationState,
+          territoryJson,
+          timezone,
+          language,
+          correlationId,
+          idempotencyKey,
+          source,
           body.tenant_name || body.business_name || "",
           industry,
           niche,
@@ -2178,7 +2252,7 @@ export default {
 
         // Saving a profile must never launch discovery. Tenant discovery is
         // explicitly requested by the user or triggered by a recent app session.
-        return Response.json({ success: true, tenant_id: tenantId, run_id: null, message: "Tenant config saved. Prospecting has not started." }, { headers: corsHeaders });
+        return Response.json({ success: true, tenant_id: tenantId, realm: 'TENANT', contract_version: 1, profile_id: profileId, profile_snapshot_version: profileSnapshotVersion, correlation_id: correlationId, idempotency_key: idempotencyKey, run_id: null, message: "Tenant profile contract synchronized. Prospecting has not started." }, { headers: corsHeaders });
       }
 
       // 16a2. Explicit and activity-triggered Tenant prospecting.
