@@ -4441,9 +4441,22 @@ async function recordManualWhatsAppConfirmed(prospectId: string, env: Env): Prom
   return { success: true, reason: "whatsapp_account_confirmed" };
 }
 
+export function isValidWhatsAppConsentEvidenceRef(value: unknown): boolean {
+  const reference = String(value || "").trim();
+  if (/^(crm|form|contract|consent):[A-Za-z0-9._:-]{3,180}$/i.test(reference)) return true;
+  if (!/^https:\/\//i.test(reference)) return false;
+  try {
+    const parsed = new URL(reference);
+    return parsed.protocol === "https:" && Boolean(parsed.hostname) && !["localhost", "127.0.0.1"].includes(parsed.hostname);
+  } catch { return false; }
+}
+
 export function hasConfirmedWhatsAppOptIn(metadata: any): boolean {
   const optIn = metadata?.manual_contact?.opt_in || metadata?.opt_in;
-  return optIn?.status === "confirmed" && Boolean(optIn?.confirmed_at) && Boolean(String(optIn?.evidence_source || "").trim()) && Boolean(String(optIn?.evidence_ref || "").trim());
+  return optIn?.status === "confirmed" &&
+    Boolean(optIn?.confirmed_at) &&
+    optIn?.evidence_source === "operator_evidence_reference" &&
+    isValidWhatsAppConsentEvidenceRef(optIn?.evidence_ref);
 }
 
 async function recordManualWhatsAppOptIn(prospectId: string, evidenceRef: string, env: Env): Promise<{ success: boolean; reason: string }> {
