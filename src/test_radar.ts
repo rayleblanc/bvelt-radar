@@ -2797,6 +2797,50 @@ tests.push({
 });
 
 tests.push({
+  name: "Prospect message generation and telemetry enforce exact Founder/Tenant authorization scope",
+  run: async () => {
+    const mockDb: any = {
+      prepare: (sql: string) => ({
+        bind: (...args: any[]) => ({
+          first: async () => {
+            if (sql.includes("FROM prospects WHERE id = ?")) {
+              return { id: args[0], mode: "tenant", tenant_id: "tenant_alpha", name: "Northstar Plumbing", trade: "plumbing", city: "Toronto", signals_json: "{}" };
+            }
+            return null;
+          },
+          run: async () => ({ success: true, meta: { changes: 1 } }),
+          all: async () => ({ results: [] })
+        })
+      })
+    };
+    const env: any = { RADAR_DB: mockDb, FOUNDER_SERVICE_KEY: "founder-secret", RADAR_SERVICE_KEY: "radar-service-secret" };
+    const unauth = await worker.fetch(new Request("https://radar.test/api/prospects/attack-kit", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prospect_id: "p1" })
+    }), env, {} as any);
+    assert(unauth.status === 401, "Message generation must reject unauthenticated requests");
+
+    const crossTenant = await worker.fetch(new Request("https://radar.test/api/prospects/attack-kit", {
+      method: "POST",
+      headers: { "Authorization": "Bearer radar-service-secret", "X-Tenant-Id": "tenant_beta", "Content-Type": "application/json" },
+      body: JSON.stringify({ prospect_id: "p1" })
+    }), env, {} as any);
+    assert(crossTenant.status === 403, "Tenant message generation must reject cross-tenant prospect access");
+
+    const scopedKit = await worker.fetch(new Request("https://radar.test/api/prospects/attack-kit?id=p1", {
+      headers: { "Authorization": "Bearer radar-service-secret", "X-Tenant-Id": "tenant_alpha" }
+    }), env, {} as any);
+    assert(scopedKit.status === 200, "A tenant service may read its own prospect kit");
+
+    const copied = await worker.fetch(new Request("https://radar.test/api/prospects/message-event", {
+      method: "POST",
+      headers: { "Authorization": "Bearer radar-service-secret", "X-Tenant-Id": "tenant_alpha", "Content-Type": "application/json" },
+      body: JSON.stringify({ prospect_id: "p1", event_type: "message_copied", channel: "clipboard" })
+    }), env, {} as any);
+    assert(copied.status === 200, "A tenant may record its own copy event without changing contact status");
+  }
+});
+
+tests.push({
   name: "Tenant ROI: requires authentication and enforces exact tenant scope",
   run: async () => {
     const env: any = {
