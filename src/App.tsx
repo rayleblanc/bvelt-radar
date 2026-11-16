@@ -2382,7 +2382,7 @@ const submitDecision = async (prospectId: string, action: string) => {
                                       setGeneratingMessageIds(prev => ({ ...prev, [p.id]: true }));
                                       setErrorState(null);
                                       try {
-                                        const channel = isValidEmailRecipient(p.email) || !hasDirectWhatsAppRecipient(p.phone) ? 'email' : 'whatsapp';
+                                        const channel = isVerifiedEmailRecipient(p) ? 'email' : hasDirectWhatsAppRecipient(p.phone) ? 'whatsapp' : 'email';
                                         const r = await fetch(apiUrl + "/api/prospects/attack-kit", {
                                           method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': selectedTenantId || 'founder' },
                                           body: JSON.stringify({ prospect_id: p.id, channel })
@@ -2435,7 +2435,7 @@ const submitDecision = async (prospectId: string, action: string) => {
                                         <p><span className="text-slate-500">Siguiente:</span> {attackKits[p.id].next_action}</p>
                                         {p.phone && hasDirectWhatsAppRecipient(p.phone) && toWhatsAppUrl(p.phone, attackKits[p.id].generated_message?.body || '') && (
                                           <a
-                                            href={toWhatsAppUrl(p.phone, attackKits[p.id].sms || '')!}
+                                            href={toWhatsAppUrl(p.phone, attackKits[p.id].generated_message?.body || '')!}
                                             target="_blank"
                                             rel="noreferrer"
                                             className="inline-block px-2 py-1 rounded bg-emerald-950/50 border border-emerald-800 text-emerald-300 font-bold"
