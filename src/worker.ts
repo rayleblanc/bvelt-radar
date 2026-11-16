@@ -4280,6 +4280,13 @@ export function getManualSendPreflightError(prospect: any): string | null {
   return parsed.valid && parsed.email ? null : "valid_email_required";
 }
 
+export function hasAIGenerationProvider(env: any): boolean {
+  return Boolean(
+    String(env?.GEMINI_FOUNDER_API_KEY || env?.GEMINI_SECONDARY_API_KEY || env?.GROQ_API_KEY || "").trim() ||
+    (env?.AI && typeof env.AI.run === "function")
+  );
+}
+
 export function resolveProspectContactability(prospect: any): {
   commercial_prospect: boolean;
   contact_available: boolean;
@@ -10410,7 +10417,7 @@ async function generateAICopy(
   let aiUnitReserved = false;
   const tenantId = prospect.tenant_id || "founder";
 
-  if (apiKey || env.GROQ_API_KEY || (env.AI && typeof env.AI.run === "function")) {
+  if (hasAIGenerationProvider(env)) {
     aiUnitReserved = await reserveBudget(env.RADAR_DB, tenantId, 'ai_units', 1);
   }
 
