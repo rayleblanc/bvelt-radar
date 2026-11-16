@@ -10617,8 +10617,8 @@ export async function generateAICopy(
     const goal = String(tenantInfo.campaign_goal || tenantInfo.messaging_angle || "your upcoming service needs");
     const subject = isSpanish ? `Consulta sobre servicios de ${tenantInfo.tenant_name}` : `A question about ${tenantInfo.tenant_name}'s services`;
     const body = isSpanish
-      ? `Hola equipo de ${prospect.name || "su empresa"}, somos ${tenantInfo.tenant_name}. Ofrecemos ${services}${area}. ¿Están valorando actualmente opciones relacionadas con ${goal.toLowerCase()}? Si tiene sentido, puedo compartir información concreta sobre nuestros servicios.`
-      : `Hi ${prospect.name || "team"}, we're ${tenantInfo.tenant_name}. We provide ${services}${area}. Is ${goal.toLowerCase()} something your team is currently considering? If relevant, I can share specific information about our services.`;
+      ? `Hola equipo de ${prospect.name || "su empresa"}, somos ${tenantInfo.tenant_name}. Ofrecemos ${services}${area}. ¿Este tipo de servicio podría ser útil para su equipo? Si tiene sentido, puedo compartir información concreta sobre lo que ofrecemos.`
+      : `Hi ${prospect.name || "team"}, we're ${tenantInfo.tenant_name}. We provide ${services}${area}. Could this type of service be relevant to your team? If useful, I can share specific information about what we offer.`;
     return { subject: channel === "whatsapp" ? "" : subject, body, source: "template" };
   }
   if (channel === "whatsapp") {
@@ -10822,8 +10822,8 @@ function getTradePsychologyFallback(
       ? `Consulta para ${name} sobre ${signalEvent}`
       : `A question for ${name} about ${signalEvent}`;
     bodyBase = isSpanish
-      ? `Hola equipo de ${name}, vi el aviso de ${signalEvent} relacionado con ${signalArea}. Soy Rainer, fundador de Bvelt. Ayudo a negocios de servicios a dar seguimiento a consultas de clientes que necesitan seguimiento. ¿Tienen un proceso para contactar a quienes no logran comunicarse durante una interrupción? Si le sirve, puedo enviarle un ejemplo breve.`
-      : `Hi ${name} team, I saw the ${signalEvent} notice for ${signalArea}. I'm Rainer, founder of Bvelt. I work on follow-up for service businesses when customer enquiries need follow-up. Do you have a process for reaching people who could not get through during an interruption? I can send a short example if useful.`;
+      ? `Hola equipo de ${name}, vi el aviso público de ${signalEvent} relacionado con ${signalArea}. Soy Rainer, fundador de Bvelt. Estoy creando una herramienta para organizar el seguimiento de consultas de clientes. ¿Cómo están gestionando las consultas relacionadas con este evento? Si le sirve, puedo compartir un ejemplo breve.`
+      : `Hi ${name} team, I saw the public ${signalEvent} notice for ${signalArea}. I'm Rainer, founder of Bvelt. I'm building a tool to help organize customer enquiry follow-up. How are you handling enquiries related to this event? I can share a short example if useful.`;
   } else if (signals.no_own_website) {
     subject = isSpanish ? `Una pregunta sobre cómo recibe consultas ${name}` : `A question about how ${name} receives enquiries`;
     bodyBase = isSpanish
