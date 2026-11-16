@@ -3062,6 +3062,20 @@ export default {
             signalsObj.scrapling = mergedScrapling;
             if (!signalsObj.signals) signalsObj.signals = {};
             signalsObj.signals.scrapling = mergedScrapling;
+            if (mode === "founder") {
+              const capabilities = incomingFacts.observed_capabilities || {};
+              const serviceTerms = Array.isArray(incomingFacts.service_terms_observed) ? incomingFacts.service_terms_observed : [];
+              // Reconcile the old website-derived score inputs with observed Scrapling facts.
+              // Missing SMS support is not proof of a lost lead, so this signal is cleared.
+              signalsObj.signals.contact_form = capabilities.contact_form_observed === true;
+              signalsObj.signals.quote_request = capabilities.quote_or_estimate_language_observed === true;
+              signalsObj.signals.booking = capabilities.booking_or_appointment_observed === true;
+              signalsObj.signals.call_cta = capabilities.click_to_call_observed === true;
+              signalsObj.signals.lead_capture = capabilities.contact_form_observed === true;
+              signalsObj.signals.multiple_areas = capabilities.service_area_language_observed === true;
+              signalsObj.signals.sms_gap = false;
+              signalsObj.signals.emergency = serviceTerms.some((term: any) => /emergency/i.test(String(term)));
+            }
             const terminalStatus = ["sent", "delivered", "opened", "clicked", "replied", "won", "lost", "bounced", "unsubscribed", "complained"].includes(String(prospectRow.status || "").toLowerCase());
             if (!quality.allowed && !terminalStatus) {
               await env.RADAR_DB.prepare(`
@@ -3086,6 +3100,16 @@ export default {
                 UPDATE prospects SET signals_json = ?, updated_at = ?
                 WHERE id = ? AND mode = ? AND COALESCE(tenant_id, 'founder') = ?
               `).bind(JSON.stringify(signalsObj), now, prospectId, mode, tenantId).run();
+              if (mode === "founder") {
+                await enqueueJob(env, {
+                  run_id: runId,
+                  job_id: `research_score_${prospectId}_${String(contentHash).slice(0, 12)}`,
+                  type: "score",
+                  mode: "founder",
+                  tenant_id: "founder",
+                  payload: { prospect_id: prospectId }
+                });
+              }
             }
           } catch (syncErr) {
             console.warn(`[ResearchEvidence] signals_json sync warning for prospect ${prospectId}:`, syncErr);
@@ -6461,7 +6485,7 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
   const prospect = await env.RADAR_DB.prepare("SELECT * FROM prospects WHERE id = ?").bind(prospect_id).first() as any;
   if (!prospect) return;
 
-  if (['approved', 'drafted', 'notified', 'sent'].includes(prospect.status)) return;
+  if (['approved', 'drafted', 'notified', 'sent', 'disqualified', 'discarded', 'blocked', 'suppressed'].includes(prospect.status)) return;
 
   const dayOfYear = getDayOfYear(new Date());
   const { missionConfig } = await getPriorityTargets(dayOfYear, env, job.mode, job.tenant_id, overrides, true);
