@@ -248,18 +248,18 @@ def _extract_contact_candidates(html: str) -> tuple[set[str], set[str], list[dic
     phones: set[str] = set()
     contact_provenance: list[dict[str, str]] = []
     provenance: list[dict[str, str]] = []
-    visible_html = re.sub(r"(?is)<(script|style|noscript|svg|template|canvas)[^>]*>.*?</\\1>", " ", html)
+    visible_html = re.sub(r"(?is)<(script|style|noscript|svg|template|canvas)[^>]*>.*?</\1>", " ", html)
     visible_text = _strip_html(visible_html)
 
-    for raw in re.findall(r"(?is)href\\s*=\\s*['\\\"]mailto:([^'\\\"?]+)", visible_html):
+    for raw in re.findall(r"(?is)href\s*=\s*['\\"]mailto:([^'\\"?]+)", visible_html):
         value = raw.strip().lower()
         if EMAIL_RE.fullmatch(value):
             emails.add(value)
             provenance.append({"type": "email", "value": value, "source": "mailto"})
 
     # Structured business data is extracted separately from executable scripts.
-    for block in re.findall(r"(?is)<script\\b[^>]*type\\s*=\\s*['\\\"]application/ld\\+json['\\\"][^>]*>(.*?)</script>", html):
-        for key, raw in re.findall(r'(?is)["\\\'](email|telephone|phone)["\\\']\\s*:\\s*["\\\']([^"\\\']+)["\\\']', block):
+    for block in re.findall(r"(?is)<script\b[^>]*type\s*=\s*['\\"]application/ld\+json['\\"][^>]*>(.*?)</script>", html):
+        for key, raw in re.findall(r'(?is)["\\'](email|telephone|phone)["\\']\s*:\s*["\\']([^"\\']+)["\\']', block):
             value = raw.strip()
             if key.lower() == "email":
                 candidate = value.lower()
@@ -267,7 +267,7 @@ def _extract_contact_candidates(html: str) -> tuple[set[str], set[str], list[dic
                     emails.add(candidate)
                     provenance.append({"type": "email", "value": candidate, "source": "json_ld"})
             else:
-                digits = re.sub(r"\\D", "", value)
+                digits = re.sub(r"\D", "", value)
                 if _valid_phone_digits(digits):
                     phones.add(value)
                     provenance.append({"type": "phone", "value": value, "source": "json_ld"})
@@ -278,20 +278,20 @@ def _extract_contact_candidates(html: str) -> tuple[set[str], set[str], list[dic
             emails.add(value)
             provenance.append({"type": "email", "value": value, "source": "visible_text"})
 
-    for raw in re.findall(r"(?is)href\\s*=\\s*['\\\"]tel:([^'\\\"]+)['\\\"]", visible_html):
+    for raw in re.findall(r"(?is)href\s*=\s*['\\"]tel:([^'\\"]+)['\\"]", visible_html):
         value = raw.strip()
-        digits = re.sub(r"\\D", "", value)
+        digits = re.sub(r"\D", "", value)
         if _valid_phone_digits(digits):
             phones.add(value)
             provenance.append({"type": "phone", "value": value, "source": "tel_link"})
 
     for match in PHONE_RE.finditer(visible_text):
         value = match.group(0).strip()
-        digits = re.sub(r"\\D", "", value)
+        digits = re.sub(r"\D", "", value)
         if not _valid_phone_digits(digits):
             continue
         context = visible_text[max(0, match.start() - 55):min(len(visible_text), match.end() + 35)]
-        if re.search(r"(?i)\\b(phone|telephone|tel|call|contact|text|mobile|office)\\b", context):
+        if re.search(r"(?i)\b(phone|telephone|tel|call|contact|text|mobile|office)\b", context):
             phones.add(value)
             provenance.append({"type": "phone", "value": value, "source": "visible_contact_context"})
 
