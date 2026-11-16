@@ -10867,12 +10867,10 @@ export function normalizeWhatsAppPhone(value: string | null | undefined): string
 
 export function buildWhatsAppClickToChatUrl(phone: string, message: string): string | null {
   const normalized = normalizeWhatsAppPhone(phone);
-  const digits = extractPhoneDigits(phone);
   const text = String(message || "").trim();
-  if (!digits || !text) return null;
-  // Without an explicit country code, use WhatsApp's documented share-to-contact picker.
-  const base = normalized ? "https://wa.me/" + normalized : "https://wa.me/";
-  return base + "?text=" + encodeURIComponent(text);
+  // Never create a generic contact-picker link: a WhatsApp handoff must identify its recipient.
+  if (!normalized || !text) return null;
+  return "https://wa.me/" + normalized + "?text=" + encodeURIComponent(text);
 }
 
 export function buildWhatsAppOutreachBody(rawBody: string): string {
@@ -11791,9 +11789,9 @@ export function isEmailValidatedForOutreach(signals: unknown): boolean {
 }
 
 export function shouldUseManualWhatsAppFallback(email: unknown, phone: string | null | undefined, signals: unknown): boolean {
-  const hasPhone = Boolean(extractPhoneDigits(phone));
+  const hasDirectInternationalWhatsApp = Boolean(normalizeWhatsAppPhone(phone));
   const hasVerifiedEmail = Boolean(String(email || "").trim()) && isEmailValidatedForOutreach(signals);
-  return hasPhone && !hasVerifiedEmail;
+  return hasDirectInternationalWhatsApp && !hasVerifiedEmail;
 }
 
 export async function verifyEmail(email: string, env: Env): Promise<EmailVerificationResult> {

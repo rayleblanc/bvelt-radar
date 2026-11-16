@@ -104,12 +104,12 @@ tests.push({
     assert(!hasUsableContactChannel("", "123"), "Reject malformed phone-only contact data");
     assert(!hasUsableContactChannel("", null), "Reject prospects without any usable contact channel");
     const genericShare = buildWhatsAppClickToChatUrl("813-555-0100", "Hi team");
-    assert(!!genericShare && genericShare.startsWith("https://wa.me/?text="), "Use WhatsApp contact picker for local numbers");
+    assert(genericShare === null, "Never create a WhatsApp link without an explicit international recipient");
     const link = buildWhatsAppClickToChatUrl("+1 813 555 0100", "Hi team — quick question");
     assert(!!link && link.startsWith("https://wa.me/18135550100?text="), "Build a click-to-chat URL");
     assert(decodeURIComponent(link!.split("?text=")[1]) === "Hi team — quick question", "Preserve message text");
     const localShare = buildWhatsAppClickToChatUrl("8135550100", "Hello");
-    assert(!!localShare && localShare.startsWith("https://wa.me/?text="), "Use contact picker rather than guessing a country code");
+    assert(localShare === null, "National phone numbers must not create recipient-less WhatsApp links");
   }
 });
 
@@ -119,6 +119,10 @@ tests.push({
     assert(
       shouldUseManualWhatsAppFallback("info@example.com", "+1 416 555 0100", { is_email_validated: false }),
       "A phone must remain usable when the email is not provider-verified"
+    );
+    assert(
+      !shouldUseManualWhatsAppFallback("info@example.com", "416-555-0100", { is_email_validated: false }),
+      "A national phone number without explicit country code must not produce a recipient-less WhatsApp handoff"
     );
     assert(
       !shouldUseManualWhatsAppFallback("info@example.com", "+1 416 555 0100", { is_email_validated: true }),
