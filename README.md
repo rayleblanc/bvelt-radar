@@ -53,17 +53,22 @@ npx wrangler secret put HUNTER_API_KEY           # Búsqueda de emails en domini
 npx wrangler secret put ABSTRACT_API_KEY         # Validación de entregabilidad
 ```
 
-**Variables de Configuración [vars] (No sensibles - en `wrangler.toml` o Dashboard > Variables):**
+**Configuración opcional de Founder**
+
+No añadas variables geográficas para el funcionamiento normal. El catálogo incluido en el código y `market-universe.json` gobiernan la rotación automática.
+
+Solo si necesitas restringir explícitamente el mercado puedes definir variables en Cloudflare:
+
 ```toml
-[vars]
+# Opcionales: si se omiten, Founder usa el catálogo completo.
 FOUNDING_CITIES = "City A, Region;City B, Region"
-FOUNDING_TRADES = "trade_one;trade_two"
-FOUNDING_COUNTRIES = "US;CA;GB"
+FOUNDING_COUNTRIES = "US;CA"
+FOUNDING_TRADES = "plumbing;hvac"
 FOUNDING_LANGUAGES = "en"
 FOUNDING_MIN_SCORE = "50"
 ```
 
-Los valores son ejemplos. `FOUNDING_CITIES` y `FOUNDING_COUNTRIES` son opcionales; si se indican, acotan la búsqueda. `FOUNDING_TRADES` sustituye las prioridades amplias de `market-universe.json`, pero no existe una allowlist de industrias. La rotación automática usa un catálogo unificado: geoData.ts (aprox. 7.600 localidades de EE.UU./Canadá) más geoDataAnglosphere.ts (centros suplementarios de Reino Unido, Australia, Irlanda, Nueva Zelanda y Sudáfrica). Founder reserva una cuota equilibrada para US/CA/GB/AU cuando hay candidatos en esos mercados; el resto del catálogo global continúa elegible. FOUNDING_CITIES y FOUNDING_COUNTRIES son filtros opcionales y, si se configuran, sí restringen explícitamente el alcance. Sin esos filtros, no hay que añadir variables de países ni ciudades en Cloudflare.
+`FOUNDING_CITIES` y `FOUNDING_COUNTRIES` son filtros restrictivos, no listas necesarias para activar la búsqueda. Déjalas ausentes para la rotación automática. El catálogo unificado combina geoData.ts (aprox. 7.600 localidades de EE.UU./Canadá) con geoDataAnglosphere.ts (centros suplementarios de Reino Unido, Australia, Irlanda, Nueva Zelanda y Sudáfrica). Founder reserva una cuota equilibrada para US/CA/GB/AU cuando hay candidatos; otros países del catálogo siguen siendo elegibles. `FOUNDING_TRADES`, `FOUNDING_LANGUAGES` y `FOUNDING_MIN_SCORE` siguen siendo ajustes opcionales independientes.
 
 ### 4. Configurar el Webhook de Telegram (Botones Interactivos)
 Para que los botones `[✅ Mark Sent]`, `[❌ Discard]` y `[🚫 Suppress]` funcionen directamente desde Telegram:
