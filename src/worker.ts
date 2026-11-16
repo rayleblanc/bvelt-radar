@@ -10472,7 +10472,7 @@ export async function generateAICopy(
     2. Longitud: 45 a 65 palabras en el primer contacto; 35 a 55 en seguimiento.
     3. Tono: Respetuoso, directo, mentalidad de emprendedor de guerrilla.
     4. Explica el valor sin prometer resultados: "${senderValueProposition}". En Tenant, habla desde la empresa configurada, no desde Bvelt.
-    5. Primer contacto: una sola pregunta sencilla y de baja presión; no solicites listas de presupuestos, inventarios de cotizaciones ni auditorías; no incluyas enlaces. En Tenant no incluyas enlaces de Bvelt ni inventes una web del remitente.
+    5. Primer contacto: una sola pregunta sencilla y de baja presión; no solicites listas de presupuestos, inventarios de cotizaciones ni auditorías; no incluyas enlaces. En seguimiento, solo Founder puede incluir el enlace de Bvelt; Tenant nunca debe añadir enlaces de Bvelt ni inventar una web del remitente.
     6. No inventes hechos, porcentajes, velocidad web, llamadas perdidas ni pérdidas de ingresos. No uses "auditoría gratis", "garantizado", "instantáneo" ni promesas de 60 segundos sin evidencia explícita. Sin emojis ni signos de exclamación. SIN FIRMA NI PIE DE PÁGINA (el sistema añade el legal).
     7. ${!tenantInfo && founderLine ? `FRASE FUNDADOR (úsala una vez, natural, no inventes otra biografía): "${founderLine}"` : "No inventes historia personal del fundador."}
     8. ${isFollowUp ? "Esto es SEGUIMIENTO toque #" + outreachTouch + " sin respuesta. Más corto, otro ángulo, sin culpar. Asunto sin Re: falso." : "Primer correo en frío."}
