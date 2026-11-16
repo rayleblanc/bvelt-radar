@@ -63,7 +63,7 @@ FOUNDING_LANGUAGES = "en"
 FOUNDING_MIN_SCORE = "50"
 ```
 
-Los valores son ejemplos. `FOUNDING_CITIES` y `FOUNDING_COUNTRIES` son opcionales; si se indican, acotan la búsqueda. `FOUNDING_TRADES` sustituye las prioridades amplias de `market-universe.json`, pero no existe una allowlist de industrias. El catálogo actual de rotación automática cubre US/CA; para otros países configura ciudades explícitas (la geocodificación de esas ciudades usa Nominatim). Los países prioritarios solo elevan el ranking, no excluyen mercados fuera de la lista.
+Los valores son ejemplos. `FOUNDING_CITIES` y `FOUNDING_COUNTRIES` son opcionales; si se indican, acotan la búsqueda. `FOUNDING_TRADES` sustituye las prioridades amplias de `market-universe.json`, pero no existe una allowlist de industrias. La rotación automática usa un catálogo unificado: geoData.ts (aprox. 7.600 localidades de EE.UU./Canadá) más geoDataAnglosphere.ts (centros suplementarios de Reino Unido, Australia, Irlanda, Nueva Zelanda y Sudáfrica). Founder reserva una cuota equilibrada para US/CA/GB/AU cuando hay candidatos en esos mercados; el resto del catálogo global continúa elegible. FOUNDING_CITIES y FOUNDING_COUNTRIES son filtros opcionales y, si se configuran, sí restringen explícitamente el alcance. Sin esos filtros, no hay que añadir variables de países ni ciudades en Cloudflare.
 
 ### 4. Configurar el Webhook de Telegram (Botones Interactivos)
 Para que los botones `[✅ Mark Sent]`, `[❌ Discard]` y `[🚫 Suppress]` funcionen directamente desde Telegram:
