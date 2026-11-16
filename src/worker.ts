@@ -3057,17 +3057,30 @@ export default {
               updated_at: now
             };
 
-            const quality = evaluateResearchEvidenceQuality(String(prospectRow.name || ""), incomingFacts, String(prospectRow.trade || ""));
+            const quality = evaluateResearchEvidenceQuality(String(prospectRow.name || ""), incomingFacts, String(prospectRow.trade || ""), mode);
             mergedScrapling.quality_gate = { allowed: quality.allowed, reason: quality.reason || null, inferred_trade: quality.inferredTrade || null, checked_at: now };
             signalsObj.scrapling = mergedScrapling;
             if (!signalsObj.signals) signalsObj.signals = {};
             signalsObj.signals.scrapling = mergedScrapling;
             const terminalStatus = ["sent", "delivered", "opened", "clicked", "replied", "won", "lost", "bounced", "unsubscribed", "complained"].includes(String(prospectRow.status || "").toLowerCase());
             if (!quality.allowed && !terminalStatus) {
-              await env.RADAR_DB.prepare(`
-                UPDATE prospects SET signals_json = ?, status = 'disqualified', outcome = ?, email = NULL, updated_at = ?
+              await env.RADAR_DB.prepare(\`
+                UPDATE prospects SET signals_json = ?, status = 'disqualified', outcome = ?, email = NULL,
+                  score = 0, opportunity_score = 0, confidence_score = 0, score_breakdown = '{}',
+                  fit_score = 0, intent_score = 0, pain_score = 0, ability_to_pay_score = 0,
+                  contactability_score = 0, timing_score = 0, evidence_score = 0,
+                  signal_freshness_score = 0, expected_value = 0, decision_state = 'disqualified',
+                  bvelt_angle = NULL, draft_subject = NULL, draft_body = NULL, updated_at = ?
                 WHERE id = ? AND mode = ? AND COALESCE(tenant_id, 'founder') = ?
-              `).bind(JSON.stringify(signalsObj), `research_quality_rejected:${quality.reason || "non_commercial_profile"}`, now, prospectId, mode, tenantId).run();
+              \`).bind(JSON.stringify(signalsObj), \`research_quality_rejected:\${quality.reason || "non_commercial_profile"}\`, now, prospectId, mode, tenantId).run();
+              if (mode === "founder") {
+                await env.RADAR_DB.prepare(\`
+                  UPDATE opportunities SET status = 'closed', strategic_score = 0, fit_score = 0,
+                    intent_score = 0, pain_score = 0, ability_to_pay_score = 0, expected_value = 0,
+                    decision_state = 'disqualified', why_now_json = '{}', updated_at = ?
+                  WHERE prospect_id = ? AND mode = 'founder' AND COALESCE(tenant_id, 'founder') = 'founder'
+                \`).bind(now, prospectId).run();
+              }
             } else {
               await env.RADAR_DB.prepare(`
                 UPDATE prospects SET signals_json = ?, updated_at = ?
@@ -12579,7 +12592,7 @@ export interface TradeInferenceResult {
   detectedClue?: string;
 }
 
-export function evaluateResearchEvidenceQuality(businessName: string, facts: any, declaredTrade?: string | null): { allowed: boolean; reason?: string; inferredTrade?: string | null } {
+export function evaluateResearchEvidenceQuality(businessName: string, facts: any, declaredTrade?: string | null, mode: string = "founder"): { allowed: boolean; reason?: string; inferredTrade?: string | null } {
   const name = String(businessName || "").trim();
   if (/\b(?:variation|variant)\s*#?\s*\d+\b/i.test(name)) return { allowed: false, reason: "synthetic_variation_name" };
   const title = String(facts && (facts.page_title || facts.title) || "");
@@ -12593,7 +12606,7 @@ export function evaluateResearchEvidenceQuality(businessName: string, facts: any
 
   // Mandatory post-Scrapling identity/rubric gate. Never silently relabel a
   // discovered prospect from a weak clue on its website.
-  if (declaredTrade && String(declaredTrade).trim()) {
+  if (mode !== "tenant" && declaredTrade && String(declaredTrade).trim()) {
     const inferred = inferTradeFromTextDetailed(name, title, description, serviceTerms.join(" "));
     const declared = String(declaredTrade).toLowerCase().replace(/[\s-]+/g, "_");
     const compatible = inferred.trade === declared
