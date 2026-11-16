@@ -719,7 +719,7 @@ export default function App() {
     } catch { /* telemetry never blocks the user's action */ }
   };
 
-  const isValidEmailRecipient = (value?: string | null) => Boolean(value && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim()));
+  const isValidEmailRecipient = (value?: string | null) => Boolean(value && /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(value.trim()));
   const isVerifiedEmailRecipient = (prospect: Prospect) => {
     try { return JSON.parse(prospect.signals_json || "{}").is_email_validated === true; }
     catch { return false; }
@@ -2134,6 +2134,7 @@ const submitDecision = async (prospectId: string, action: string) => {
                       const websiteHref = getWebsiteUrl(p.website);
                       const messageBody = attackKits[p.id]?.generated_message?.body || p.draft_body || "";
                       const messageSubject = attackKits[p.id]?.generated_message?.subject || p.draft_subject || "";
+                      const emailRecipient = isValidEmailRecipient(p.email) ? p.email.trim() : null;
 
                       return (
                         <div 
@@ -2214,9 +2215,9 @@ const submitDecision = async (prospectId: string, action: string) => {
                           </div>
 
                           <div className="flex flex-wrap items-center gap-2 pt-1 font-mono text-[11px]">
-                            {isValidEmailRecipient(p.email) && (
+                            {emailRecipient && (
                               <a 
-                                href={`mailto:${p.email}?subject=${encodeURIComponent(messageSubject)}&body=${encodeURIComponent(messageBody)}`}
+                                href={`mailto:${emailRecipient}?subject=${encodeURIComponent(messageSubject)}&body=${encodeURIComponent(messageBody)}`}
                                 target="_blank" 
                                 rel="noreferrer" 
                                 className="px-2.5 py-1 rounded-lg bg-blue-950/50 border border-blue-800/40 text-blue-300 hover:bg-blue-900/60 flex items-center gap-1 font-bold"
