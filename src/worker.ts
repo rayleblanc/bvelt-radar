@@ -10375,18 +10375,36 @@ async function generateAICopy(
   const evidenceContext = buildProspectEvidenceContext(prospect);
 
   let tenantInfo: any = null;
-  if (prospect.mode === 'tenant' && prospect.tenant_id) {
+  const isTenantMode = prospect.mode === "tenant" || (prospect.tenant_id && prospect.tenant_id !== "founder");
+  if (isTenantMode) {
+    if (!prospect.tenant_id || prospect.tenant_id === "founder") throw new Error("tenant_configuration_missing");
     try {
       tenantInfo = await env.RADAR_DB.prepare("SELECT * FROM tenant_config WHERE tenant_id = ?").bind(prospect.tenant_id).first() as any;
-    } catch (e) {}
+    } catch (e: any) {
+      console.error("[ProspectMessage] tenant configuration lookup failed:", String(e?.message || e).slice(0, 180));
+      throw new Error("tenant_configuration_unavailable");
+    }
+    if (!tenantInfo) throw new Error("tenant_configuration_missing");
   }
   const tenantContext = tenantInfo ? JSON.stringify({
     tenant_name: tenantInfo.tenant_name, industry: tenantInfo.industry, niche: tenantInfo.niche,
-    services: tenantInfo.services_json, service_areas: tenantInfo.service_areas_json,
+    subniches: tenantInfo.subniches_json, services: tenantInfo.services_json, service_areas: tenantInfo.service_areas_json,
+    cities: tenantInfo.cities_json, regions: tenantInfo.regions_json, countries: tenantInfo.countries_json,
     ideal_customer_profile: tenantInfo.icp_description, icp_keywords: tenantInfo.icp_keywords_json,
     campaign_goal: tenantInfo.campaign_goal, messaging_angle: tenantInfo.messaging_angle,
     allowed_markets: tenantInfo.allowed_markets_json
-  }).slice(0, 3500) : "Founder mode: Bvelt customer enquiry follow-up platform.";
+  }).slice(0, 4500) : "Founder mode: Bvelt customer enquiry follow-up platform.";
+  const tenantServices = tenantInfo ? (() => {
+    try { const parsed = JSON.parse(tenantInfo.services_json || "[]"); return Array.isArray(parsed) ? parsed.filter(Boolean).join(", ") : String(parsed || ""); }
+    catch { return String(tenantInfo.services_json || ""); }
+  })() : "";
+  const tenantAreas = tenantInfo ? (() => {
+    try { const parsed = JSON.parse(tenantInfo.service_areas_json || "[]"); return Array.isArray(parsed) ? parsed.filter(Boolean).join(", ") : String(parsed || ""); }
+    catch { return String(tenantInfo.service_areas_json || ""); }
+  })() : "";
+  const senderValueProposition = tenantInfo
+    ? `Describe only these configured services: ${tenantServices || tenantInfo.industry}. Do not add capabilities or availability claims.`
+    : "Bvelt helps service businesses organize follow-up for customer enquiries through the communication channels they already use.";
 
   let rawAngle = (prospect.bvelt_angle || prospect.bveltAngle || "missed_calls").toLowerCase().trim();
   if (rawAngle === "contact_gap") rawAngle = "sms_gap";
@@ -10432,8 +10450,8 @@ async function generateAICopy(
     1. Idioma: Español técnico y profesional.
     2. Longitud: 45 a 65 palabras en el primer contacto; 35 a 55 en seguimiento.
     3. Tono: Respetuoso, directo, mentalidad de emprendedor de guerrilla.
-    4. Explica el valor sin prometer resultados: "${tenantInfo ? `Bvelt ayuda a dar seguimiento a solicitudes y clientes.` : "Bvelt ayuda a negocios de servicios a organizar el seguimiento de consultas de clientes mediante los canales que ya tienen disponibles."}"
-    5. Primer contacto: una sola pregunta sencilla y de baja presión; no solicites listas de presupuestos, inventarios de cotizaciones ni auditorías; no incluyas enlaces. Seguimiento: puedes incluir un único enlace simple a ${demoLink}.
+    4. Explica el valor sin prometer resultados: "${senderValueProposition}". En Tenant, habla desde la empresa configurada, no desde Bvelt.
+    5. Primer contacto: una sola pregunta sencilla y de baja presión; no solicites listas de presupuestos, inventarios de cotizaciones ni auditorías; no incluyas enlaces. En Tenant no incluyas enlaces de Bvelt ni inventes una web del remitente.
     6. No inventes hechos, porcentajes, velocidad web, llamadas perdidas ni pérdidas de ingresos. No uses "auditoría gratis", "garantizado", "instantáneo" ni promesas de 60 segundos sin evidencia explícita. Sin emojis ni signos de exclamación. SIN FIRMA NI PIE DE PÁGINA (el sistema añade el legal).
     7. ${!tenantInfo && founderLine ? `FRASE FUNDADOR (úsala una vez, natural, no inventes otra biografía): "${founderLine}"` : "No inventes historia personal del fundador."}
     8. ${isFollowUp ? "Esto es SEGUIMIENTO toque #" + outreachTouch + " sin respuesta. Más corto, otro ángulo, sin culpar. Asunto sin Re: falso." : "Primer correo en frío."}
@@ -10456,11 +10474,11 @@ async function generateAICopy(
     RULES:
     1. Length: ${isFollowUp ? "35 to 55" : "45 to 65"} words. Contractor-friendly and concise.
     2. Tone: Respectful, direct, guerrilla entrepreneur mindset. Never beg. Never play for pity.
-    3. Explain value without promising outcomes: "${tenantInfo ? `Bvelt helps manage follow-up with enquiries and customers.` : "Bvelt helps service businesses organize follow-up for customer enquiries through the communication channels they already use."}"
-    4. First touch: ask one simple low-pressure question; do not request an estimate checklist, quote inventory, or audit; include no URL. Follow-up: one plain-text link to ${demoLink} is allowed.
+    3. Explain value without promising outcomes: "${senderValueProposition}". In Tenant mode, write as the configured business, never as Bvelt.
+    4. First touch: ask one simple low-pressure question; do not request an estimate checklist, quote inventory, or audit; include no URL. Tenant messages must never include Bvelt links or invent a sender website.
     5. Never invent facts, percentages, site-speed measurements, missed calls, or lost revenue. Do not use "free audit", "guaranteed", "instant", or 60-second promises without explicit evidence. No emoji, hype, or exclamation marks. NO SIGNATURE OR FOOTER (system adds legal footer).
     6. ${!tenantInfo && founderLine ? `FOUNDER LINE (use once, natural English, do not invent a different bio): "${founderLine}"` : "Do not invent a personal founder story."}
-    7. ${isFollowUp ? "This is FOLLOW-UP touch #" + outreachTouch + " after no reply. Different angle from a first cold email. Shorter. Do not guilt-trip. Subject must NOT start with Re: unless truly a thread. Mention you are checking in once, then offer the demo link again." : "This is the FIRST outreach email."}
+    7. ${isFollowUp ? "This is FOLLOW-UP touch #" + outreachTouch + " after no reply. Different angle from a first cold email. Shorter. Do not guilt-trip. Subject must NOT start with Re: unless truly a thread. Do not add a link unless it belongs to the configured sender." : "This is the FIRST outreach email."}
     8. JSON format: {"subject": "...", "body": "..."}
   `;
 
@@ -10564,8 +10582,24 @@ async function generateAICopy(
     await releaseBudget(env.RADAR_DB, tenantId, 'ai_units', 1);
   }
 
-  // 4. Static High-Converting Template Fallback (always works offline)
+  // 4. Deterministic fallback is explicitly labelled; Tenant must never fall back to a Bvelt sales pitch.
   console.log(`[Gemini Cascade] All AI pipelines failed or budget exceeded. Reverting to deterministic backup template.`);
+  if (tenantInfo) {
+    const services = tenantServices || String(tenantInfo.industry || "configured services");
+    const area = tenantAreas ? ` in ${tenantAreas}` : "";
+    const goal = String(tenantInfo.campaign_goal || tenantInfo.messaging_angle || "your upcoming service needs");
+    const subject = isSpanish ? `Consulta sobre servicios de ${tenantInfo.tenant_name}` : `A question about ${tenantInfo.tenant_name}'s services`;
+    const body = isSpanish
+      ? `Hola equipo de ${prospect.name || "su empresa"}, somos ${tenantInfo.tenant_name}. Ofrecemos ${services}${area}. ¿Están valorando actualmente opciones relacionadas con ${goal.toLowerCase()}? Si tiene sentido, puedo compartir información concreta sobre nuestros servicios.`
+      : `Hi ${prospect.name || "team"}, we're ${tenantInfo.tenant_name}. We provide ${services}${area}. Is ${goal.toLowerCase()} something your team is currently considering? If relevant, I can share specific information about our services.`;
+    return { subject: channel === "whatsapp" ? "" : subject, body, source: "template" };
+  }
+  if (channel === "whatsapp") {
+    const body = isSpanish
+      ? `Hola ${prospect.name || "equipo"}, soy Rainer, de Bvelt. ¿Cómo dan seguimiento a las consultas de clientes cuando el equipo está ocupado? Estoy creando una herramienta para organizar ese proceso. ¿Le sería útil ver un ejemplo?`
+      : `Hi ${prospect.name || "team"} — I'm Rainer from Bvelt. How do you follow up with customer enquiries when the team is busy? I'm building a tool to help organize that process. Would an example be useful?`;
+    return { subject: "", body, source: "template" };
+  }
   const fallback = getTradePsychologyFallback(prospect.name, prospect.trade, prospect.city, bveltAngle, language, prospect.phone, prospect.demo_token, prospect.signal_event, prospect.signal_area, env, prospect.signals_json || prospect.signals);
   return { ...fallback, source: "template" };
 }
@@ -10753,8 +10787,8 @@ function getTradePsychologyFallback(
     ? `Una pregunta sobre seguimiento de clientes en ${name}`
     : `A question about customer follow-up at ${name}`;
   let bodyBase = isSpanish
-    ? `Hola equipo de ${name},\n\nSoy Rainer, fundador de Bvelt. Ayudo a negocios de servicios como ${cTrade} a dar seguimiento a consultas de clientes que necesitan seguimiento.\n\n¿Tienen hoy un proceso para contactar a esas personas después? Si le sirve, puedo enviarle un ejemplo breve.`
-    : `Hi ${name} team,\n\nI'm Rainer, founder of Bvelt. I work on a tool that helps service businesses like yours follow up on calls they could not answer and estimates that are still pending.\n\nDo you have a process for reaching those people afterward? If useful, I can send a short example.`;
+    ? `Hola equipo de ${name},\\n\\nSoy Rainer, fundador de Bvelt. Estoy creando una herramienta para ayudar a negocios de servicios como el suyo a organizar el seguimiento de consultas de clientes.\\n\\n¿Cómo retoman hoy una consulta cuando no pueden atenderla en ese momento? Si le sirve, puedo compartir un ejemplo breve.`
+    : `Hi ${name} team,\\n\\nI'm Rainer, founder of Bvelt. I'm building a tool to help service businesses like yours organize follow-up for customer enquiries.\\n\\nHow do you currently pick up an enquiry when the team cannot respond straight away? If useful, I can share a short example.`;
 
   if (signalEvent && signalArea) {
     subject = isSpanish
@@ -10764,12 +10798,10 @@ function getTradePsychologyFallback(
       ? `Hola equipo de ${name}, vi el aviso de ${signalEvent} relacionado con ${signalArea}. Soy Rainer, fundador de Bvelt. Ayudo a negocios de servicios a dar seguimiento a consultas de clientes que necesitan seguimiento. ¿Tienen un proceso para contactar a quienes no logran comunicarse durante una interrupción? Si le sirve, puedo enviarle un ejemplo breve.`
       : `Hi ${name} team, I saw the ${signalEvent} notice for ${signalArea}. I'm Rainer, founder of Bvelt. I work on follow-up for service businesses when customer enquiries need follow-up. Do you have a process for reaching people who could not get through during an interruption? I can send a short example if useful.`;
   } else if (signals.no_own_website) {
-    subject = isSpanish
-      ? `Una pregunta sobre cómo recibe consultas ${name}`
-      : `A question about how ${name} receives enquiries`;
+    subject = isSpanish ? `Una pregunta sobre cómo recibe consultas ${name}` : `A question about how ${name} receives enquiries`;
     bodyBase = isSpanish
-      ? `Hola equipo de ${name}, no encontré un sitio web propio de ${name} en la revisión pública que hice. ¿Cómo registran y retoman las consultas cuando una llamada no se puede atender? Estoy creando Bvelt para ayudar a organizar ese seguimiento y los presupuestos pendientes. Si le sirve, puedo enviarle un ejemplo breve.`
-      : `Hi ${name} team, I could not find a dedicated website for ${name} in the public information I checked. How do you capture and follow up on enquiries when a call cannot be answered? I'm building Bvelt to help organize that follow-up and pending estimates. I can send a short example if useful.`;
+      ? `Hola equipo de ${name}, no encontré un sitio web propio en la información pública revisada. ¿Qué canal prefieren sus clientes para consultar sus servicios? Estoy creando Bvelt para ayudar a organizar el seguimiento de esas consultas. Si le sirve, puedo compartir un ejemplo breve.`
+      : `Hi ${name}, I could not find a dedicated website in the public information I checked. Which channel do customers usually use to enquire about your services? I'm building Bvelt to help organize follow-up for those enquiries. I can share a short example if useful.`;
   }
 
   const footer = env ? buildLegalFooter(env) : "";

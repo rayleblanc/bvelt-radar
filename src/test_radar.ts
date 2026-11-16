@@ -2557,6 +2557,22 @@ tests.push({
   }
 });
 
+
+tests.push({
+  name: "Tenant AI copy never silently becomes a Bvelt pitch when tenant configuration is missing",
+  run: async () => {
+    const { generateAICopy } = await import("./worker");
+    const env: any = { RADAR_DB: { prepare: () => ({ bind: () => ({ first: async () => null, run: async () => ({ success: true }) }) }) } };
+    let rejected = false;
+    try {
+      await generateAICopy({ id: "tenant_missing", mode: "tenant", tenant_id: "tenant_missing", name: "Buyer Co", city: "Dallas", trade: "property_management" }, "tenant_b2b_service", env, { languages: ["en"] } as any, "email");
+    } catch (error: any) {
+      rejected = String(error?.message || error).includes("tenant_configuration_missing");
+    }
+    assert(rejected, "Missing Tenant config must fail closed instead of using Founder/Bvelt messaging");
+  }
+});
+
 // Test 43: Eliminate False Commercial Inferences in buildAttackKit
 tests.push({
   name: "Eliminate False Inferences in buildAttackKit: phone/website alone never triggers missed_calls",
