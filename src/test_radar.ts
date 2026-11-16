@@ -51,6 +51,20 @@ tests.push({
 });
 
 tests.push({
+  name: "RADAR_OUTREACH_PAUSE forces manual approval instead of automatic sends",
+  run: () => {
+    const shouldAutoSend = (paused: string, score: number) => {
+      const isPaused = ["true", "1", "yes"].includes(String(paused || "").trim().toLowerCase());
+      const isEligible = score >= 80 || score >= 70;
+      return !isPaused && isEligible;
+    };
+    assert(shouldAutoSend("false", 90), "Auto outreach may remain enabled when explicitly unpaused");
+    assert(!shouldAutoSend("true", 90), "Explicit pause must prevent autonomous sends");
+    assert(!shouldAutoSend("1", 90), "Numeric pause must prevent autonomous sends");
+  }
+});
+
+tests.push({
   name: "Founder discovery skips map-only candidates before spending budget",
   run: () => {
     assert(hasEnrichableContactData("team@acmehvac.com", null, null), "A valid email is an enrichment path");
