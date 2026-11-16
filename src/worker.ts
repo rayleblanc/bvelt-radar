@@ -11535,7 +11535,7 @@ export function isEmailValidatedForOutreach(signals: unknown): boolean {
   return !!metadata && typeof metadata === "object" && metadata.is_email_validated === true;
 }
 
-export function shouldUseManualWhatsAppFallback(email: unknown, phone: unknown, signals: unknown): boolean {
+export function shouldUseManualWhatsAppFallback(email: unknown, phone: string | null | undefined, signals: unknown): boolean {
   const hasPhone = Boolean(extractPhoneDigits(phone));
   const hasVerifiedEmail = Boolean(String(email || "").trim()) && isEmailValidatedForOutreach(signals);
   return hasPhone && !hasVerifiedEmail;
