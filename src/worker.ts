@@ -5911,6 +5911,18 @@ export async function reconcileResendDeliveries(env: Env): Promise<{ checked: nu
 /**
  * 1. DISCOVERY JOB: Scrapes directory businesses for 1 city + trade, enqueues enrich jobs
  */
+export function isDiscoveryInfrastructureFailure(reason: unknown): boolean {
+  const value = String(reason || "").toLowerCase();
+  return value.includes("timeout") ||
+    value.includes("aborted") ||
+    value.includes("http 4") ||
+    value.includes("http 5") ||
+    value.includes("network") ||
+    value.includes("fetch failed") ||
+    value.includes("econn") ||
+    (value.includes("overpass") && value.includes("fail"));
+}
+
 async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void> {
   const { city, trade, overrides } = job.payload;
 
@@ -6013,15 +6025,7 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
     // Do NOT burn geo_coverage on infrastructure failures (timeout/4xx/abort).
     // Only mark when sources honestly returned zero matches.
     const reason = String(diagnostics?.reason || "").toLowerCase();
-    const isInfraFail =
-      reason.includes("timeout") ||
-      reason.includes("aborted") ||
-      reason.includes("http 4") ||
-      reason.includes("http 5") ||
-      reason.includes("network") ||
-      reason.includes("fetch failed") ||
-      reason.includes("econn") ||
-      (reason.includes("overpass") && reason.includes("fail"));
+    const isInfraFail = isDiscoveryInfrastructureFailure(reason);
     const isHonestEmpty =
       reason.includes("0 matches") ||
       reason.includes("0 businesses") ||
@@ -10055,18 +10059,26 @@ export async function fetchLocalBusinessesWithDiagnostics(
       await cachePut(env, zeroKey, "0", 86400 * 30);
       await cachePut(env, cacheKey, JSON.stringify(deduped), 86400);
     } else {
-      let streak = 1;
-      try {
-        const prev = await cacheGet(env, zeroKey);
-        streak = (parseInt(prev || "0", 10) || 0) + 1;
-      } catch (e) {}
-      await cachePut(env, zeroKey, String(streak), 86400 * 30);
+      const infrastructureFailure = isDiscoveryInfrastructureFailure(diagnostics.reason);
+      if (infrastructureFailure) {
+        // Do not turn timeouts, provider errors or invalid source responses into
+        // a 7-day market cooldown. Keep only a short cache to avoid request storms.
+        console.warn(`[Discovery Zero-Cache] ${city} - ${trade} returned an infrastructure/provider failure; zero streak unchanged.`);
+        await cachePut(env, cacheKey, JSON.stringify([]), 1800);
+      } else {
+        let streak = 1;
+        try {
+          const prev = await cacheGet(env, zeroKey);
+          streak = (parseInt(prev || "0", 10) || 0) + 1;
+        } catch (e) {}
+        await cachePut(env, zeroKey, String(streak), 86400 * 30);
 
-      const ttl = streak >= 5 ? 7 * 86400 : 1800; // 7 días si streak >= 5, si no 30 min
-      if (streak >= 5) {
-        console.log(`[Discovery Zero-Cache] ${city} - ${trade} reached ${streak} consecutive zeroes. Applying 7-day cooldown.`);
+        const ttl = streak >= 5 ? 7 * 86400 : 1800; // 7 días si streak >= 5, si no 30 min
+        if (streak >= 5) {
+          console.log(`[Discovery Zero-Cache] ${city} - ${trade} reached ${streak} consecutive honest zeroes. Applying 7-day cooldown.`);
+        }
+        await cachePut(env, cacheKey, JSON.stringify([]), ttl);
       }
-      await cachePut(env, cacheKey, JSON.stringify([]), ttl);
     }
   }
 
