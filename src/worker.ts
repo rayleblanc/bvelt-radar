@@ -3096,7 +3096,7 @@ export default {
             continue;
           }
 
-          // 3. Idempotent check: UNIQUE (prospect_id, source_id, evidence_type, content_hash)
+          // 3. Idempotent check: unique within mode + realm + tenant + prospect + source + evidence type + content hash
           const existingEvidence = (await env.RADAR_DB.prepare(`
             SELECT id FROM source_evidence
             WHERE mode = ? AND realm = ? AND tenant_id = ? AND prospect_id = ?
