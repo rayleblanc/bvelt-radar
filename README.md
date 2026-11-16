@@ -51,19 +51,22 @@ npx wrangler secret put GEMINI_SECONDARY_API_KEY # Key Secundaria para ampliaci�
 npx wrangler secret put GROQ_API_KEY             # Key de Groq (Llama-3.3-70b)
 npx wrangler secret put HUNTER_API_KEY           # Búsqueda de emails en dominio (max 8/día)
 npx wrangler secret put ABSTRACT_API_KEY         # Validación de entregabilidad
+npx wrangler secret put GITHUB_ACTIONS_TOKEN      # GitHub Actions: dispatch de Scrapling (SIEMPRE como Secret)
+npx wrangler secret put RADAR_SIDECAR_CALLBACK_KEY # Autenticación del callback Scrapling
 ```
 
 **Variables de Configuración [vars] (No sensibles - en `wrangler.toml` o Dashboard > Variables):**
 ```toml
 [vars]
-FOUNDING_CITIES = "City A, Region;City B, Region"
+# Opcionales: si no defines estas variables, Founder usa los segmentos del market-universe.json.
 FOUNDING_TRADES = "trade_one;trade_two"
-FOUNDING_COUNTRIES = "US;CA;GB"
 FOUNDING_LANGUAGES = "en"
 FOUNDING_MIN_SCORE = "50"
 ```
 
-Los valores son ejemplos. `FOUNDING_CITIES` y `FOUNDING_COUNTRIES` son opcionales; si se indican, acotan la búsqueda. `FOUNDING_TRADES` sustituye las prioridades amplias de `market-universe.json`, pero no existe una allowlist de industrias. El catálogo actual de rotación automática cubre US/CA; para otros países configura ciudades explícitas (la geocodificación de esas ciudades usa Nominatim). Los países prioritarios solo elevan el ranking, no excluyen mercados fuera de la lista.
+No configures FOUNDING_CITIES ni FOUNDING_COUNTRIES para la rotación automática. Founder toma sus ciudades de los archivos incluidos en el Worker: src/geoData.ts y src/geoDataAnglosphere.ts. Los cuatro mercados principales son US, CA, GB y AU; aproximadamente el 75% de los objetivos se distribuye entre ellos y el 25% restante explora otros países presentes en el gazetteer.
+
+La cobertura no es mundial todavía: geoData.ts contiene la cobertura extensa de US/CA y el archivo suplementario añade centros urbanos de GB, AU, IE, NZ y ZA. Las coordenadas son centros urbanos aproximados y las poblaciones son pesos redondeados para priorización, no datos censales. Para añadir más países hay que ampliar los archivos geográficos con datos redistribuibles y atribución verificable; no basta con añadir un código de país a la configuración.
 
 ### 4. Configurar el Webhook de Telegram (Botones Interactivos)
 Para que los botones `[✅ Mark Sent]`, `[❌ Discard]` y `[🚫 Suppress]` funcionen directamente desde Telegram:
@@ -146,11 +149,11 @@ After a prospect is enriched and scored, Radar now maintains:
 - Fresh signal history for contactability, fit, website/pain signals and market evidence.
 - A structured graph payload linking business, market and vertical.
 - Outcome events feeding the existing learning engine.
-- Mobile API endpoints: `/api/opportunities`, `/api/missions`, `/api/learning`, `/api/config`, `/api/opportunity-event`.
+- Mobile API endpoints: `/api/opportunities`, `/api/missions`, `/api/learning`, `/api/settings`, `/api/opportunity-event`.
 
 ### Targeting safety
 
-Founder targets can be persisted in D1 through `/api/config`; these targets take precedence over legacy `FOUNDING_CITIES` / `FOUNDING_TRADES`. With no explicit city list, Founder rotates through the available gazetteer; with no custom niche list, it seeds broad Bvelt-compatible segments from `market-universe.json`. No fixed city or country is hardcoded, and custom industries are not rejected by a closed allowlist.
+Founder target selection uses `market-universe.json` and the bundled gazetteer; it does not require a persisted city/country allowlist. `FOUNDING_CITIES` remains an optional explicit override only. With no trade override, Founder expands the broad Bvelt-compatible segments into searchable niches. Tenant geography and ICP remain isolated in `tenant_config`.
 
 ### Database migrations
 
