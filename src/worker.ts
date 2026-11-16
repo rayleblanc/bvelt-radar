@@ -1482,7 +1482,7 @@ export default {
           }
 
           const signals = await env.RADAR_DB.prepare("SELECT * FROM opportunity_signals WHERE opportunity_id = ? ORDER BY observed_at DESC").bind(opp.id).all();
-          const actions = await env.RADAR_DB.prepare("SELECT * FROM opportunity_actions WHERE opportunity_id = ? ORDER BY proposed_at DESC").bind(opp.id).all();
+          const actions = await env.RADAR_DB.prepare("SELECT * FROM opportunity_actions WHERE opportunity_id = ? ORDER BY rowid DESC").bind(opp.id).all();
           const outcomes = await env.RADAR_DB.prepare("SELECT * FROM opportunity_outcomes WHERE opportunity_id = ? ORDER BY created_at DESC").bind(opp.id).all();
 
           return Response.json({
@@ -5381,6 +5381,58 @@ async function ensureOpportunitiesSchema(db: D1Database): Promise<void> {
       )
     `).run();
   } catch { /* ok */ }
+  // Align intelligence tables with migration 0022 even when production already
+  // had legacy tables. CREATE IF NOT EXISTS does not evolve an existing schema.
+  const intelligenceTables = [
+    `CREATE TABLE IF NOT EXISTS opportunity_signals (
+      id TEXT PRIMARY KEY, opportunity_id TEXT NOT NULL, signal_type TEXT NOT NULL,
+      observed_evidence TEXT NOT NULL, inferred_reasoning TEXT, confidence REAL DEFAULT 0.8,
+      freshness_score INTEGER DEFAULT 100, observed_at TEXT NOT NULL, created_at TEXT NOT NULL
+    )`,
+    `CREATE TABLE IF NOT EXISTS opportunity_actions (
+      id TEXT PRIMARY KEY, opportunity_id TEXT NOT NULL, action_type TEXT NOT NULL,
+      status TEXT DEFAULT 'proposed', details_json TEXT, proposed_at TEXT NOT NULL, executed_at TEXT
+    )`,
+    `CREATE TABLE IF NOT EXISTS opportunity_outcomes (
+      id TEXT PRIMARY KEY, opportunity_id TEXT NOT NULL, action_id TEXT,
+      outcome_type TEXT NOT NULL, value_realized REAL DEFAULT 0, notes TEXT, created_at TEXT NOT NULL
+    )`
+  ];
+  for (const sql of intelligenceTables) {
+    try { await db.prepare(sql).run(); } catch { /* table may already exist */ }
+  }
+
+  const compatibilityColumns: Array<[string, string]> = [
+    ["opportunity_signals", "observed_evidence TEXT"],
+    ["opportunity_signals", "inferred_reasoning TEXT"],
+    ["opportunity_signals", "confidence REAL DEFAULT 0.8"],
+    ["opportunity_signals", "freshness_score INTEGER DEFAULT 100"],
+    ["opportunity_signals", "observed_at TEXT"],
+    ["opportunity_signals", "created_at TEXT"],
+    ["opportunity_actions", "action_type TEXT"],
+    ["opportunity_actions", "details_json TEXT"],
+    ["opportunity_actions", "proposed_at TEXT"],
+    ["opportunity_actions", "executed_at TEXT"],
+    ["opportunity_outcomes", "action_id TEXT"],
+    ["opportunity_outcomes", "outcome_type TEXT"],
+    ["opportunity_outcomes", "value_realized REAL"],
+    ["opportunity_outcomes", "notes TEXT"],
+    ["opportunity_outcomes", "created_at TEXT"]
+  ];
+  for (const [table, column] of compatibilityColumns) {
+    try { await db.prepare(`ALTER TABLE ${table} ADD COLUMN ${column}`).run(); } catch { /* already present */ }
+  }
+
+  // Backfill old column names when they exist; these statements are intentionally
+  // isolated because fresh migration-0022 tables do not contain legacy columns.
+  for (const sql of [
+    "UPDATE opportunity_signals SET observed_evidence = COALESCE(NULLIF(observed_evidence, ''), signal_value, '')",
+    "UPDATE opportunity_actions SET action_type = COALESCE(NULLIF(action_type, ''), action, 'outreach_draft'), details_json = COALESCE(details_json, payload_json, reason), proposed_at = COALESCE(proposed_at, created_at, datetime('now'))",
+    "UPDATE opportunity_outcomes SET outcome_type = COALESCE(NULLIF(outcome_type, ''), outcome, 'unknown'), value_realized = COALESCE(value_realized, value, 0)"
+  ]) {
+    try { await db.prepare(sql).run(); } catch { /* legacy-only columns may differ */ }
+  }
+
 }
 
 /**
@@ -8508,6 +8560,10 @@ export async function syncOpportunityDecision(
   notes?: string
 ): Promise<void> {
   try {
+    if (!_oppSchemaReady) {
+      await ensureOpportunitiesSchema(db);
+      _oppSchemaReady = true;
+    }
     const opp = await db.prepare("SELECT id FROM opportunities WHERE prospect_id = ?").bind(prospectId).first() as any;
     if (opp) {
       const nowIso = new Date().toISOString();
@@ -9188,6 +9244,7 @@ export interface DiscoveryDiagnostics {
   bizdata_status: string;
   discovered_raw: number;
   filtered: number;
+  viable_candidates?: number;
   contactless_filtered?: number;
   reason: string;
   permits_found?: number;
@@ -9463,8 +9520,33 @@ export async function fetchLocalBusinessesWithDiagnostics(
   mode: 'founder' | 'tenant' = 'founder'
 ): Promise<{ businesses: any[]; diagnostics: DiscoveryDiagnostics }> {
   const tagScope = (customOsmTags || []).map(tag => String(tag).trim().toLowerCase()).filter(Boolean).sort().join("_").slice(0, 120);
-  const cacheKey = `radar_cache_${mode}_${city.replace(/[^a-z0-9]/gi, "_")}_${trade}_${tagScope}_v5`.toLowerCase();
+  const cacheKey = `radar_cache_${mode}_${city.replace(/[^a-z0-9]/gi, "_")}_${trade}_${tagScope}_v6`.toLowerCase();
   
+  const countViableCandidates = (items: any[]): number => {
+    const seen = new Set<string>();
+    let count = 0;
+    for (const item of items || []) {
+      const name = String(item?.name || "").trim();
+      if (!name || /example\\.com/i.test(String(item.email || "") + " " + String(item.website || ""))) continue;
+      const candidateTrade = String(item.trade || trade);
+      const coherence = checkTradeCoherence(name, candidateTrade, item.website, JSON.stringify(item), mode);
+      if (
+        isOffIcpName(name, mode === "tenant", candidateTrade) ||
+        !coherence.coherent ||
+        coherence.disqualified ||
+        isHardRejectedChain(name) ||
+        isNonBusinessEntity(name, item.website, mode) ||
+        (mode === "tenant" && !tenantBuyerNameFits(name, candidateTrade))
+      ) continue;
+      if (mode !== "tenant" && !hasEnrichableContactData(item.email, item.phone, item.website)) continue;
+      const key = name.toLowerCase().replace(/[^a-z0-9]/g, "");
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      count++;
+    }
+    return count;
+  };
+
   if (env.RADAR_DB) {
     try {
       const cached = await cacheGet(env, cacheKey);
@@ -9480,7 +9562,8 @@ export async function fetchLocalBusinessesWithDiagnostics(
             bizdata_status: "cached",
             discovered_raw: parsed.length,
             filtered: 0,
-            reason: "Retrieved from KV Cache"
+            viable_candidates: countViableCandidates(parsed),
+            reason: "Retrieved from D1 cache"
           }
         };
       }
@@ -9557,65 +9640,79 @@ export async function fetchLocalBusinessesWithDiagnostics(
         knownPlace.lon + dLon
       ]
     };
-    nominatimStatus = `local_bbox r=${r.toFixed(1)}km [${nominatimGeo.bbox.map(n => n.toFixed(3)).join(", ")}]`;
-  } else {
-    nominatimGeo = await fetchNominatimGeocoding(city);
-    nominatimStatus = nominatimGeo ? `resolved_bbox [${nominatimGeo.bbox.join(", ")}]` : "geocoding_fallback";
-  }
-
-  // 1.5 Municipal Permit Contractors Lookup (real-time building permits)
-  let permitCandidates: any[] = [];
-  try {
-    const permitContractors = await fetchPermitContractors(city, trade);
-    if (permitContractors && permitContractors.length > 0) {
-      permitCandidates = permitContractors.map((p: any) => ({
-        name: p.name,
-        phone: p.phone,
-        city: p.city || city,
-        website: null,
-        email: null,
-        source: "permits" as const,
-        permits_90d: p.permits_90d
-      }));
-    }
-  } catch (e) {
-    permitCandidates = [];
-  }
-  const permitsFound = permitCandidates.length;
-
-  // 2. Overpass Mirror Cascade
-  const overpassRes = await fetchOverpassBusinesses(city, trade, nominatimGeo, customOsmTags);
-  overpassStatus = overpassRes.status;
-  rawBusinesses.push(...overpassRes.businesses);
-
-  // Target pool size: founder needs contactable trades; tenant needs broader B2B surface
+    nominatimStatus = `local_bbox r=${r  // Evaluate source coverage by unique, ICP-coherent and contactable businesses,
+  // not raw map rows. A city can return 60 OSM objects but only 0-3 actionable leads.
   const targetPool = mode === 'tenant' ? 40 : 28;
+  let viableCount = countViableCandidates([...permitCandidates, ...rawBusinesses]);
 
-  // 2.5 Geoapify Places — free tier key; fill until target
-  let geoapifyStatus = "skipped (no GEOAPIFY_API_KEY)";
-  if (env.GEOAPIFY_API_KEY && rawBusinesses.length < targetPool) {
+  // 2.5 Geoapify — call when the viable pool is thin, even if OSM returned many raw rows.
+  let geoapifyStatus = env.GEOAPIFY_API_KEY
+    ? `skipped (viable pool ${viableCount} >= ${targetPool})`
+    : "skipped (no GEOAPIFY_API_KEY)";
+  if (viableCount < targetPool && env.GEOAPIFY_API_KEY) {
     const geoRes = await fetchGeoapifyBusinesses(city, trade, nominatimGeo, env.GEOAPIFY_API_KEY);
     geoapifyStatus = geoRes.status;
-    // Founder: drop pure hotels/restaurants unless trade is hospitality-related
     const geoItems = (geoRes.businesses || []).filter((b: any) => {
       if (mode === 'tenant') return true;
       const n = String(b.name || '').toLowerCase();
-      if (/\b(hotel|motel|resort|inn)\b/i.test(n) && !/plumb|hvac|electric|roof|landscap|clean|pest/i.test(trade)) return false;
-      if (/\b(restaurant|cafe|bar|grill)\b/i.test(n) && !/clean|pest|hvac|plumb/i.test(trade)) return false;
+      if (/\\b(hotel|motel|resort|inn)\\b/i.test(n) && !/plumb|hvac|electric|roof|landscap|clean|pest/i.test(trade)) return false;
+      if (/\\b(restaurant|cafe|bar|grill)\\b/i.test(n) && !/clean|pest|hvac|plumb/i.test(trade)) return false;
       return true;
     });
     rawBusinesses.push(...geoItems);
+    viableCount = countViableCandidates([...permitCandidates, ...rawBusinesses]);
+  } else if (viableCount < targetPool && !env.GEOAPIFY_API_KEY) {
+    geoapifyStatus = "skipped (no GEOAPIFY_API_KEY; viable pool below target)";
   }
 
-  // 2.6 LocationIQ free search (optional key, no credit card)
-  let locationIqStatus = "skipped (no LOCATIONIQ_API_KEY)";
-  if (env.LOCATIONIQ_API_KEY && rawBusinesses.length < targetPool) {
+  // 2.6 LocationIQ — same viability threshold; raw duplicates must not suppress it.
+  let locationIqStatus = env.LOCATIONIQ_API_KEY
+    ? `skipped (viable pool ${viableCount} >= ${targetPool})`
+    : "skipped (no LOCATIONIQ_API_KEY)";
+  if (viableCount < targetPool && env.LOCATIONIQ_API_KEY) {
     const liq = await fetchLocationIqBusinesses(city, trade, String(env.LOCATIONIQ_API_KEY));
     locationIqStatus = liq.status;
     rawBusinesses.push(...liq.businesses);
+    viableCount = countViableCandidates([...permitCandidates, ...rawBusinesses]);
+  } else if (viableCount < targetPool && !env.LOCATIONIQ_API_KEY) {
+    locationIqStatus = "skipped (no LOCATIONIQ_API_KEY; viable pool below target)";
   }
 
-  // 2.7 Photon (Komoot) — NO KEY, OSM-based text search worldwide
+  // 2.7 Photon — free global text-search fallback, measured by viable businesses.
+  let photonStatus = `skipped (viable pool ${viableCount} >= ${targetPool})`;
+  if (viableCount < targetPool) {
+    const ph = await fetchPhotonBusinesses(city, trade);
+    photonStatus = ph.status;
+    rawBusinesses.push(...ph.businesses);
+    viableCount = countViableCandidates([...permitCandidates, ...rawBusinesses]);
+  }
+
+  // 3. BizData — no key; use when fewer than 12 viable businesses remain.
+  const bizDataExplicitlyOff = env.ENABLE_BIZDATA === "0" || env.ENABLE_BIZDATA === "false";
+  const bizDataThreshold = Math.min(12, targetPool);
+  if (bizDataExplicitlyOff) {
+    bizdataStatus = "disabled (ENABLE_BIZDATA=0)";
+  } else if (viableCount < bizDataThreshold) {
+    const bizDataRes = await fetchBizDataBusinesses(city, trade);
+    bizdataStatus = bizDataRes.status;
+    rawBusinesses.push(...bizDataRes.businesses);
+    viableCount = countViableCandidates([...permitCandidates, ...rawBusinesses]);
+  } else {
+    bizdataStatus = `skipped (viable pool ${viableCount} >= ${bizDataThreshold})`;
+  }
+
+  // 3.5 Nominatim POI has no contact fields; reserve it for Tenant research only.
+  let nominatimPoiStatus = mode === "tenant"
+    ? `skipped (viable pool ${viableCount} >= 6)`
+    : "skipped (Founder requires a contactable source)";
+  if (mode === "tenant" && viableCount < 6) {
+    const nom = await fetchNominatimPoiBusinesses(city, trade);
+    nominatimPoiStatus = nom.status;
+    rawBusinesses.push(...nom.businesses);
+    viableCount = countViableCandidates([...permitCandidates, ...rawBusinesses]);
+  }
+
+-based text search worldwide
   let photonStatus = "unattempted";
   if (rawBusinesses.length < targetPool) {
     const ph = await fetchPhotonBusinesses(city, trade);
@@ -9667,8 +9764,9 @@ export async function fetchLocalBusinessesWithDiagnostics(
 
   const discoveredRaw = allCandidates.length;
   const filtered = discoveredRaw - deduped.length;
+  const viableCandidates = countViableCandidates(deduped);
   const reason = deduped.length > 0 
-    ? `Discovered ${deduped.length} businesses for ${city} - ${trade} across discovery cascade`
+    ? `Discovered ${deduped.length} ICP candidates (${viableCandidates} contactable) for ${city} - ${trade} across discovery cascade`
     : `Zero businesses discovered for ${city} - ${trade}. Nominatim: ${nominatimStatus}, Overpass: ${overpassStatus}, Geoapify: ${geoapifyStatus}, BizData: ${bizdataStatus}`;
 
   const diagnostics: DiscoveryDiagnostics = {
@@ -9679,6 +9777,7 @@ export async function fetchLocalBusinessesWithDiagnostics(
     bizdata_status: bizdataStatus,
     discovered_raw: discoveredRaw,
     filtered,
+    viable_candidates: viableCandidates,
     reason,
     permits_found: permitsFound,
     geoapify_status: geoapifyStatus,
