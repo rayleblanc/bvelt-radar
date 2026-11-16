@@ -233,6 +233,84 @@ def _strip_html(html: str) -> str:
     return re.sub(r"\s+", " ", html).strip()
 
 
+def _valid_email_candidate(value: str) -> bool:
+    candidate = (value or "").strip().lower()
+    if not EMAIL_RE.fullmatch(candidate) or "@" not in candidate:
+        return False
+    local, domain = candidate.rsplit("@", 1)
+    if local in {"example", "test", "sample", "demo", "placeholder", "yourname", "your_name", "email", "name", "user", "noreply", "no-reply"}:
+        return False
+    if domain in {"example.com", "example.org", "example.net", "example.test", "test.com", "email.com", "domain.com", "localhost", "invalid"}:
+        return False
+    if domain.endswith((".png", ".jpg", ".jpeg", ".svg", ".webp", ".gif", ".avif", ".ico")):
+        return False
+    return True
+
+
+def _valid_phone_digits(digits: str) -> bool:
+    if not digits or not digits.isdigit() or not 8 <= len(digits) <= 15:
+        return False
+    national = digits[1:] if len(digits) == 11 and digits.startswith("1") else digits
+    if len(national) == 10:
+        return national[0] in "23456789" and national[3] in "23456789" and national[3:6] != "555"
+    return digits[0] != "0"
+
+
+def _extract_contact_candidates(html: str) -> tuple[set[str], set[str], list[dict[str, str]]]:
+    """Collect contacts from explicit links, JSON-LD and visible contact context only."""
+    emails: set[str] = set()
+    phones: set[str] = set()
+    provenance: list[dict[str, str]] = []
+    visible_html = re.sub(r"(?is)<(script|style|noscript|svg|template|canvas)[^>]*>.*?</\1>", " ", html)
+    visible_text = _strip_html(visible_html)
+
+    for raw in re.findall(r"""(?is)href\s*=\s*['"]mailto:([^'"?]+)""", visible_html):
+        value = raw.strip().lower()
+        if _valid_email_candidate(value):
+            emails.add(value)
+            provenance.append({"type": "email", "value": value, "source": "mailto"})
+
+    # Structured business data is extracted separately from executable scripts.
+    for block in re.findall(r"""(?is)<script\b[^>]*type\s*=\s*['"]application/ld\+json['"][^>]*>(.*?)</script>""", html):
+        for key, raw in re.findall(r"""(?is)["'](email|telephone|phone)["']\s*:\s*["']([^"']+)["']""", block):
+            value = raw.strip()
+            if key.lower() == "email":
+                candidate = value.lower()
+                if _valid_email_candidate(candidate):
+                    emails.add(candidate)
+                    provenance.append({"type": "email", "value": candidate, "source": "json_ld"})
+            else:
+                digits = re.sub(r"\D", "", value)
+                if _valid_phone_digits(digits):
+                    phones.add(value)
+                    provenance.append({"type": "phone", "value": value, "source": "json_ld"})
+
+    for raw in EMAIL_RE.findall(visible_text):
+        value = raw.lower().strip(".,;:()[]{}<>")
+        if _valid_email_candidate(value) and not any(x in value for x in ("wixpress.com", "sentry.io")):
+            emails.add(value)
+            provenance.append({"type": "email", "value": value, "source": "visible_text"})
+
+    for raw in re.findall(r"""(?is)href\s*=\s*['"]tel:([^'"]+)['"]""", visible_html):
+        value = raw.strip()
+        digits = re.sub(r"\D", "", value)
+        if _valid_phone_digits(digits):
+            phones.add(value)
+            provenance.append({"type": "phone", "value": value, "source": "tel_link"})
+
+    for match in PHONE_RE.finditer(visible_text):
+        value = match.group(0).strip()
+        digits = re.sub(r"\D", "", value)
+        if not _valid_phone_digits(digits):
+            continue
+        context = visible_text[max(0, match.start() - 55):min(len(visible_text), match.end() + 35)]
+        if re.search(r"(?i)\b(phone|telephone|tel|call|contact|text|mobile|office)\b", context):
+            phones.add(value)
+            provenance.append({"type": "phone", "value": value, "source": "visible_contact_context"})
+
+    return emails, phones, provenance
+
+
 def _same_domain_links(html: str, base_url: str) -> list[str]:
     found: list[str] = []
     for href in re.findall(r"(?is)<a\b[^>]*?href\s*=\s*['\"]([^'\"]+)['\"]", html):
@@ -261,6 +339,7 @@ def _extract(candidate: dict[str, Any]) -> dict[str, Any] | None:
     visited: set[str] = set()
     emails: set[str] = set()
     phones: set[str] = set()
+    contact_provenance: list[dict[str, str]] = []
     service_terms: set[str] = set()
     signals: dict[str, bool] = {
         "contact_form_observed": False,
@@ -316,14 +395,10 @@ def _extract(candidate: dict[str, Any]) -> dict[str, Any] | None:
         page_hash = hashlib.sha256(html.encode("utf-8", errors="ignore")).hexdigest()
         pages.append({"url": url, "http_status": status, "content_hash": page_hash})
 
-        for email in EMAIL_RE.findall(html):
-            email_l = email.lower().strip(".,;:()[]{}<>")
-            if not any(x in email_l for x in ("example.com", "test.com", "wixpress.com", "sentry.io")):
-                emails.add(email_l)
-        for phone in PHONE_RE.findall(html):
-            compact = re.sub(r"\s+", " ", phone).strip()
-            if sum(ch.isdigit() for ch in compact) >= 8:
-                phones.add(compact)
+        page_emails, page_phones, page_contact_provenance = _extract_contact_candidates(html)
+        emails.update(page_emails)
+        phones.update(page_phones)
+        contact_provenance.extend(page_contact_provenance)
 
         signals["contact_form_observed"] = signals["contact_form_observed"] or bool(re.search(r"(?is)<form\b", html))
         signals["quote_or_estimate_language_observed"] = signals["quote_or_estimate_language_observed"] or bool(re.search(r"(?i)\b(get a quote|request a quote|free estimate|request an estimate|estimate request|get pricing)\b", text))
@@ -364,6 +439,8 @@ def _extract(candidate: dict[str, Any]) -> dict[str, Any] | None:
         "meta_description": meta_description,
         "public_business_emails": sorted(emails)[:10],
         "public_business_phones": sorted(phones)[:10],
+        "contact_provenance": contact_provenance[:40],
+        "contact_provenance": contact_provenance[:40],
         "service_terms_observed": sorted(service_terms)[:30],
         "observed_capabilities": signals,
         "pages_fetched": pages,

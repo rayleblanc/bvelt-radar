@@ -3057,22 +3057,59 @@ export default {
               updated_at: now
             };
 
-            const quality = evaluateResearchEvidenceQuality(String(prospectRow.name || ""), incomingFacts);
-            mergedScrapling.quality_gate = { allowed: quality.allowed, reason: quality.reason || null, checked_at: now };
+            const quality = evaluateResearchEvidenceQuality(String(prospectRow.name || ""), incomingFacts, String(prospectRow.trade || ""), mode);
+            mergedScrapling.quality_gate = { allowed: quality.allowed, reason: quality.reason || null, inferred_trade: quality.inferredTrade || null, checked_at: now };
             signalsObj.scrapling = mergedScrapling;
             if (!signalsObj.signals) signalsObj.signals = {};
             signalsObj.signals.scrapling = mergedScrapling;
+            if (mode === "founder") {
+              const capabilities = incomingFacts.observed_capabilities || {};
+              const serviceTerms = Array.isArray(incomingFacts.service_terms_observed) ? incomingFacts.service_terms_observed : [];
+              // Reconcile the old website-derived score inputs with observed Scrapling facts.
+              // Missing SMS support is not proof of a lost lead, so this signal is cleared.
+              signalsObj.signals.contact_form = capabilities.contact_form_observed === true;
+              signalsObj.signals.quote_request = capabilities.quote_or_estimate_language_observed === true;
+              signalsObj.signals.booking = capabilities.booking_or_appointment_observed === true;
+              signalsObj.signals.call_cta = capabilities.click_to_call_observed === true;
+              signalsObj.signals.lead_capture = capabilities.contact_form_observed === true;
+              signalsObj.signals.multiple_areas = capabilities.service_area_language_observed === true;
+              signalsObj.signals.sms_gap = false;
+              signalsObj.signals.emergency = serviceTerms.some((term: any) => /emergency/i.test(String(term)));
+            }
             const terminalStatus = ["sent", "delivered", "opened", "clicked", "replied", "won", "lost", "bounced", "unsubscribed", "complained"].includes(String(prospectRow.status || "").toLowerCase());
             if (!quality.allowed && !terminalStatus) {
               await env.RADAR_DB.prepare(`
-                UPDATE prospects SET signals_json = ?, status = 'disqualified', outcome = ?, email = NULL, updated_at = ?
+                UPDATE prospects SET signals_json = ?, status = 'disqualified', outcome = ?, email = NULL,
+                  score = 0, opportunity_score = 0, confidence_score = 0, score_breakdown = '{}',
+                  fit_score = 0, intent_score = 0, pain_score = 0, ability_to_pay_score = 0,
+                  contactability_score = 0, timing_score = 0, evidence_score = 0,
+                  signal_freshness_score = 0, expected_value = 0, decision_state = 'disqualified',
+                  bvelt_angle = NULL, draft_subject = NULL, draft_body = NULL, updated_at = ?
                 WHERE id = ? AND mode = ? AND COALESCE(tenant_id, 'founder') = ?
               `).bind(JSON.stringify(signalsObj), `research_quality_rejected:${quality.reason || "non_commercial_profile"}`, now, prospectId, mode, tenantId).run();
+              if (mode === "founder") {
+                await env.RADAR_DB.prepare(`
+                  UPDATE opportunities SET status = 'closed', strategic_score = 0, fit_score = 0,
+                    intent_score = 0, pain_score = 0, ability_to_pay_score = 0, expected_value = 0,
+                    decision_state = 'disqualified', why_now_json = '{}', updated_at = ?
+                  WHERE prospect_id = ? AND mode = 'founder' AND COALESCE(tenant_id, 'founder') = 'founder'
+                `).bind(now, prospectId).run();
+              }
             } else {
               await env.RADAR_DB.prepare(`
                 UPDATE prospects SET signals_json = ?, updated_at = ?
                 WHERE id = ? AND mode = ? AND COALESCE(tenant_id, 'founder') = ?
               `).bind(JSON.stringify(signalsObj), now, prospectId, mode, tenantId).run();
+              if (mode === "founder" && !terminalStatus && env.RADAR_QUEUE) {
+                await enqueueJob(env, {
+                  run_id: runId,
+                  job_id: `research_score_${prospectId}_${String(contentHash).slice(0, 12)}`,
+                  type: "score",
+                  mode: "founder",
+                  tenant_id: "founder",
+                  payload: { prospect_id: prospectId }
+                });
+              }
             }
           } catch (syncErr) {
             console.warn(`[ResearchEvidence] signals_json sync warning for prospect ${prospectId}:`, syncErr);
@@ -6448,7 +6485,7 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
   const prospect = await env.RADAR_DB.prepare("SELECT * FROM prospects WHERE id = ?").bind(prospect_id).first() as any;
   if (!prospect) return;
 
-  if (['approved', 'drafted', 'notified', 'sent'].includes(prospect.status)) return;
+  if (['approved', 'drafted', 'notified', 'sent', 'disqualified', 'discarded', 'blocked', 'suppressed'].includes(prospect.status)) return;
 
   const dayOfYear = getDayOfYear(new Date());
   const { missionConfig } = await getPriorityTargets(dayOfYear, env, job.mode, job.tenant_id, overrides, true);
@@ -12579,19 +12616,32 @@ export interface TradeInferenceResult {
   detectedClue?: string;
 }
 
-export function evaluateResearchEvidenceQuality(businessName: string, facts: any): { allowed: boolean; reason?: string } {
+export function evaluateResearchEvidenceQuality(businessName: string, facts: any, declaredTrade?: string | null, mode: string = "founder"): { allowed: boolean; reason?: string; inferredTrade?: string | null } {
   const name = String(businessName || "").trim();
   if (/\b(?:variation|variant)\s*#?\s*\d+\b/i.test(name)) return { allowed: false, reason: "synthetic_variation_name" };
   const title = String(facts && (facts.page_title || facts.title) || "");
   const description = String(facts && (facts.meta_description || facts.description) || "");
-  const governmentPage = /\b(department of|county department|city of|government|municipal|civic art|public works|parks and recreation|school district|arts and culture)\b/i.test(title + " " + description);
   const serviceTerms = Array.isArray(facts && facts.service_terms_observed) ? facts.service_terms_observed.filter(Boolean) : [];
   const capabilities = facts && facts.observed_capabilities || {};
+  const observedText = [title, description, ...serviceTerms].join(" ");
+  const governmentPage = /\b(department of|county department|city of|government|municipal|civic art|public works|parks and recreation|school district|arts and culture)\b/i.test(observedText);
   const hasServiceIntent = serviceTerms.length > 0 || Boolean(capabilities.quote_or_estimate_language_observed || capabilities.booking_or_appointment_observed || capabilities.click_to_call_observed || capabilities.whatsapp_link_observed);
   if (governmentPage && !hasServiceIntent) return { allowed: false, reason: "government_or_public_program_website_without_service_intent" };
+
+  // Mandatory post-Scrapling identity/rubric gate. Never silently relabel a
+  // discovered prospect from a weak clue on its website.
+  if (mode !== "tenant" && declaredTrade && String(declaredTrade).trim()) {
+    const inferred = inferTradeFromTextDetailed(name, title, description, serviceTerms.join(" "));
+    const declared = String(declaredTrade).toLowerCase().replace(/[\s-]+/g, "_");
+    const compatible = inferred.trade === declared
+      || (inferred.trade === "lawn_care" && declared === "landscaping")
+      || (inferred.trade === "landscaping" && declared === "lawn_care");
+    if (inferred.confidence === "high" && inferred.trade !== "general" && !compatible) {
+      return { allowed: false, reason: "scrapling_category_mismatch", inferredTrade: inferred.trade };
+    }
+  }
   return { allowed: true };
 }
-
 function inferTradeFromTextDetailed(...textParts: (string | undefined)[]): TradeInferenceResult {
   const combined = textParts.filter(Boolean).join(' ').toLowerCase();
   if (!combined.trim()) {
