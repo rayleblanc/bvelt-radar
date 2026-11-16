@@ -137,7 +137,7 @@ export interface Env {
 
 export function getBudgetLimit(unitType: string): number {
   switch (unitType) {
-    case 'discovery_units': return 30;
+    case 'discovery_units': return 45;
     case 'enrichment_units': return 20;
     case 'ai_units': return 10;
     case 'hunter_units': return 8;
@@ -7911,7 +7911,7 @@ export async function getPriorityTargets(
       const marketsJson = JSON.stringify(config.geographies);
       const icpJson = JSON.stringify(config.icp);
       const budgetJson = JSON.stringify({
-        discovery_units: 30,
+        discovery_units: 45,
         enrichment_units: 20,
         ai_units: 10,
         hunter_units: 8,
