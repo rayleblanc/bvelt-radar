@@ -9178,6 +9178,7 @@ export interface DiscoveryDiagnostics {
   bizdata_status: string;
   discovered_raw: number;
   filtered: number;
+  contactless_filtered?: number;
   reason: string;
   permits_found?: number;
   geoapify_status?: string;
