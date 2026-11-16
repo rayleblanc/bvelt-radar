@@ -11989,7 +11989,10 @@ export async function checkSenderGovernor(env: Env): Promise<SenderGovernorStatu
 
   let rollingStats: any = {};
   try {
-    rollingStats = await db.prepare("SELECT COUNT(*) AS attempts, SUM(CASE WHEN lower(status) IN ('bounced','delayed') THEN 1 ELSE 0 END) AS bounces, SUM(CASE WHEN lower(status) = 'complained' THEN 1 ELSE 0 END) AS complaints FROM email_dispatch_logs WHERE created_at >= datetime('now', '-14 days') AND lower(status) IN ('dispatched','sent','delivered','opened','clicked','bounced','complained','failed','delayed','suppressed')").first() as any;
+    // Count unique provider messages, not local retry/idempotency log rows.
+    // Resend may return the same message ID for an idempotent retry; counting rows
+    // here understates the real bounce rate and can loosen the Sender Governor.
+    rollingStats = await db.prepare("SELECT COUNT(DISTINCT message_id) AS attempts, COUNT(DISTINCT CASE WHEN lower(status) IN ('bounced','delayed') THEN message_id END) AS bounces, COUNT(DISTINCT CASE WHEN lower(status) = 'complained' THEN message_id END) AS complaints FROM email_dispatch_logs WHERE created_at >= datetime('now', '-14 days') AND message_id IS NOT NULL AND message_id != '' AND lower(status) IN ('dispatched','sent','delivered','opened','clicked','bounced','complained','failed','delayed','suppressed')").first() as any;
   } catch {}
   const rollingAttempts = Number(rollingStats && rollingStats.attempts || 0);
   const rollingBounces = Number(rollingStats && rollingStats.bounces || 0);
