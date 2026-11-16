@@ -4295,8 +4295,11 @@ export function getManualSendPreflightError(prospect: any): string | null {
 }
 
 export function hasAIGenerationProvider(env: any): boolean {
+  const hasKey = (value: unknown) => typeof value === "string" && value.trim().length > 0;
   return Boolean(
-    String(env?.GEMINI_FOUNDER_API_KEY || env?.GEMINI_SECONDARY_API_KEY || env?.GROQ_API_KEY || "").trim() ||
+    hasKey(env?.GEMINI_FOUNDER_API_KEY) ||
+    hasKey(env?.GEMINI_SECONDARY_API_KEY) ||
+    hasKey(env?.GROQ_API_KEY) ||
     (env?.AI && typeof env.AI.run === "function")
   );
 }
@@ -10524,7 +10527,7 @@ export async function generateAICopy(
   const modelList = modelsStr.split(",").map(m => m.trim()).filter(Boolean);
   const modelsToTry = modelList.slice(0, 2);
 
-  const apiKey = env.GEMINI_FOUNDER_API_KEY || env.GEMINI_SECONDARY_API_KEY;
+  const apiKey = String(env.GEMINI_FOUNDER_API_KEY || "").trim() || String(env.GEMINI_SECONDARY_API_KEY || "").trim();
 
   let aiUnitReserved = false;
   const tenantId = prospect.tenant_id || "founder";

@@ -34,6 +34,8 @@ tests.push({
   run: () => {
     assert(hasAIGenerationProvider({ GEMINI_FOUNDER_API_KEY: "gemini-key" }), "Gemini credentials must enable real AI generation");
     assert(hasAIGenerationProvider({ GROQ_API_KEY: "groq-key" }), "Groq credentials must enable real AI generation");
+    assert(hasAIGenerationProvider({ GEMINI_FOUNDER_API_KEY: " ", GROQ_API_KEY: "groq-key" }), "Blank Gemini credentials must not mask a valid Groq provider");
+    assert(hasAIGenerationProvider({ GEMINI_FOUNDER_API_KEY: " ", GEMINI_SECONDARY_API_KEY: "secondary-key" }), "Blank founder key must not mask a valid secondary Gemini key");
     assert(hasAIGenerationProvider({ AI: { run: async () => ({ response: "{}" }) } }), "Workers AI binding alone must enable generation and quota reservation");
     assert(!hasAIGenerationProvider({}), "No provider must be identified as a deterministic fallback");
   }
