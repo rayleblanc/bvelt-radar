@@ -3945,10 +3945,13 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
         // WhatsApp is a manual action: opening wa.me never records a send.
         const isWhatsAppSentAction = action === "wa_sent";
         const isWhatsAppConfirmedAction = action === "wa_confirmed";
+        const isWhatsAppOptInAction = action === "wa_optin";
         let decisionJson: any;
-        if (isWhatsAppSentAction || isWhatsAppConfirmedAction) {
+        if (isWhatsAppSentAction || isWhatsAppConfirmedAction || isWhatsAppOptInAction) {
           const result = isWhatsAppSentAction
             ? await recordManualWhatsAppSent(prospectId, env)
+            : isWhatsAppOptInAction
+            ? await recordManualWhatsAppOptIn(prospectId, env)
             : await recordManualWhatsAppConfirmed(prospectId, env);
           decisionJson = { success: result.success, reason: result.reason };
         } else {
@@ -3964,7 +3967,9 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
           const actionText = isWhatsAppSentAction
             ? (decisionJson?.success ? "✅ Contacto WhatsApp registrado" : "⛔ No se pudo registrar el contacto")
             : isWhatsAppConfirmedAction
-            ? (decisionJson?.success ? "🟢 WhatsApp confirmado manualmente" : "⛔ No se pudo confirmar WhatsApp")
+            ? (decisionJson?.success ? "🟢 Cuenta de WhatsApp confirmada" : "⛔ No se pudo confirmar la cuenta")
+            : isWhatsAppOptInAction
+            ? (decisionJson?.success ? "🛡️ Consentimiento registrado" : "⛔ No se pudo registrar el consentimiento")
             : isSendAction
             ? sendFeedback!.title
             : action === "discard"
@@ -3996,7 +4001,7 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               chat_id: chatId,
-              text: `<b>${actionText}</b>: ID <code>${escapeHtml(prospectId)}</code>. ${decisionJson?.success === true ? (isWhatsAppSentAction ? "Se aplicó un cooldown de 30 días al número." : isWhatsAppConfirmedAction ? "Se guardó la verificación; no se registró ningún envío." : "Estado actualizado.") : escapeHtml(String(decisionJson?.reason || "No se registró la acción."))}${dispatchInfo}`,
+              text: `<b>${actionText}</b>: ID <code>${escapeHtml(prospectId)}</code>. ${decisionJson?.success === true ? (isWhatsAppSentAction ? "Se aplicó un cooldown de 30 días al número." : isWhatsAppConfirmedAction ? "Se guardó que la cuenta está activa; esto no acredita consentimiento." : isWhatsAppOptInAction ? "Se registró la declaración de consentimiento; conserva evidencia verificable." : "Estado actualizado.") : escapeHtml(String(decisionJson?.reason || "No se registró la acción."))}${dispatchInfo}`,
               parse_mode: "HTML"
             }),
             signal: AbortSignal.timeout(15000)
@@ -4422,6 +4427,26 @@ async function recordManualWhatsAppConfirmed(prospectId: string, env: Env): Prom
   return { success: true, reason: "whatsapp_account_confirmed" };
 }
 
+export function hasConfirmedWhatsAppOptIn(metadata: any): boolean {
+  const optIn = metadata?.manual_contact?.opt_in || metadata?.opt_in;
+  return optIn?.status === "confirmed" && Boolean(optIn?.confirmed_at) && Boolean(String(optIn?.evidence_source || "").trim());
+}
+
+async function recordManualWhatsAppOptIn(prospectId: string, env: Env): Promise<{ success: boolean; reason: string }> {
+  const db = env.RADAR_DB;
+  const prospect = await db.prepare("SELECT * FROM prospects WHERE id = ? AND COALESCE(tenant_id,'founder') = 'founder'").bind(prospectId).first() as any;
+  if (!prospect) return { success: false, reason: "prospect_not_found" };
+  if (String(prospect.outcome || "") !== "whatsapp_manual_ready") return { success: false, reason: "whatsapp_draft_not_pending" };
+  let metadata: any = {};
+  try { metadata = JSON.parse(prospect.signals_json || "{}"); } catch {}
+  if (!metadata.manual_contact || metadata.manual_contact.channel !== "whatsapp") return { success: false, reason: "whatsapp_draft_not_found" };
+  const now = new Date().toISOString();
+  metadata.manual_contact.opt_in = { status: "confirmed", confirmed_at: now, evidence_source: "founder_attestation", confirmation_scope: "recipient explicitly agreed to receive WhatsApp messages from this business" };
+  await db.prepare("UPDATE prospects SET signals_json = ?, updated_at = ? WHERE id = ?").bind(JSON.stringify(metadata), now, prospectId).run();
+  await db.prepare("INSERT INTO prospect_events (prospect_id, event_type, content, created_at) VALUES (?, 'whatsapp_opt_in_confirmed', ?, ?)").bind(prospectId, "Founder attested to explicit recipient opt-in; retain independently verifiable evidence", now).run();
+  return { success: true, reason: "whatsapp_opt_in_confirmed" };
+}
+
 async function recordManualWhatsAppSent(prospectId: string, env: Env): Promise<{ success: boolean; reason: string }> {
   const db = env.RADAR_DB;
   const prospect = await db.prepare("SELECT * FROM prospects WHERE id = ? AND COALESCE(tenant_id,'founder') = 'founder'")
@@ -4436,6 +4461,9 @@ async function recordManualWhatsAppSent(prospectId: string, env: Env): Promise<{
   if (String(prospect.outcome || "") !== "whatsapp_manual_ready") {
     return { success: false, reason: "whatsapp_draft_not_pending" };
   }
+  let metadata: any = {};
+  try { metadata = JSON.parse(prospect.signals_json || "{}"); } catch {}
+  if (!hasConfirmedWhatsAppOptIn(metadata)) return { success: false, reason: "explicit_whatsapp_opt_in_required" };
 
   const now = new Date().toISOString();
   const cooldownUntil = new Date(Date.now() + 30 * 86400000).toISOString();
@@ -7365,10 +7393,11 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
       `📞 <code>${waPhone ? "+" + waPhone : escapeHtml(String(prospect.phone || phoneDigits))}</code>\n` +
       `🟡 WhatsApp: <b>no verificado</b> · ${waPhone ? "chat directo listo" : "selección manual de contacto"}\n\n` +
       `<b>Mensaje sugerido:</b>\n<pre>${escapeHtml(whatsappBody)}</pre>\n\n` +
-      `<i>Abrir WhatsApp no confirma que la cuenta exista ni envía el mensaje. La política de WhatsApp Business exige consentimiento explícito para recibir mensajes posteriores: un teléfono publicado no basta. Envía solo si tienes una invitación o consentimiento verificable; si no, usa otro canal permitido.</i>`;
+      `<i>Abrir WhatsApp no confirma que la cuenta exista ni envía el mensaje. Una cuenta activa tampoco implica permiso. Registra el consentimiento solo si el destinatario aceptó explícitamente recibir mensajes de este negocio; conserva fecha, alcance y prueba. Un número publicado no basta.</i>`;
     const buttons = [
       [{ text: "💬 Abrir WhatsApp", url: whatsappUrl }],
-      [{ text: "🟢 Confirmar que existe", callback_data: `wa_confirmed:${prospect.id}` }],
+      [{ text: "🟢 Confirmar cuenta activa", callback_data: `wa_confirmed:${prospect.id}` }],
+      [{ text: "🛡️ Confirmar consentimiento explícito", callback_data: `wa_optin:${prospect.id}` }],
       [
         { text: "✅ Marcar enviado", callback_data: `wa_sent:${prospect.id}` },
         { text: "❌ Descartar", callback_data: `discard:${prospect.id}` }
@@ -10488,8 +10517,8 @@ export async function generateAICopy(
   }
 
   const prompt = isSpanish ? `
-    ${channel === "whatsapp" ? "OVERRIDE DE CANAL: Es un mensaje inicial de WhatsApp, no un correo. Máximo 35-45 palabras. Conversacional y natural, sin asunto, firma, pie legal, enlaces ni formato de email. Una observación verificable o una pregunta útil, una sola propuesta de valor y una pregunta de baja presión. No afirmes que el negocio usa WhatsApp ni que pierde llamadas." : ""}
-    Eres un redactor publicitario experto en ventas (sales copywriter). Escribes correos fríos directos y profesionales.
+    ${channel === "whatsapp" ? "OVERRIDE DE CANAL: Mensaje inicial de WhatsApp, no correo. 20-40 palabras como referencia, sin forzar longitud. Sin asunto, firma, pie legal, enlaces ni emojis. No uses apertura de guion comercial. Escribe como una persona ocupada que contacta a otro profesional: motivo concreto y verificable, lenguaje sencillo y como máximo una pregunta fácil. Si no hay evidencia específica, sé transparente y breve; no finjas haber investigado. Nunca afirmes que el negocio usa WhatsApp, pierde llamadas o ingresos." : ""}
+    Escribes mensajes individuales entre profesionales, no campañas. Debes sonar como alguien real y atento, no como un copywriter ni un asistente de IA.
     ${tenantInfo ? `Remitente: ${tenantInfo.tenant_name} (${tenantInfo.industry})` : "Remitente: Bvelt (https://bvelt.app)"}
     
     Destinatario:
@@ -10503,18 +10532,20 @@ export async function generateAICopy(
     ${angleFocus}
 
     REGLAS:
-    1. Idioma: Español técnico y profesional.
-    2. Longitud: 45 a 65 palabras en el primer contacto; 35 a 55 en seguimiento.
-    3. Tono: Respetuoso, directo, mentalidad de emprendedor de guerrilla.
-    4. Explica el valor sin prometer resultados: "${senderValueProposition}". En Tenant, habla desde la empresa configurada, no desde Bvelt.
-    5. Primer contacto: una sola pregunta sencilla y de baja presión; no solicites listas de presupuestos, inventarios de cotizaciones ni auditorías; no incluyas enlaces. En seguimiento, solo Founder puede incluir el enlace de Bvelt; Tenant nunca debe añadir enlaces de Bvelt ni inventar una web del remitente.
-    6. No inventes hechos, porcentajes, velocidad web, llamadas perdidas ni pérdidas de ingresos. No uses "auditoría gratis", "garantizado", "instantáneo" ni promesas de 60 segundos sin evidencia explícita. Sin emojis ni signos de exclamación. SIN FIRMA NI PIE DE PÁGINA (el sistema añade el legal).
+    1. Mantén el mensaje breve y natural para leerlo en un teléfono; no rellenes palabras ni fuerces un discurso de venta.
+    2. Empieza por el motivo real del contacto. Menciona un detalle solo si aparece en la evidencia; nunca inventes navegación, familiaridad, urgencia ni relación previa.
+    3. Usa lenguaje cotidiano entre profesionales, frases sencillas y ritmo variado. Evita jerga corporativa, elogios vacíos, slogans y fórmulas como "espero que estés bien", "pregunta rápida", "potenciar", "optimizar", "revolucionario" o "solo quería dar seguimiento".
+    4. No fuerces la propuesta de valor completa en cada mensaje. Explica solo el beneficio relevante, concreto y sin garantías. En Tenant, habla como la empresa configurada, nunca como Bvelt.
+    5. Como máximo una pregunta o siguiente paso. Facilita que puedan decir que no. Sin presión, culpa, falsa urgencia ni seguimientos repetidos ante el silencio.
+    6. Nunca inventes hechos, porcentajes, velocidad web, llamadas perdidas, ingresos perdidos, volumen de clientes ni problemas. Si la evidencia es débil, di menos o no generes el mensaje.
+    7. Primer contacto: sin enlaces, adjuntos, cebos de auditoría, listas de cotizaciones ni explicaciones largas. Tenant nunca incluye enlaces de Bvelt ni inventa webs del remitente.
+    8. Sin emojis, exageraciones, exclamaciones, asuntos con "Re:" falso ni transiciones típicas de IA. SIN FIRMA NI PIE (el sistema añade los datos aplicables).
     7. ${!tenantInfo && founderLine ? `FRASE FUNDADOR (úsala una vez, natural, no inventes otra biografía): "${founderLine}"` : "No inventes historia personal del fundador."}
     8. ${isFollowUp ? "Esto es SEGUIMIENTO toque #" + outreachTouch + " sin respuesta. Más corto, otro ángulo, sin culpar. Asunto sin Re: falso." : "Primer correo en frío."}
     9. Formato JSON: {"subject": "...", "body": "..."}
   ` : `
-    ${channel === "whatsapp" ? "CHANNEL OVERRIDE: This is a first-touch WhatsApp message, not an email. Maximum 35-45 words. Natural and conversational; no subject, signature, legal footer, links, or email formatting. Use one verified observation or useful question, one value proposition, and one low-pressure question. Never claim the business uses WhatsApp or misses calls." : ""}
-    You are an expert sales copywriter writing cold outreach.
+    ${channel === "whatsapp" ? "CHANNEL OVERRIDE: First-touch WhatsApp, not email. Aim for 20-40 words without forcing length. No subject, signature, legal footer, links, or emoji. No sales-script opening. Write like one busy professional contacting another: one concrete verified reason, plain language, and at most one easy question. If evidence is weak, be transparent and brief; do not pretend to have researched them. Never claim they use WhatsApp, miss calls, or lose revenue." : ""}
+    You write one-to-one business messages, not marketing campaigns. Sound like a thoughtful operator, not a copywriter or AI assistant.
     ${tenantInfo ? `Sender: ${tenantInfo.tenant_name} (${tenantInfo.industry})` : "Sender: Bvelt (https://bvelt.app)"}
     
     Target:
@@ -10528,11 +10559,14 @@ export async function generateAICopy(
     ${angleFocus}
 
     RULES:
-    1. Length: ${isFollowUp ? "35 to 55" : "45 to 65"} words. Contractor-friendly and concise.
-    2. Tone: Respectful, direct, guerrilla entrepreneur mindset. Never beg. Never play for pity.
-    3. Explain value without promising outcomes: "${senderValueProposition}". In Tenant mode, write as the configured business, never as Bvelt.
-    4. First touch: ask one simple low-pressure question; do not request an estimate checklist, quote inventory, or audit; include no URL. Tenant messages must never include Bvelt links or invent a sender website.
-    5. Never invent facts, percentages, site-speed measurements, missed calls, or lost revenue. Do not use "free audit", "guaranteed", "instant", or 60-second promises without explicit evidence. No emoji, hype, or exclamation marks. NO SIGNATURE OR FOOTER (system adds legal footer).
+    1. Keep it short and natural on a phone; do not pad to a word count or force a pitch.
+    2. Open with the real reason for contacting this business. Mention a detail only if it appears in supplied evidence; never invent browsing, familiarity, urgency, or a prior relationship.
+    3. Use plain language between professionals, varied sentence rhythm, no corporate jargon, empty compliments, slogans, or formulas like "hope you are well", "quick question", "unlock", "streamline", "game-changer", or "just checking in".
+    4. Do not force the full value proposition into every message. Explain only the relevant benefit, concretely and without guarantees. In Tenant mode, speak as the configured business, never as Bvelt.
+    5. At most one question or next step. Make it easy to decline. No pressure, guilt, false urgency, or repeated follow-ups after silence.
+    6. Never invent facts, percentages, site-speed measurements, missed calls, lost revenue, customer volume, or problems. If evidence is weak, say less or do not draft.
+    7. First touch: no links, attachments, audit bait, quote inventories, or long product explanations. Tenant messages must never include Bvelt links or invent a sender website.
+    8. No emoji, hype, exclamation marks, fake Re: subjects, or generic AI transitions. NO SIGNATURE OR FOOTER (system adds applicable sender details).
     6. ${!tenantInfo && founderLine ? `FOUNDER LINE (use once, natural English, do not invent a different bio): "${founderLine}"` : "Do not invent a personal founder story."}
     7. ${isFollowUp ? "This is FOLLOW-UP touch #" + outreachTouch + " after no reply. Different angle from a first cold email. Shorter. Do not guilt-trip. Subject must NOT start with Re: unless truly a thread. Do not add a link unless it belongs to the configured sender." : "This is the FIRST outreach email."}
     8. JSON format: {"subject": "...", "body": "..."}
