@@ -12,7 +12,7 @@ export interface RadarEvidenceProvenanceInput {
 }
 
 export function buildRadarEvidenceProvenance(input: RadarEvidenceProvenanceInput) {
-  const sourceLabel = new URL(input.sourceUrl).hostname.toLowerCase().replace(/^www\\./, '');
+  const sourceLabel = new URL(input.sourceUrl).hostname.toLowerCase().replace(/^www\./, '');
   const item = input.item || {};
   const period = item.period && typeof item.period === 'object' ? {
     start: typeof item.period.start === 'string' && Number.isFinite(Date.parse(item.period.start)) ? item.period.start : null,
