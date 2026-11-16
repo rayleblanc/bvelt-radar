@@ -1,4 +1,8 @@
-import { GEO_PLACES, GeoPlace } from "./geoData";
+import { GEO_PLACES as BASE_GEO_PLACES, GeoPlace } from "./geoData";
+import { ANGLOSPHERE_GEO_PLACES } from "./geoDataAnglosphere";
+
+/** Unified Founder/Tenant gazetteer. Supplemental markets are first-class, not fallback-only. */
+export const GEO_PLACES: GeoPlace[] = [...BASE_GEO_PLACES, ...ANGLOSPHERE_GEO_PLACES];
 
 export type D1Like = {
   prepare(q: string): {
@@ -63,7 +67,7 @@ function regionCode(raw: string): string {
   return REGION_NAMES[n] || n;
 }
 
-// Índice por nombre, construido una sola vez por isolate (lista ya ordenada por población desc)
+// Índice por nombre, construido una sola vez por isolate sobre el catálogo global.
 const BY_NAME = new Map<string, GeoPlace[]>();
 for (const p of GEO_PLACES) {
   const k = normalizeStr(p.name);
@@ -74,7 +78,7 @@ for (const p of GEO_PLACES) {
 const POP_DESC = (a: GeoPlace, b: GeoPlace) => (b.population || 0) - (a.population || 0);
 
 /**
- * Nearest known city to browser geolocation (US/CA). Used by Bvelt free-analysis bootstrap.
+ * Nearest known city in the unified gazetteer. Used by Bvelt free-analysis bootstrap.
  */
 export function findNearestPlace(lat: number, lon: number, maxKm = 80): GeoPlace | null {
   if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
@@ -163,6 +167,8 @@ export async function pickTargets(
     countries?: string[];
     /** Soft ranking only; never excludes countries from the global pool. */
     priorityCountries?: string[];
+    /** Founder primary markets receive a balanced minimum share when present in the gazetteer. */
+    countryRotation?: string[];
     /** Restrict pool to these city labels (e.g. "City A, Region"). Prevents national drift to unrelated markets. */
     allowedCities?: string[];
   }
@@ -191,6 +197,9 @@ export async function pickTargets(
   const priorityCountries = new Set((o.priorityCountries || [])
     .map((country) => String(country).trim().toUpperCase())
     .filter(Boolean));
+  const countryRotation = Array.from(new Set((o.countryRotation || [])
+    .map((country) => String(country).trim().toUpperCase())
+    .filter((country) => !!country && (!countries.length || countries.includes(country)))));
   if (trades.length === 0) return [];
 
   const maxDist = o.serviceRadiusKm ?? 60;
@@ -224,12 +233,20 @@ export async function pickTargets(
   for (const row of rows) {
     const trade = (row.trade || "").toLowerCase();
     hist.set(`${row.place_key}::${trade}`, row);
-    const region = ((row.place_key || "").split("|")[1] || "").toLowerCase();
-    const rk = `${trade}::${region}`;
+    const placeParts = (row.place_key || "").split("|");
+    const region = (placeParts[1] || "").toLowerCase();
+    const country = (placeParts[2] || "").toUpperCase();
+    const rk = `${trade}::${country}::${region}`;
     const st = regionStats.get(rk) || { q: 0, c: 0 };
     st.q += row.qualified || 0;
     st.c += row.candidates || 0;
     regionStats.set(rk, st);
+    // Preserve historical learning rows written before country-scoped region keys.
+    const legacyKey = `${trade}::${region}`;
+    const legacy = regionStats.get(legacyKey) || { q: 0, c: 0 };
+    legacy.q += row.qualified || 0;
+    legacy.c += row.candidates || 0;
+    regionStats.set(legacyKey, legacy);
 
     if (row.last_searched_at) {
       const days = (now - new Date(row.last_searched_at).getTime()) / DAY_MS;
@@ -283,30 +300,40 @@ export async function pickTargets(
       }
     }
   } else {
-    // Founder: explore every available country unless the operator explicitly narrows scope.
-    // Priority countries are ranked higher, never used as an allowlist.
+    // Founder: explore the unified gazetteer. Never let the largest US/CA city
+    // population totals crowd GB/AU (or other eligible countries) out of the pool.
     const eligible = GEO_PLACES.filter((p) => countries.length === 0 || countries.includes(p.country));
-    const byPop = [...eligible].sort((a, b) => {
-      const priorityA = priorityCountries.has(a.country) ? 1.15 : 1;
-      const priorityB = priorityCountries.has(b.country) ? 1.15 : 1;
-      return (Math.log(Math.max(b.population || 1, 1)) * priorityB) -
-        (Math.log(Math.max(a.population || 1, 1)) * priorityA);
-    });
-    const top = byPop.slice(0, 150);
-    const mid = byPop.slice(150).filter((p) => (p.population || 0) >= 15000);
-    const extra: GeoPlace[] = [];
-    const midCopy = [...mid];
-    for (let i = 0; i < 150 && midCopy.length > 0; i++) {
-      const idx = Math.floor(Math.random() * midCopy.length);
-      extra.push(midCopy.splice(idx, 1)[0]);
+    const byCountry = new Map<string, GeoPlace[]>();
+    for (const place of eligible) {
+      const list = byCountry.get(place.country) || [];
+      list.push(place);
+      byCountry.set(place.country, list);
     }
+    const countryOrder = Array.from(new Set([
+      ...countryRotation,
+      ...Array.from(priorityCountries),
+      ...Array.from(byCountry.keys()).sort()
+    ])).filter(country => byCountry.has(country));
     const seen = new Set<string>();
     pool = [];
-    for (const p of [...top, ...extra]) {
-      const k = placeKey(p);
-      if (seen.has(k)) continue;
-      seen.add(k);
-      pool.push(p);
+    for (const country of countryOrder) {
+      const places = [...(byCountry.get(country) || [])]
+        .sort((a, b) => (b.population || 0) - (a.population || 0));
+      const isPriority = priorityCountries.has(country);
+      const topLimit = isPriority ? 35 : 12;
+      const randomLimit = isPriority ? 15 : 4;
+      const selected = places.slice(0, topLimit);
+      const remainder = places.slice(topLimit).filter(p => (p.population || 0) >= 15000);
+      for (let i = 0; i < randomLimit && remainder.length > 0; i++) {
+        const idx = Math.floor(Math.random() * remainder.length);
+        selected.push(remainder.splice(idx, 1)[0]);
+      }
+      for (const place of selected) {
+        const key = placeKey(place);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        pool.push(place);
+      }
     }
   }
   if (pool.length === 0) return [];
@@ -346,7 +373,9 @@ export async function pickTargets(
         }
         if (near) continue;
       }
-      const st = regionStats.get(`${t}::${region}`) || { q: 0, c: 0 };
+      const st = regionStats.get(`${t}::${place.country.toUpperCase()}::${region}`)
+        || regionStats.get(`${t}::${region}`)
+        || { q: 0, c: 0 };
       const prior = (st.q + 1) / (st.c + 8);
       let score = Math.log(pop) * fresh * (0.5 + prior);
       if (priorityCountries.has(place.country)) score *= 1.15;
@@ -369,7 +398,8 @@ export async function pickTargets(
   const allowed = (c: Cand): boolean => {
     const key = `${placeKey(c.place)}::${c.trade.toLowerCase()}`;
     if (chosenKeys.has(key)) return false;
-    if ((regionCount.get(c.place.region) || 0) >= regionCap) return false;
+    const regionKey = `${c.place.country.toUpperCase()}::${c.place.region}`;
+    if ((regionCount.get(regionKey) || 0) >= regionCap) return false;
     if ((tradeCount.get(c.trade.toLowerCase()) || 0) >= tradeCap) return false;
     if (!isTenantArea) {
       // Founder: un lugar por zona y por corrida (evita NYC + Brooklyn)
@@ -386,7 +416,8 @@ export async function pickTargets(
   const take = (c: Cand, why: string) => {
     out.push({ place: withTuple(c.place), trade: c.trade, why });
     chosenKeys.add(`${placeKey(c.place)}::${c.trade.toLowerCase()}`);
-    regionCount.set(c.place.region, (regionCount.get(c.place.region) || 0) + 1);
+    const regionKey = `${c.place.country.toUpperCase()}::${c.place.region}`;
+    regionCount.set(regionKey, (regionCount.get(regionKey) || 0) + 1);
     tradeCount.set(c.trade.toLowerCase(), (tradeCount.get(c.trade.toLowerCase()) || 0) + 1);
     chosen.push({ lat: c.place.lat, lon: c.place.lon, r: radiusKm(c.place.population || 0) });
   };
@@ -399,6 +430,39 @@ export async function pickTargets(
   };
 
   const neverList = isTenantArea ? [] : cands.filter((c) => c.isNew && (c.place.population || 0) >= 20000);
+
+  // Guarantee a balanced minimum share for Founder core markets when eligible candidates exist.
+  // If a market is exhausted, remaining capacity is filled by the normal score-ranked selector.
+  if (!isTenantArea && countryRotation.length > 0) {
+    const countryQueues = new Map<string, Cand[]>();
+    for (const country of countryRotation) {
+      countryQueues.set(country, cands.filter(c => c.place.country.toUpperCase() === country));
+    }
+    const activeCountries = countryRotation.filter(country => (countryQueues.get(country) || []).length > 0);
+    const perCountryTarget = Math.max(1, Math.floor(count / Math.max(1, activeCountries.length)));
+    const countryCursors = new Map<string, number>();
+    const countryTaken = new Map<string, number>();
+    let progressed = true;
+    while (out.length < count && progressed) {
+      progressed = false;
+      for (const country of activeCountries) {
+        if (out.length >= count) break;
+        if ((countryTaken.get(country) || 0) >= perCountryTarget) continue;
+        const queue = countryQueues.get(country) || [];
+        let countryCursor = countryCursors.get(country) || 0;
+        while (countryCursor < queue.length) {
+          const candidate = queue[countryCursor++];
+          if (allowed(candidate)) {
+            take(candidate, `rotación equilibrada ${country}`);
+            countryTaken.set(country, (countryTaken.get(country) || 0) + 1);
+            progressed = true;
+            break;
+          }
+        }
+        countryCursors.set(country, countryCursor);
+      }
+    }
+  }
 
   let cursor = 0;
   while (out.length < count) {
