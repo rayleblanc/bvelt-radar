@@ -7,6 +7,7 @@ import { fetchPermitContractors } from './permitSources';
 import { pickTargets, findPlace } from './geoFrontier';
 import { isOffIcpName, sanitizeEmail } from './emailSanitizer';
 import { learningCounterDelta, readScopedLearningStats, recordScopedLearningEvent } from './learningIntegrity';
+import { toWhatsAppUrl, toSmsUrl, toTelUrl } from "./phoneUtils";
 
 console.log("=========================================");
 console.log("RUNNING BVELT RADAR CUSTOM MISSION TESTS");
@@ -68,6 +69,18 @@ tests.push({
     });
     assert(context.includes("contact_form") && context.includes("contact_provenance") && context.includes("tel_link"), "The prompt context must include observed signals and provenance");
     assert(context.length <= 7000, "Evidence context must be bounded for provider quotas");
+  }
+});
+
+
+tests.push({
+  name: "Contact links never invent WhatsApp recipients and reject malformed phone numbers",
+  run: () => {
+    const direct = toWhatsAppUrl("+1 416 555 0100", "Hello");
+    assert(Boolean(direct && direct.startsWith("https://wa.me/14165550100?text=")), "Explicit international WhatsApp numbers must create direct links");
+    assert(toWhatsAppUrl("416-555-0100", "Hello") === null, "National numbers must not receive a guessed WhatsApp country code");
+    assert(toWhatsAppUrl("001 416 555 0100", "Hello")?.startsWith("https://wa.me/14165550100"), "Explicit 00 international prefixes must work");
+    assert(toSmsUrl("123", "Hello") === null && toTelUrl("123") === null, "Malformed numbers must not create SMS or dialer links");
   }
 });
 

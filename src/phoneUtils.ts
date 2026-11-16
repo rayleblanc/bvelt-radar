@@ -36,14 +36,17 @@ export function normalizePhoneE164(
 
 export function toWhatsAppUrl(
   raw: unknown,
-  message = "",
-  defaultCountry: DefaultPhoneCountry = "US"
+  message = ""
 ): string | null {
-  const e164 = normalizePhoneE164(raw, defaultCountry);
+  if (raw == null) return null;
+  const value = String(raw).trim();
+  // WhatsApp direct links must never guess a country code from a national number.
+  if (!value.startsWith("+") && !value.startsWith("00")) return null;
+  const e164 = normalizePhoneE164(value);
   if (!e164) return null;
   const digits = e164.slice(1);
-  const query = message ? `?text=${encodeURIComponent(message)}` : "";
-  return `https://wa.me/${digits}${query}`;
+  const query = message ? \`?text=\${encodeURIComponent(message)}\` : "";
+  return \`https://wa.me/\${digits}\${query}\`;
 }
 
 /** Opens the user's native SMS composer; it does not send a message or need a provider. */
