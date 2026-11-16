@@ -233,6 +233,20 @@ def _strip_html(html: str) -> str:
     return re.sub(r"\s+", " ", html).strip()
 
 
+def _valid_email_candidate(value: str) -> bool:
+    candidate = (value or "").strip().lower()
+    if not EMAIL_RE.fullmatch(candidate) or "@" not in candidate:
+        return False
+    local, domain = candidate.rsplit("@", 1)
+    if local in {"example", "test", "sample", "demo", "placeholder", "yourname", "your_name", "email", "name", "user", "noreply", "no-reply"}:
+        return False
+    if domain in {"example.com", "example.org", "example.net", "example.test", "test.com", "email.com", "domain.com", "localhost", "invalid"}:
+        return False
+    if domain.endswith((".png", ".jpg", ".jpeg", ".svg", ".webp", ".gif", ".avif", ".ico")):
+        return False
+    return True
+
+
 def _valid_phone_digits(digits: str) -> bool:
     if not digits or not digits.isdigit() or not 8 <= len(digits) <= 15:
         return False
@@ -253,7 +267,7 @@ def _extract_contact_candidates(html: str) -> tuple[set[str], set[str], list[dic
 
     for raw in re.findall(r"(?is)href\s*=\s*['\\"]mailto:([^'\\"?]+)", visible_html):
         value = raw.strip().lower()
-        if EMAIL_RE.fullmatch(value):
+        if _valid_email_candidate(value):
             emails.add(value)
             provenance.append({"type": "email", "value": value, "source": "mailto"})
 
@@ -263,7 +277,7 @@ def _extract_contact_candidates(html: str) -> tuple[set[str], set[str], list[dic
             value = raw.strip()
             if key.lower() == "email":
                 candidate = value.lower()
-                if EMAIL_RE.fullmatch(candidate):
+                if _valid_email_candidate(candidate):
                     emails.add(candidate)
                     provenance.append({"type": "email", "value": candidate, "source": "json_ld"})
             else:
@@ -274,7 +288,7 @@ def _extract_contact_candidates(html: str) -> tuple[set[str], set[str], list[dic
 
     for raw in EMAIL_RE.findall(visible_text):
         value = raw.lower().strip(".,;:()[]{}<>")
-        if value and not any(x in value for x in ("example.com", "example.org", "test.com", "wixpress.com", "sentry.io")):
+        if _valid_email_candidate(value) and not any(x in value for x in ("wixpress.com", "sentry.io")):
             emails.add(value)
             provenance.append({"type": "email", "value": value, "source": "visible_text"})
 
