@@ -2624,7 +2624,7 @@ export default {
           `).bind(tenantId).all();
           const stats = await env.RADAR_DB.prepare(`
             SELECT COUNT(*) as n,
-              SUM(CASE WHEN status IN ('sent','queued') THEN 1 ELSE 0 END) as sent_n
+              SUM(CASE WHEN status IN ('sent','delivered','opened','clicked','contacted','replied','booked','converted','won','lost') OR outcome IN ('sent','delivered','opened','clicked','whatsapp_manual_sent','positive','replied','booked','won','lost','converted') OR tenant_outcome IN ('contacted','replied','booked','won','lost') THEN 1 ELSE 0 END) as sent_n
             FROM prospects WHERE COALESCE(tenant_id,'founder') = ?
           `).bind(tenantId).first() as any;
           const leads = (top.results || []).map((p: any) => ({
