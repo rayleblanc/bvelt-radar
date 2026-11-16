@@ -4320,7 +4320,7 @@ export function resolveProspectContactability(prospect: any): {
   const phoneAvailable = Boolean(phoneDigits);
   const status = String(prospect?.status || "").toLowerCase();
   const decisionState = String(prospect?.decision_state || "").toLowerCase();
-  const commercialProspect = !["disqualified", "discarded", "suppressed", "blocked"].includes(status) && decisionState !== "disqualified";
+  const commercialProspect = !["disqualified", "discarded", "suppressed", "blocked", "off_icp", "rejected"].includes(status) && !["disqualified", "off_icp", "no_go", "do_not_contact", "suppressed", "blocked"].includes(decisionState);
   return {
     commercial_prospect: commercialProspect,
     contact_available: emailAvailable || phoneAvailable,
