@@ -2594,6 +2594,7 @@ tests.push({
     };
     const missedKit = buildAttackKit(verifiedMissedCallProspect);
     assert(missedKit.angle === "missed_calls", "Verified friction must select missed_calls angle");
+    assert(missedKit.sms === "" && missedKit.email.body === "", "buildAttackKit must not create a second static outbound message generator");
     assert(missedKit.sms.length > 0, "A short manual outreach message must be generated for verified angle");
     assert(missedKit.sms.includes("Rainer"), "Must identify the sender");
     assert(!/SMS|instant text|under a minute|60 seconds/i.test(missedKit.sms), "Must not promise unsupported SMS automation or response times");
@@ -2611,6 +2612,8 @@ tests.push({
         stale_estimates: true
       })
     };
+    const tenantKit = buildAttackKit({ id: "tenant-p1", name: "Northstar Plumbing", trade: "plumbing", city: "Toronto", mode: "tenant", tenant_id: "tenant_alpha" });
+    assert(tenantKit.sms === "" && tenantKit.email.body === "", "Tenant outbound copy must also come from the shared AI generator");
     const quoteKit = buildAttackKit(verifiedQuoteProspect);
     assert(quoteKit.angle === "stale_quotes", "Verified quote friction must select stale_quotes angle");
 

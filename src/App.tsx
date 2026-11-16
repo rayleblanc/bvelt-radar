@@ -2424,8 +2424,8 @@ const submitDecision = async (prospectId: string, action: string) => {
                               {currentMode === 'founder' && (() => {
                                 const activeKit = attackKits[p.id] || (p.attack_kit ? (typeof p.attack_kit === 'string' ? JSON.parse(p.attack_kit) : p.attack_kit) : null);
                                 const isDoNotContact =
-                                  !activeKit?.sms ||
-                                  activeKit.sms.trim() === "" ||
+                                  !activeKit ||
+                                  !["weather_surge", "stale_quotes", "no_sms", "missed_calls"].includes(activeKit.angle) ||
                                   activeKit?.next_action?.startsWith("DO_NOT_CONTACT") ||
                                   activeKit?.next_action?.includes("DO_NOT_CONTACT") ||
                                   p.outcome?.includes("off_icp") ||
