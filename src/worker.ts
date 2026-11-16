@@ -5152,9 +5152,15 @@ export async function bootstrapBveltTenant(
     timestamp
   ).run();
 
-  // --- FAST PATH: one Overpass/BizData pull, top 2 leads now ---
+  // Respect the same four-hour tenant run throttle for both login and audit triggers.
   const leads: any[] = [];
-  try {
+  const lastTenantRun = await env.RADAR_DB.prepare("SELECT created_at FROM runs WHERE mode = 'tenant' AND COALESCE(tenant_id,'founder') = ? ORDER BY created_at DESC LIMIT 1").bind(tenantId).first() as any;
+  const lastTenantRunAt = lastTenantRun?.created_at ? new Date(lastTenantRun.created_at).getTime() : 0;
+  const tenantRunIsRecent = lastTenantRunAt > 0 && Date.now() - lastTenantRunAt < 4 * 60 * 60 * 1000;
+
+  if (!tenantRunIsRecent) {
+    // --- FAST PATH: one Overpass/BizData pull, top leads now ---
+    try {
     const businesses = body.skip_fast_discovery || !searchTrade ? [] : (await fetchLocalBusinessesWithDiagnostics(cityLabel, searchTrade, env, undefined, 'tenant')).businesses;
     const ranked = (businesses || [])
       .filter((b: any) => b && b.name && tenantBuyerNameFits(b.name, searchTrade))
@@ -5233,8 +5239,16 @@ export async function bootstrapBveltTenant(
       newInserted++;
       leads.push({ ...row, attack_kit: buildAttackKit(row), contactability: resolveProspectContactability(row) });
     }
-  } catch (e: any) {
-    console.warn("[bootstrapBveltTenant] fast discovery error:", e?.message || e);
+    } catch (e: any) {
+      console.warn("[bootstrapBveltTenant] fast discovery error:", e?.message || e);
+    }
+  } else {
+    const existingRows = await env.RADAR_DB.prepare("SELECT * FROM prospects WHERE mode = 'tenant' AND tenant_id = ? AND status NOT IN ('discarded','suppressed','blocked') ORDER BY COALESCE(score, opportunity_score, 0) DESC, created_at DESC LIMIT 8").bind(tenantId).all();
+    leads.push(...(existingRows.results || []).map((row: any) => ({
+      ...row,
+      attack_kit: buildAttackKit(row),
+      contactability: resolveProspectContactability(row)
+    })));
   }
 
   // Background full tenant run (more leads over next minutes)
@@ -5245,7 +5259,7 @@ export async function bootstrapBveltTenant(
     countries: countries.join(";") || null,
     languages: languages.join(";") || null,
     min_score: String(minimumScore)
-  }, true).then((r) => {
+  }, false).then((r) => {
     runId = r.run_id;
     return r;
   }).catch((e) => {
