@@ -2487,17 +2487,17 @@ export default {
             SELECT 
               COUNT(*) as total,
               SUM(CASE WHEN status IN ('scouted','qualified','scored','enriched') THEN 1 ELSE 0 END) as pipeline,
-              SUM(CASE WHEN status IN ('sent','queued','approved','notified') THEN 1 ELSE 0 END) as outreach,
-              SUM(CASE WHEN status IN ('sent','queued','approved','notified','replied','booked','converted','won','lost')
-                         OR outcome IN ('sent','positive','replied','booked','won','lost','converted')
+              SUM(CASE WHEN status IN ('sent','delivered','opened','clicked','contacted') THEN 1 ELSE 0 END) as outreach,
+              SUM(CASE WHEN status IN ('sent','delivered','opened','clicked','contacted','replied','booked','converted','won','lost')
+                         OR outcome IN ('sent','delivered','opened','clicked','whatsapp_manual_sent','positive','replied','booked','won','lost','converted')
                          OR tenant_outcome IN ('contacted','replied','booked','won','lost') THEN 1 ELSE 0 END) as conversion_denominator,
               SUM(CASE WHEN status IN ('replied','booked') OR outcome IN ('positive','replied','booked')
                          OR tenant_outcome IN ('replied','booked') THEN 1 ELSE 0 END) as replied,
               SUM(CASE WHEN status = 'booked' OR outcome = 'booked' OR tenant_outcome = 'booked' THEN 1 ELSE 0 END) as booked,
               SUM(CASE WHEN status IN ('won','converted') OR outcome IN ('won','converted') OR tenant_outcome = 'won' THEN 1 ELSE 0 END) as won,
               SUM(CASE WHEN status = 'lost' OR outcome = 'lost' OR tenant_outcome = 'lost' THEN 1 ELSE 0 END) as lost,
-              SUM(CASE WHEN status IN ('sent','queued','approved','notified','replied','booked','converted','won','lost')
-                         OR outcome IN ('sent','positive','replied','booked','won','lost','converted')
+              SUM(CASE WHEN status IN ('sent','delivered','opened','clicked','contacted','replied','booked','converted','won','lost')
+                         OR outcome IN ('sent','delivered','opened','clicked','whatsapp_manual_sent','positive','replied','booked','won','lost','converted')
                          OR tenant_outcome IN ('contacted','replied','booked','won','lost') THEN 1 ELSE 0 END) as contacted,
               SUM(COALESCE(won_value_usd, 0)) as won_value_usd_total,
               SUM(COALESCE(expected_value, opportunity_score, score, 0)) as pipeline_ev_raw,
@@ -4645,6 +4645,9 @@ async function handleDecision(
         ).run();
       }
     } catch (e) {}
+
+    await db.prepare("INSERT INTO prospect_events (id, prospect_id, event_type, content, created_at) VALUES (?, ?, ?, ?, ?)")
+      .bind("msg_" + crypto.randomUUID(), id, "message_send_confirmed", JSON.stringify({ channel: "email", provider: dispatchOutcome.provider, provider_message_id: dispatchOutcome.messageId || null }), timestamp).run();
 
     // Auto-suppress email and domain for 21-day cooldown window
     if (prospect.email) {
