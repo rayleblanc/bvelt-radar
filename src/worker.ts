@@ -97,9 +97,8 @@ export interface Env {
   TRUST_SERVICE_KEY?: string;
   TRUST_STACK_KEY?: string;
   WEBHOOK_SECRET?: string; // token para webhooks de correo (?token=...)
-  FOUNDING_CITIES?: string; // semicolon-separated explicit city labels; no implicit defaults
+  // Founder geography is sourced from the bundled gazetteer; no city/country env vars required.
   FOUNDING_TRADES?: string; // semicolon-separated explicit niches; no implicit defaults
-  FOUNDING_COUNTRIES?: string; // ISO country codes used only for automatic geo rotation
   FOUNDING_LANGUAGES?: string;
   FOUNDING_MIN_SCORE?: string;
   FOUNDER_AUTO_OUTREACH?: string;
@@ -377,6 +376,8 @@ const MARKET_UNIVERSE_POLICY = marketUniverse as {
   bvelt_compatible_segments?: string[];
   excluded_business_categories?: string[];
 };
+
+const MARKET_PRIMARY_COUNTRIES = ["US", "CA", "GB", "AU"] as const;
 
 const MARKET_PRIORITY_COUNTRIES = Array.from(new Set([
   ...(MARKET_UNIVERSE_POLICY.market_tiers?.core_english_commercial || []),
@@ -5172,7 +5173,7 @@ export async function startProspectingRun(
   if ((!activeCities || activeCities.length === 0 || !activeTrades || activeTrades.length === 0) && (!pairs || pairs.length === 0)) {
     const reason = mode === "tenant"
       ? `Tenant "${tId}" no tiene mercados o segmentos compradores válidos. Configura cities_json e ICP buyer segments antes de correr el Radar.`
-      : "No hay mercados y nichos activos para discovery. Configura FOUNDING_CITIES + FOUNDING_TRADES, o FOUNDING_COUNTRIES + FOUNDING_TRADES.";
+      : "La geografía automática no produjo objetivos. Comprueba el catálogo geográfico integrado y los segmentos de Founder; no requiere FOUNDING_CITIES ni FOUNDING_COUNTRIES.";
     console.warn(`[startProspectingRun] ${reason}`);
     return {
       run_id: "no_targets",
@@ -5951,9 +5952,8 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
 
     if (!signalEvent) {
       try {
-        const cityLabel = String(job.payload?.city || candidate.city || env.FOUNDING_CITIES || "");
-        const configuredCountries = String(env.FOUNDING_COUNTRIES || "").split(";").map(value => value.trim().toUpperCase());
-        const isUsMarket = String(candidate.country || job.payload?.country || "").toUpperCase() === "US" || configuredCountries.includes("US");
+        const cityLabel = String(job.payload?.city || candidate.city || "");
+        const isUsMarket = String(candidate.country || job.payload?.country || "").toUpperCase() === "US";
         const extractedStates = isUsMarket ? extractUsStateCodes(cityLabel.split(";")) : [];
         if (extractedStates.length > 0) {
           const alerts = await getAlerts(extractedStates);
@@ -7885,14 +7885,8 @@ export async function getPriorityTargets(
     config.icp = { description: "", keywords: [] };
   } else {
     // Founder mode
-    if (env.FOUNDING_CITIES) {
-      config.geographies = env.FOUNDING_CITIES.split(";").map(c => c.trim()).filter(Boolean);
-    }
     if (env.FOUNDING_TRADES) {
       config.niches = env.FOUNDING_TRADES.split(";").map(t => t.trim()).filter(Boolean);
-    }
-    if ((env as any).FOUNDING_COUNTRIES) {
-      config.countries = String((env as any).FOUNDING_COUNTRIES).split(";").map(c => c.trim().toUpperCase()).filter(Boolean);
     }
     if ((env as any).FOUNDING_LANGUAGES) {
       config.languages = String((env as any).FOUNDING_LANGUAGES).split(";").map(l => l.trim().toLowerCase()).filter(Boolean);
@@ -8063,7 +8057,7 @@ export async function getPriorityTargets(
         trades: sortedNiches,
         count: Math.min(20, Number(env.RADAR_JOBS_PER_RUN || 15)),
         countries: config.countries,
-        priorityCountries: MARKET_PRIORITY_COUNTRIES
+        priorityCountries: MARKET_PRIMARY_COUNTRIES
       });
     } catch (e) {
       console.warn("[getPriorityTargets] pickTargets error:", e);
@@ -10628,7 +10622,6 @@ export async function collectRadarDigest(env: Env): Promise<RadarDigest> {
   if (!hasProvider) blockers.push("Sin proveedor de email (RESEND_API_KEY / BREVO_API_KEY / Hunter)");
   if (autoOn && !isCompletePostalAddress(env.SENDER_POSTAL_ADDRESS)) blockers.push("SENDER_POSTAL_ADDRESS ausente o incompleta: bloquea todo envío automático");
   if (gov && gov.status && gov.status !== "active") blockers.push(`Sender governor en estado "${gov.status}"`);
-  if (!has(env.FOUNDING_CITIES)) blockers.push("FOUNDING_CITIES vacío (OK: rotación geoData/geoFrontier activa — no hace falta lista manual)");
 
   const hardBlock = blockers.filter(b => !b.startsWith("FOUNDING_CITIES"));
   let verdict: RadarDigest["verdict"] = "ok";
