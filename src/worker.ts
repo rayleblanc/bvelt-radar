@@ -4417,8 +4417,10 @@ async function recordManualWhatsAppSent(prospectId: string, env: Env): Promise<{
   await db.prepare(
     "INSERT INTO prospect_events (prospect_id, event_type, content, created_at) VALUES (?, 'whatsapp_manual_sent', ?, ?)"
   ).bind(prospectId, "Founder confirmed manual WhatsApp message sent; 30-day phone cooldown", now).run();
-  await db.prepare("INSERT INTO prospect_events (id, prospect_id, event_type, content, created_at) VALUES (?, ?, ?, ?, ?)")
-    .bind("msg_" + crypto.randomUUID(), prospectId, "message_send_confirmed", JSON.stringify({ channel: "whatsapp", confirmation: "founder_manual" }), now).run();
+  try {
+    await db.prepare("INSERT INTO prospect_events (id, prospect_id, event_type, content, created_at) VALUES (?, ?, ?, ?, ?)")
+      .bind("msg_" + crypto.randomUUID(), prospectId, "message_send_confirmed", JSON.stringify({ channel: "whatsapp", confirmation: "founder_manual" }), now).run();
+  } catch (eventError: any) { console.warn("[WhatsApp] confirmed-send event log failed:", eventError?.message || eventError); }
   await db.prepare(
     "INSERT OR REPLACE INTO suppression (key, reason, created_at) VALUES (?, ?, ?)"
   ).bind(phoneKey, `Contacted on ${now} (cooldown until ${cooldownUntil})`, now).run();
@@ -4678,8 +4680,10 @@ async function handleDecision(
       }
     } catch (e) {}
 
-    await db.prepare("INSERT INTO prospect_events (id, prospect_id, event_type, content, created_at) VALUES (?, ?, ?, ?, ?)")
-      .bind("msg_" + crypto.randomUUID(), id, "message_send_confirmed", JSON.stringify({ channel: "email", provider: dispatchOutcome.provider, provider_message_id: dispatchOutcome.messageId || null }), timestamp).run();
+    try {
+      await db.prepare("INSERT INTO prospect_events (id, prospect_id, event_type, content, created_at) VALUES (?, ?, ?, ?, ?)")
+        .bind("msg_" + crypto.randomUUID(), id, "message_send_confirmed", JSON.stringify({ channel: "email", provider: dispatchOutcome.provider, provider_message_id: dispatchOutcome.messageId || null }), timestamp).run();
+    } catch (eventError: any) { console.warn("[ManualEmail] confirmed-send event log failed:", eventError?.message || eventError); }
 
     // Auto-suppress email and domain for 21-day cooldown window
     if (prospect.email) {
@@ -12210,8 +12214,10 @@ export async function sendOrQueueOutreach(
         SET status = 'sent', outcome = 'sent', dispatch_provider = ?, dispatch_message_id = ?, dispatch_status = 'dispatched', last_contact_at = ?, updated_at = ?
         WHERE id = ?
       `).bind(dispatch.provider, dispatch.messageId, timestamp, timestamp, prospect.id).run();
-      await env.RADAR_DB.prepare("INSERT INTO prospect_events (id, prospect_id, event_type, content, created_at) VALUES (?, ?, ?, ?, ?)")
-        .bind("msg_" + crypto.randomUUID(), prospect.id, "message_send_confirmed", JSON.stringify({ channel: "email", provider: dispatch.provider, provider_message_id: dispatch.messageId || null }), timestamp).run();
+      try {
+        await env.RADAR_DB.prepare("INSERT INTO prospect_events (id, prospect_id, event_type, content, created_at) VALUES (?, ?, ?, ?, ?)")
+          .bind("msg_" + crypto.randomUUID(), prospect.id, "message_send_confirmed", JSON.stringify({ channel: "email", provider: dispatch.provider, provider_message_id: dispatch.messageId || null }), timestamp).run();
+      } catch (eventError: any) { console.warn("[Outreach] confirmed-send event log failed:", eventError?.message || eventError); }
 
       await env.RADAR_DB.prepare(`
         UPDATE outreach_idempotency
