@@ -379,13 +379,6 @@ const MARKET_UNIVERSE_POLICY = marketUniverse as {
 
 const MARKET_PRIMARY_COUNTRIES = ["US", "CA", "GB", "AU"] as const;
 
-const MARKET_PRIORITY_COUNTRIES = Array.from(new Set([
-  ...(MARKET_UNIVERSE_POLICY.market_tiers?.core_english_commercial || []),
-  ...(MARKET_UNIVERSE_POLICY.market_tiers?.additional_english_commercial || []),
-  ...(MARKET_UNIVERSE_POLICY.geography_policy?.default_priority_countries || []),
-  ...(MARKET_UNIVERSE_POLICY.geography_policy?.priority_countries || [])
-].map(country => String(country).trim().toUpperCase()).filter(Boolean)));
-
 const DEFAULT_FOUNDER_SEGMENTS = (MARKET_UNIVERSE_POLICY.bvelt_compatible_segments || [])
   .map(segment => String(segment).trim().toLowerCase())
   .filter(Boolean);
@@ -10623,7 +10616,7 @@ export async function collectRadarDigest(env: Env): Promise<RadarDigest> {
   if (autoOn && !isCompletePostalAddress(env.SENDER_POSTAL_ADDRESS)) blockers.push("SENDER_POSTAL_ADDRESS ausente o incompleta: bloquea todo envío automático");
   if (gov && gov.status && gov.status !== "active") blockers.push(`Sender governor en estado "${gov.status}"`);
 
-  const hardBlock = blockers.filter(b => !b.startsWith("FOUNDING_CITIES"));
+  const hardBlock = blockers;
   let verdict: RadarDigest["verdict"] = "ok";
   let headline = "🟢 Funcionando: el embudo está produciendo";
   if (hardBlock.length > 0) {
