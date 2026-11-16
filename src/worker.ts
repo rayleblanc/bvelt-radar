@@ -3945,13 +3945,10 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
         // WhatsApp is a manual action: opening wa.me never records a send.
         const isWhatsAppSentAction = action === "wa_sent";
         const isWhatsAppConfirmedAction = action === "wa_confirmed";
-        const isWhatsAppOptInAction = action === "wa_optin";
         let decisionJson: any;
-        if (isWhatsAppSentAction || isWhatsAppConfirmedAction || isWhatsAppOptInAction) {
+        if (isWhatsAppSentAction || isWhatsAppConfirmedAction) {
           const result = isWhatsAppSentAction
             ? await recordManualWhatsAppSent(prospectId, env)
-            : isWhatsAppOptInAction
-            ? await recordManualWhatsAppOptIn(prospectId, env)
             : await recordManualWhatsAppConfirmed(prospectId, env);
           decisionJson = { success: result.success, reason: result.reason };
         } else {
@@ -3968,8 +3965,6 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
             ? (decisionJson?.success ? "✅ Contacto WhatsApp registrado" : "⛔ No se pudo registrar el contacto")
             : isWhatsAppConfirmedAction
             ? (decisionJson?.success ? "🟢 Cuenta de WhatsApp confirmada" : "⛔ No se pudo confirmar la cuenta")
-            : isWhatsAppOptInAction
-            ? (decisionJson?.success ? "🛡️ Consentimiento registrado" : "⛔ No se pudo registrar el consentimiento")
             : isSendAction
             ? sendFeedback!.title
             : action === "discard"
@@ -4001,7 +3996,7 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               chat_id: chatId,
-              text: `<b>${actionText}</b>: ID <code>${escapeHtml(prospectId)}</code>. ${decisionJson?.success === true ? (isWhatsAppSentAction ? "Se aplicó un cooldown de 30 días al número." : isWhatsAppConfirmedAction ? "Se guardó que la cuenta está activa; esto no acredita consentimiento." : isWhatsAppOptInAction ? "Se registró la declaración de consentimiento; conserva evidencia verificable." : "Estado actualizado.") : escapeHtml(String(decisionJson?.reason || "No se registró la acción."))}${dispatchInfo}`,
+              text: `<b>${actionText}</b>: ID <code>${escapeHtml(prospectId)}</code>. ${decisionJson?.success === true ? (isWhatsAppSentAction ? "Se aplicó un cooldown de 30 días al número." : isWhatsAppConfirmedAction ? "Se guardó que la cuenta está activa; esto no acredita consentimiento." : "Estado actualizado.") : escapeHtml(String(decisionJson?.reason || "No se registró la acción."))}${dispatchInfo}`,
               parse_mode: "HTML"
             }),
             signal: AbortSignal.timeout(15000)
@@ -4122,6 +4117,25 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
           ...auth.errors.map(item => `⚠️ ${escapeHtml(item)}`)
         ].join("\n");
         await notifyFounder(env, report);
+      } else if (command === "/wa-optin") {
+        const parts = msgText.split(/\s+/);
+        const prospectId = String(parts[1] || "").trim();
+        const evidenceRef = String(parts.slice(2).join(" ") || "").trim();
+        if (!prospectId || !evidenceRef) {
+          await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ chat_id: chatId, text: "Uso: /wa-optin ID https://referencia-de-consentimiento o crm:REGISTRO. Solo registra consentimiento explícito ya obtenido; nunca lo uses para solicitarlo.", parse_mode: "HTML" }),
+            signal: AbortSignal.timeout(15000)
+          }).catch(() => {});
+        } else {
+          const result = await recordManualWhatsAppOptIn(prospectId, evidenceRef, env);
+          await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ chat_id: chatId, text: result.success ? "🛡️ Consentimiento documentado. Conserva la referencia y verifica que cubre este negocio y este canal." : `⛔ No registrado: ${escapeHtml(result.reason)}`, parse_mode: "HTML" }),
+            signal: AbortSignal.timeout(15000)
+          }).catch(() => {});
+        }
+
       } else if (command === "/status" || command === "status" || command === "/estado" || command === "estado") {
         const provStatus = env.RESEND_API_KEY ? "✅ Resend (3,000/mes gratis)" : env.BREVO_API_KEY ? "✅ Brevo (300/día gratis)" : "⚠️ Simulado (Falta RESEND_API_KEY)";
         const webhookStatus = env.TELEGRAM_WEBHOOK_SECRET ? "🔒 Protegido con Secret Token" : "⚡ Activo (validación por Chat ID)";
@@ -4160,7 +4174,7 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
 
       } else if (command === "/start" || command === "start" || command === "/help" || command === "help" || command === "/ayuda" || command === "ayuda" || command === "hola" || command === "hi" || command === "hey") {
         const provStatus = env.RESEND_API_KEY ? "✅ Resend Activo" : env.BREVO_API_KEY ? "✅ Brevo Activo" : "⚠️ Simulado (Configura RESEND_API_KEY)";
-        const helpMsg = `🤖 <b>Bvelt Radar Founder Bot</b>\n\n¡Bot conectado y listo para interactuar!\n\n<b>Comandos disponibles:</b>\n• /status - Ver cuotas y estado de proveedores\n• /digest - Enviar las 3 mejores oportunidades con botones para aprobar\n• /testmail &lt;correo&gt; - Enviar email de prueba inmediato\n• /emailstatus - Comprobar SPF, DKIM, DMARC y Resend\n• /id - Ver tu Telegram Chat ID\n• /help - Mostrar este menú\n\n<b>Email Outbound:</b> ${provStatus}`;
+        const helpMsg = `🤖 <b>Bvelt Radar Founder Bot</b>\n\n¡Bot conectado y listo para interactuar!\n\n<b>Comandos disponibles:</b>\n• /status - Ver cuotas y estado de proveedores\n• /digest - Enviar las 3 mejores oportunidades con botones para aprobar\n• /testmail &lt;correo&gt; - Enviar email de prueba inmediato\n• /emailstatus - Comprobar SPF, DKIM, DMARC y Resend\n• /wa-optin ID URL_O_REFERENCIA - Registrar consentimiento documentado\n• /id - Ver tu Telegram Chat ID\n• /help - Mostrar este menú\n\n<b>Email Outbound:</b> ${provStatus}`;
         await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -4429,10 +4443,10 @@ async function recordManualWhatsAppConfirmed(prospectId: string, env: Env): Prom
 
 export function hasConfirmedWhatsAppOptIn(metadata: any): boolean {
   const optIn = metadata?.manual_contact?.opt_in || metadata?.opt_in;
-  return optIn?.status === "confirmed" && Boolean(optIn?.confirmed_at) && Boolean(String(optIn?.evidence_source || "").trim());
+  return optIn?.status === "confirmed" && Boolean(optIn?.confirmed_at) && Boolean(String(optIn?.evidence_source || "").trim()) && Boolean(String(optIn?.evidence_ref || "").trim());
 }
 
-async function recordManualWhatsAppOptIn(prospectId: string, env: Env): Promise<{ success: boolean; reason: string }> {
+async function recordManualWhatsAppOptIn(prospectId: string, evidenceRef: string, env: Env): Promise<{ success: boolean; reason: string }> {
   const db = env.RADAR_DB;
   const prospect = await db.prepare("SELECT * FROM prospects WHERE id = ? AND COALESCE(tenant_id,'founder') = 'founder'").bind(prospectId).first() as any;
   if (!prospect) return { success: false, reason: "prospect_not_found" };
@@ -4440,8 +4454,11 @@ async function recordManualWhatsAppOptIn(prospectId: string, env: Env): Promise<
   let metadata: any = {};
   try { metadata = JSON.parse(prospect.signals_json || "{}"); } catch {}
   if (!metadata.manual_contact || metadata.manual_contact.channel !== "whatsapp") return { success: false, reason: "whatsapp_draft_not_found" };
+  if (metadata.manual_contact.verification !== "confirmed_by_founder") return { success: false, reason: "whatsapp_account_must_be_confirmed_first" };
+  const reference = String(evidenceRef || "").trim();
+  if (!( /^https:\/\//i.test(reference) || /^(crm|form|contract|consent):[A-Za-z0-9._:-]{3,180}$/i.test(reference) )) return { success: false, reason: "verifiable_consent_evidence_reference_required" };
   const now = new Date().toISOString();
-  metadata.manual_contact.opt_in = { status: "confirmed", confirmed_at: now, evidence_source: "founder_attestation", confirmation_scope: "recipient explicitly agreed to receive WhatsApp messages from this business" };
+  metadata.manual_contact.opt_in = { status: "confirmed", confirmed_at: now, evidence_source: "operator_evidence_reference", evidence_ref: reference, confirmation_scope: "recipient explicitly agreed to receive WhatsApp messages from this business" };
   await db.prepare("UPDATE prospects SET signals_json = ?, updated_at = ? WHERE id = ?").bind(JSON.stringify(metadata), now, prospectId).run();
   await db.prepare("INSERT INTO prospect_events (prospect_id, event_type, content, created_at) VALUES (?, 'whatsapp_opt_in_confirmed', ?, ?)").bind(prospectId, "Founder attested to explicit recipient opt-in; retain independently verifiable evidence", now).run();
   return { success: true, reason: "whatsapp_opt_in_confirmed" };
@@ -7391,13 +7408,12 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
       `📍 ${escapeHtml(String(prospect.city || ""))} · ${escapeHtml(String(prospect.trade || ""))}\n` +
       `📊 Score: <b>${Number(prospect.score || 0)}/100</b>\n` +
       `📞 <code>${waPhone ? "+" + waPhone : escapeHtml(String(prospect.phone || phoneDigits))}</code>\n` +
-      `🟡 WhatsApp: <b>no verificado</b> · ${waPhone ? "chat directo listo" : "selección manual de contacto"}\n\n` +
+      `🟡 WhatsApp: <b>pendiente de comprobar</b> · ${waPhone ? "chat directo disponible; cuenta no verificada" : "selección manual de contacto"}\n\n` +
       `<b>Mensaje sugerido:</b>\n<pre>${escapeHtml(whatsappBody)}</pre>\n\n` +
-      `<i>Abrir WhatsApp no confirma que la cuenta exista ni envía el mensaje. Una cuenta activa tampoco implica permiso. Registra el consentimiento solo si el destinatario aceptó explícitamente recibir mensajes de este negocio; conserva fecha, alcance y prueba. Un número publicado no basta.</i>`;
+      `<i>Abrir WhatsApp no confirma la cuenta ni envía el mensaje. Una cuenta activa no implica permiso. Para registrar opt-in usa /wa-optin ID URL_O_REFERENCIA después de confirmar la cuenta y solo si existe consentimiento explícito documentado. Un teléfono publicado no basta.</i>`;
     const buttons = [
       [{ text: "💬 Abrir WhatsApp", url: whatsappUrl }],
       [{ text: "🟢 Confirmar cuenta activa", callback_data: `wa_confirmed:${prospect.id}` }],
-      [{ text: "🛡️ Confirmar consentimiento explícito", callback_data: `wa_optin:${prospect.id}` }],
       [
         { text: "✅ Marcar enviado", callback_data: `wa_sent:${prospect.id}` },
         { text: "❌ Descartar", callback_data: `discard:${prospect.id}` }
