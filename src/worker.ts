@@ -2557,16 +2557,17 @@ export default {
           if (!p) return Response.json({ error: "prospect_not_found" }, { status: 404, headers: corsHeaders });
           const targetTenant = String(p.tenant_id || "founder");
           if (!auth.canAccessTenant(targetTenant)) return Response.json({ error: "tenant_scope_forbidden" }, { status: 403, headers: corsHeaders });
-          const contactability = resolveProspectContactability(p);
-          if (method === "GET") return Response.json({ ...buildAttackKit(p), contactability }, { headers: corsHeaders });
+          const mode = p.mode === "tenant" || targetTenant !== "founder" ? "tenant" : "founder";
+          const scopedProspect = { ...p, mode };
+          const contactability = resolveProspectContactability(scopedProspect);
+          if (method === "GET") return Response.json({ ...buildAttackKit(scopedProspect), contactability }, { headers: corsHeaders });
           const channel = body.channel === "whatsapp" ? "whatsapp" : "email";
           const dayOfYear = getDayOfYear(new Date());
-          const mode = p.mode === "tenant" ? "tenant" : "founder";
           const { missionConfig } = await getPriorityTargets(dayOfYear, env, mode, targetTenant, undefined, true);
-          const generated = await generateAICopy(p, p.variant_id || p.bvelt_angle || "missed_calls", env, missionConfig, channel);
+          const generated = await generateAICopy(scopedProspect, scopedProspect.variant_id || scopedProspect.bvelt_angle || "missed_calls", env, missionConfig, channel);
           const timestamp = new Date().toISOString();
-          await env.RADAR_DB.prepare("UPDATE prospects SET draft_subject = ?, draft_body = ?, updated_at = ? WHERE id = ? AND mode = ? AND COALESCE(tenant_id,'founder') = ?")
-            .bind(generated.subject || "", generated.body || "", timestamp, prospectId, p.mode, targetTenant).run();
+          await env.RADAR_DB.prepare("UPDATE prospects SET draft_subject = ?, draft_body = ?, updated_at = ? WHERE id = ? AND COALESCE(tenant_id,'founder') = ?")
+            .bind(generated.subject || "", generated.body || "", timestamp, prospectId, targetTenant).run();
           let generationEventLogged = false;
           try {
             await env.RADAR_DB.prepare("INSERT INTO prospect_events (id, prospect_id, event_type, content, created_at) VALUES (?, ?, 'message_generated', ?, ?)")
@@ -2577,7 +2578,7 @@ export default {
           }
           return Response.json({
             success: true,
-            ...buildAttackKit({ ...p, draft_subject: generated.subject, draft_body: generated.body }),
+            ...buildAttackKit({ ...scopedProspect, draft_subject: generated.subject, draft_body: generated.body }),
             generated_message: { subject: generated.subject || "", body: generated.body || "", channel, source: generated.source, generated_at: timestamp },
             contactability,
             generation_event_logged: generationEventLogged
