@@ -48,6 +48,10 @@ tests.push({
     assert(!disqualified.commercial_prospect && disqualified.contact_available && !disqualified.send_authorized, "Disqualification must not erase the independent contactability fact");
     const offIcp = resolveProspectContactability({ decision_state: "off_icp", phone: "+1 416 234 5678" });
     assert(!offIcp.commercial_prospect && offIcp.contact_available && !offIcp.send_authorized, "Off-ICP status must remain distinct from available contact data");
+    const approved = resolveProspectContactability({ status: "approved", email: "owner@northstarplumbing.com" });
+    assert(approved.send_authorized && approved.send_state === "authorized", "An explicitly approved prospect with a usable recipient must be marked authorized");
+    const sent = resolveProspectContactability({ status: "sent", email: "owner@northstarplumbing.com" });
+    assert(!sent.send_authorized && sent.send_state === "confirmed", "A provider-confirmed send must not be mislabelled as pending authorization");
     const webOnly = resolveProspectContactability({ website: "https://northstarplumbing.com" });
     assert(webOnly.channels.website && !webOnly.contact_available && !webOnly.channels.email && !webOnly.channels.phone, "A website is research context, not a message recipient");
     const emailOnly = resolveProspectContactability({ email: "owner@northstarplumbing.com" });

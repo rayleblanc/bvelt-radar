@@ -90,6 +90,7 @@ interface Prospect {
     contact_available: boolean;
     channels: { email: boolean; phone: boolean; whatsapp_direct: boolean; website: boolean };
     send_authorized: boolean;
+    send_state?: "authorized" | "confirmed" | "not_authorized";
   };
 }
 
@@ -2231,7 +2232,7 @@ const submitDecision = async (prospectId: string, action: string) => {
                             <div className="text-[9px] text-slate-500 font-mono">
                               {contactability.commercial_prospect ? "Prospecto comercial" : "No elegible"} ·
                               {contactability.contact_available ? "Contacto directo disponible" : contactability.channels.website ? "Web disponible, sin destinatario directo" : "Sin canal directo"} ·
-                              {contactability.send_authorized ? "Envío autorizado" : "Envío requiere acción explícita"}
+                              {contactability.send_state === "confirmed" ? "Envío confirmado" : contactability.send_authorized ? "Envío autorizado" : "Envío requiere acción explícita"}
                             </div>
                           )}
                           <div className="flex flex-wrap items-center gap-2 pt-1 font-mono text-[11px]">

@@ -4306,6 +4306,7 @@ export function resolveProspectContactability(prospect: any): {
   contact_available: boolean;
   channels: { email: boolean; phone: boolean; whatsapp_direct: boolean; website: boolean };
   send_authorized: boolean;
+  send_state: "authorized" | "confirmed" | "not_authorized";
 } {
   const email = sanitizeEmail(prospect?.email);
   const phoneDigits = extractPhoneDigits(prospect?.phone);
@@ -4321,11 +4322,15 @@ export function resolveProspectContactability(prospect: any): {
   const status = String(prospect?.status || "").toLowerCase();
   const decisionState = String(prospect?.decision_state || "").toLowerCase();
   const commercialProspect = !["disqualified", "discarded", "suppressed", "blocked", "off_icp", "rejected"].includes(status) && !["disqualified", "off_icp", "no_go", "do_not_contact", "suppressed", "blocked"].includes(decisionState);
+  const contactAvailable = emailAvailable || phoneAvailable;
+  const sendConfirmed = ["sent", "delivered", "opened", "clicked"].includes(status) || ["sent", "delivered", "whatsapp_manual_sent"].includes(String(prospect?.outcome || "").toLowerCase());
+  const sendAuthorized = commercialProspect && contactAvailable && status === "approved";
   return {
     commercial_prospect: commercialProspect,
-    contact_available: emailAvailable || phoneAvailable,
+    contact_available: contactAvailable,
     channels: { email: emailAvailable, phone: phoneAvailable, whatsapp_direct: whatsappDirect, website },
-    send_authorized: false
+    send_authorized: sendAuthorized,
+    send_state: sendConfirmed ? "confirmed" : sendAuthorized ? "authorized" : "not_authorized"
   };
 }
 
