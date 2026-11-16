@@ -98,6 +98,7 @@ export interface Env {
   TRUST_STACK_KEY?: string;
   WEBHOOK_SECRET?: string; // token para webhooks de correo (?token=...)
   // Founder geography is sourced from the bundled gazetteer; no city/country env vars required.
+  FOUNDING_CITIES?: string; // optional explicit override; Founder defaults to bundled gazetteer
   FOUNDING_TRADES?: string; // semicolon-separated explicit niches; no implicit defaults
   FOUNDING_LANGUAGES?: string;
   FOUNDING_MIN_SCORE?: string;
@@ -7880,7 +7881,11 @@ export async function getPriorityTargets(
     config.niches = [];
     config.icp = { description: "", keywords: [] };
   } else {
-    // Founder mode
+    // Founder mode. Explicit city override remains backward-compatible, but is optional.
+    // With no override, geoFrontier rotates through the bundled global gazetteer.
+    if (env.FOUNDING_CITIES) {
+      config.geographies = env.FOUNDING_CITIES.split(";").map(city => city.trim()).filter(Boolean);
+    }
     if (env.FOUNDING_TRADES) {
       config.niches = env.FOUNDING_TRADES.split(";").map(t => t.trim()).filter(Boolean);
     }
