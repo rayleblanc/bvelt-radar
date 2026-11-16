@@ -1,6 +1,8 @@
 {
   "version": 1,
   "purpose": "Market prioritization hints for Radar. This is not an allowlist and must never exclude other countries, languages, cities, or niches.",
+  "founder_primary_countries": ["US", "CA", "GB", "AU"],
+  "founder_secondary_countries": ["IE", "NZ"],
   "market_tiers": {
     "core_english_commercial": ["US", "CA", "GB", "IE", "AU", "NZ"],
     "additional_english_commercial": ["ZA", "SG", "IN", "PH", "MY", "NG", "GH", "KE", "JM", "TT", "BB", "BS", "BZ", "MT", "GY"],
@@ -14,7 +16,7 @@
   },
   "geography_policy": {
     "primary_source": "Existing Radar geoData.ts and geoFrontier.ts",
-    "current_dataset_note": "The public geoData.ts describes approximately 7,600 US and Canadian places; it is not global coverage.",
+    "current_dataset_note": "geoData.ts supplies approximately 7,600 US and Canadian places; geoDataAnglosphere.ts supplements UK, Australia, Ireland, New Zealand and South Africa urban centres. Coverage outside these bundled markets remains partial.",
     "expansion_source": "GeoNames/all-the-cities with attribution, or an equivalent redistributable global gazetteer",
     "minimum_population_hint": 5000,
     "fallback": "Geocode configured city + country with a compliant geocoding provider when no local GeoPlace record exists.",
