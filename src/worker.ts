@@ -365,6 +365,7 @@ export interface MissionConfig {
 }
 
 const MARKET_UNIVERSE_POLICY = marketUniverse as {
+  founder_primary_countries?: string[];
   market_tiers?: {
     core_english_commercial?: string[];
     additional_english_commercial?: string[];
@@ -377,7 +378,9 @@ const MARKET_UNIVERSE_POLICY = marketUniverse as {
   excluded_business_categories?: string[];
 };
 
-const MARKET_PRIMARY_COUNTRIES = ["US", "CA", "GB", "AU"] as const;
+const MARKET_PRIMARY_COUNTRIES = (MARKET_UNIVERSE_POLICY.founder_primary_countries || ["US", "CA", "GB", "AU"])
+  .map(country => String(country).trim().toUpperCase())
+  .filter(Boolean);
 
 const DEFAULT_FOUNDER_SEGMENTS = (MARKET_UNIVERSE_POLICY.bvelt_compatible_segments || [])
   .map(segment => String(segment).trim().toLowerCase())
