@@ -2902,6 +2902,35 @@ tests.push({
   }
 });
 
+tests.push({
+  name: "Post-Scrapling evidence vetoes category mismatch and synthetic names",
+  run: () => {
+    const restaurant = evaluateResearchEvidenceQuality("Sun Garden Chinese", {
+      page_title: "Sun Garden Chinese Restaurant",
+      meta_description: "Chinese restaurant and takeout",
+      service_terms_observed: ["restaurant", "takeout"]
+    }, "landscaping");
+    assert(!restaurant.allowed && restaurant.reason === "scrapling_category_mismatch", "Restaurant evidence must veto a landscaping label");
+    assert(restaurant.inferredTrade === "restaurant", "The contradictory observed category must be retained for audit");
+    const synthetic = evaluateResearchEvidenceQuality("California Landscape, Variation 1", {
+      page_title: "LA County Department of Arts and Culture",
+      meta_description: "Civic Art Program"
+    }, "landscaping");
+    assert(!synthetic.allowed && synthetic.reason === "synthetic_variation_name", "Synthetic names must be rejected after enrichment");
+    const publicPage = evaluateResearchEvidenceQuality("California Landscape", {
+      page_title: "LA County Department of Arts and Culture",
+      meta_description: "Civic Art Program"
+    }, "landscaping");
+    assert(!publicPage.allowed && publicPage.reason === "government_or_public_program_website_without_service_intent", "Public program websites must be rejected without service intent");
+    const electrical = evaluateResearchEvidenceQuality("James Lewis Electrical", {
+      page_title: "James Lewis Electrical Services",
+      meta_description: "Residential electrical repair and installation",
+      service_terms_observed: ["repair", "installation"]
+    }, "electrical");
+    assert(electrical.allowed, "Matching electrical contractor evidence must remain eligible");
+  }
+});
+
 // Run all test cases
 async function runTests() {
 
