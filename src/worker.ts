@@ -7196,6 +7196,16 @@ async function handleApproveJob(job: RadarJobMessage, env: Env): Promise<void> {
       .bind(new Date().toISOString(), prospect_id).run();
     return;
   }
+  const verifiedEmail = sanitizeEmail(String(prospect.email || "")).valid && isEmailValidatedForOutreach(prospect.signals_json || "{}");
+  const directWhatsApp = Boolean(normalizeWhatsAppPhone(prospect.phone));
+  if (!verifiedEmail && !directWhatsApp) {
+    const holdAt = new Date().toISOString();
+    await env.RADAR_DB.prepare("UPDATE prospects SET status = 'hold', outcome = 'no_verified_direct_channel', updated_at = ? WHERE id = ?")
+      .bind(holdAt, prospect_id).run();
+    await notifyOnce(env, `no_verified_direct_channel_${prospect.id}`,
+      `<b>⏸️ Prospecto en HOLD — falta destinatario verificable</b>\n<b>Negocio:</b> ${escapeHtml(String(prospect.name || ""))}\n<b>Motivo:</b> correo sin verificación de entregabilidad y teléfono sin código internacional explícito para WhatsApp. Se puede llamar desde Radar; no se abrirá un enlace de WhatsApp sin destinatario.`);
+    return;
+  }
 
   if (['approved', 'drafted', 'queued', 'notified', 'sent', 'delivered', 'opened', 'clicked', 'bounced', 'unsubscribed', 'complained', 'replied'].includes(String(prospect.status || '').toLowerCase())) return;
 
