@@ -444,7 +444,6 @@ tests.push({
   run: async () => {
     const envMock = {
       RADAR_DB: { prepare: () => ({ bind: () => ({ first: () => Promise.resolve(null) }) }) } as any,
-      FOUNDING_CITIES: "Toronto, ON;Madrid, ES;Bogota, CO",
       FOUNDING_TRADES: "accounting;law_firm;dental_clinic",
       FOUNDER_SERVICE_KEY: "test_key",
       TELEGRAM_BOT_TOKEN: "",
