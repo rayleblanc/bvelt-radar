@@ -4316,7 +4316,19 @@ export function buildProspectEvidenceContext(prospect: any): string {
     business: {
       name: prospect?.name || null, city: prospect?.city || null, trade: prospect?.trade || null,
       website: prospect?.website || null, phone: prospect?.phone || null, email: prospect?.email || null,
-      address: prospect?.address || null, source: prospect?.source || null
+      address: prospect?.address || null, source: prospect?.source || null,
+      categories: prospect?.categories || prospect?.category || null, rating: prospect?.rating || null,
+      review_count: prospect?.review_count || prospect?.reviews_count || null,
+      description: prospect?.description || null, social_profiles: prospect?.social_profiles || null,
+      latitude: prospect?.latitude || null, longitude: prospect?.longitude || null,
+      google_maps_url: prospect?.google_maps_url || null, contact_provenance: prospect?.contact_provenance || null
+    },
+    commercial_profile: {
+      opportunity_score: prospect?.opportunity_score || null, fit_score: prospect?.fit_score || null,
+      intent_score: prospect?.intent_score || null, pain_score: prospect?.pain_score || null,
+      ability_to_pay_score: prospect?.ability_to_pay_score || null, evidence_score: prospect?.evidence_score || null,
+      signal_freshness_score: prospect?.signal_freshness_score || null, expected_value: prospect?.expected_value || null,
+      decision_state: prospect?.decision_state || null
     },
     declared_angle: prospect?.bvelt_angle || prospect?.angle || null,
     score_breakdown: parse(prospect?.score_breakdown || {}),
@@ -10301,6 +10313,13 @@ async function generateAICopy(
       tenantInfo = await env.RADAR_DB.prepare("SELECT * FROM tenant_config WHERE tenant_id = ?").bind(prospect.tenant_id).first() as any;
     } catch (e) {}
   }
+  const tenantContext = tenantInfo ? JSON.stringify({
+    tenant_name: tenantInfo.tenant_name, industry: tenantInfo.industry, niche: tenantInfo.niche,
+    services: tenantInfo.services_json, service_areas: tenantInfo.service_areas_json,
+    ideal_customer_profile: tenantInfo.icp_description, icp_keywords: tenantInfo.icp_keywords_json,
+    campaign_goal: tenantInfo.campaign_goal, messaging_angle: tenantInfo.messaging_angle,
+    allowed_markets: tenantInfo.allowed_markets_json
+  }).slice(0, 3500) : "Founder mode: Bvelt customer enquiry follow-up platform.";
 
   // Weather signal custom template branch
   if (prospect.signal_event && prospect.signal_area && !tenantInfo) {
@@ -10353,6 +10372,7 @@ async function generateAICopy(
     - Ubicación: ${prospect.city}
     - Trade: ${prospect.trade}
     - Observed evidence / Evidencia observada (JSON): ${evidenceContext}
+    - Sender offer and ideal-customer context (JSON): ${tenantContext}
  
     Instrucciones del ángulo de prospección:
     ${angleFocus}
@@ -10377,6 +10397,7 @@ async function generateAICopy(
     - Location: ${prospect.city}
     - Trade: ${prospect.trade}
     - Observed evidence / Evidencia observada (JSON): ${evidenceContext}
+    - Sender offer and ideal-customer context (JSON): ${tenantContext}
 
     Outreach Angle Instructions:
     ${angleFocus}
