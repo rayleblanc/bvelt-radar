@@ -265,7 +265,7 @@ def _extract_contact_candidates(html: str) -> tuple[set[str], set[str], list[dic
     visible_html = re.sub(r"(?is)<(script|style|noscript|svg|template|canvas)[^>]*>.*?</\1>", " ", html)
     visible_text = _strip_html(visible_html)
 
-    for raw in re.findall(r"(?is)href\s*=\s*['\\"]mailto:([^'\\"?]+)", visible_html):
+    for raw in re.findall(r"""(?is)href\s*=\s*['"]mailto:([^'"?]+)""", visible_html):
         value = raw.strip().lower()
         if _valid_email_candidate(value):
             emails.add(value)
@@ -292,7 +292,7 @@ def _extract_contact_candidates(html: str) -> tuple[set[str], set[str], list[dic
             emails.add(value)
             provenance.append({"type": "email", "value": value, "source": "visible_text"})
 
-    for raw in re.findall(r"(?is)href\s*=\s*['\\"]tel:([^'\\"]+)['\\"]", visible_html):
+    for raw in re.findall(r"""(?is)href\s*=\s*['"]tel:([^'"]+)['"]""", visible_html):
         value = raw.strip()
         digits = re.sub(r"\D", "", value)
         if _valid_phone_digits(digits):
