@@ -3100,7 +3100,7 @@ export default {
                 UPDATE prospects SET signals_json = ?, updated_at = ?
                 WHERE id = ? AND mode = ? AND COALESCE(tenant_id, 'founder') = ?
               `).bind(JSON.stringify(signalsObj), now, prospectId, mode, tenantId).run();
-              if (mode === "founder") {
+              if (mode === "founder" && !terminalStatus && env.RADAR_QUEUE) {
                 await enqueueJob(env, {
                   run_id: runId,
                   job_id: `research_score_${prospectId}_${String(contentHash).slice(0, 12)}`,
