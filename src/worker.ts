@@ -12,6 +12,7 @@
  */
 
 import { buildRadarEvidenceProvenance } from './evidenceProvenance.js';
+import { validateTenantProfileContract } from './tenantProfileContract.js';
 import { getAlerts, tradeForEvent, eventAppliesToTrade, WeatherAlert } from './weatherSignals';
 import { dispatchEmail, normalizeOutreachBody, BVELT_SITE, EmailDispatchResult, inspectOutboundEmailAuth } from './emailDispatcher';
 import { auditDomainSecurityAndMx, auditWebsitePerformance, auditCityWeatherEmergency } from './openAudits';
@@ -2110,36 +2111,15 @@ export default {
           return Response.json({ error: "Forbidden: cannot modify configuration for another tenant" }, { status: 403, headers: corsHeaders });
         }
 
-        const contractVersion = Number(body.contract_version);
-        const realm = String(body.realm || '').trim().toUpperCase();
-        const profileId = String(body.profile_id || '').trim();
-        const businessId = String(body.business_id || '').trim().slice(0, 180);
-        const profileSnapshotVersion = String(body.profile_snapshot_version || '').trim().toLowerCase();
-        const profileSnapshotAt = String(body.profile_snapshot_at || '').trim();
-        const profileSource = String(body.profile_source || '').trim().toUpperCase();
-        const locationSource = String(body.location_source || 'UNKNOWN').trim().toUpperCase();
-        const verificationState = String(body.verification_state || 'UNKNOWN').trim().toUpperCase();
-        const correlationId = String(body.correlation_id || '').trim().slice(0, 120);
-        const idempotencyKey = String(body.idempotency_key || '').trim().slice(0, 220);
-        const timezone = String(body.timezone || '').trim().slice(0, 80) || null;
-        const language = String(body.language || '').trim().slice(0, 20) || null;
-        const source = String(body.source || 'profile').trim().slice(0, 40);
-        const territory = body.territory && typeof body.territory === 'object' && !Array.isArray(body.territory) ? body.territory : {};
-        const territoryJson = JSON.stringify(territory);
-        const expectedProfileId = tenantId.startsWith('bvelt_') ? tenantId.slice('bvelt_'.length) : '';
-        const validLocationSources = new Set(['DEVICE', 'BROWSER_NETWORK', 'USER_ENTERED', 'DEMO_EXAMPLE', 'UNKNOWN']);
-        const validVerificationStates = new Set(['CONNECTED', 'PENDING_RE-AUTH', 'DISCONNECTED', 'DISCONNECTED_RE-AUTH_NEEDED', 'NOT_CONNECTED', 'VERIFIED', 'UNVERIFIED', 'UNKNOWN']);
-        if (contractVersion !== 1 || realm !== 'TENANT' || profileSource !== 'FIRESTORE_PROFILE') {
-          return Response.json({ error: 'tenant_profile_contract_invalid', required_contract_version: 1 }, { status: 400, headers: corsHeaders });
+        const contractValidation = validateTenantProfileContract(body, tenantId);
+        if (!contractValidation.ok) {
+          return Response.json({ error: contractValidation.error }, { status: contractValidation.status, headers: corsHeaders });
         }
-        if (!expectedProfileId || profileId !== expectedProfileId) {
-          return Response.json({ error: 'profile_id_tenant_mismatch' }, { status: 403, headers: corsHeaders });
-        }
-        if (!/^[a-f0-9]{64}$/.test(profileSnapshotVersion) || !Number.isFinite(Date.parse(profileSnapshotAt)) ||
-            !/^[A-Za-z0-9-]{16,120}$/.test(correlationId) || !idempotencyKey || territoryJson.length > 8000 ||
-            !validLocationSources.has(locationSource) || !validVerificationStates.has(verificationState)) {
-          return Response.json({ error: 'tenant_profile_contract_metadata_invalid' }, { status: 400, headers: corsHeaders });
-        }
+        const {
+          contractVersion, realm, profileId, businessId, profileSnapshotVersion, profileSnapshotAt,
+          profileSource, locationSource, verificationState, correlationId, idempotencyKey,
+          timezone, language, source, territoryJson
+        } = contractValidation.value;
 
         const previousConfig: any = await env.RADAR_DB.prepare(
           'SELECT profile_snapshot_version, profile_snapshot_at, idempotency_key FROM tenant_config WHERE tenant_id = ?'
