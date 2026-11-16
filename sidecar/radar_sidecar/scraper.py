@@ -326,6 +326,7 @@ def _extract(candidate: dict[str, Any]) -> dict[str, Any] | None:
     visited: set[str] = set()
     emails: set[str] = set()
     phones: set[str] = set()
+    contact_provenance: list[dict[str, str]] = []
     service_terms: set[str] = set()
     signals: dict[str, bool] = {
         "contact_form_observed": False,
@@ -425,6 +426,7 @@ def _extract(candidate: dict[str, Any]) -> dict[str, Any] | None:
         "meta_description": meta_description,
         "public_business_emails": sorted(emails)[:10],
         "public_business_phones": sorted(phones)[:10],
+        "contact_provenance": contact_provenance[:40],
         "contact_provenance": contact_provenance[:40],
         "service_terms_observed": sorted(service_terms)[:30],
         "observed_capabilities": signals,
