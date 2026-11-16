@@ -1,6 +1,6 @@
 declare const process: any;
 
-import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, resolveTenantBuyerSegments, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey, notifyOnce, isVerifiedDeliverableEmail, evaluateFounderOutreachEligibility, buildTechnicalAuditSnapshot, isEmailValidatedForOutreach, isCompletePostalAddress, sendTelegramWithRetry, extractEmailAddress, evaluateResearchEvidenceQuality, classifyReplyText, getTelegramApprovalFeedback, getManualSendPreflightError, buildScheduledRunId, getCurrentDaySenderCount, normalizeWhatsAppPhone, extractPhoneDigits, buildWhatsAppClickToChatUrl, buildWhatsAppOutreachBody } from './worker';
+import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, resolveTenantBuyerSegments, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey, notifyOnce, isVerifiedDeliverableEmail, evaluateFounderOutreachEligibility, buildTechnicalAuditSnapshot, isEmailValidatedForOutreach, isCompletePostalAddress, sendTelegramWithRetry, extractEmailAddress, evaluateResearchEvidenceQuality, classifyReplyText, getTelegramApprovalFeedback, getManualSendPreflightError, buildScheduledRunId, getCurrentDaySenderCount, normalizeWhatsAppPhone, extractPhoneDigits, hasUsableContactChannel, buildWhatsAppClickToChatUrl, buildWhatsAppOutreachBody } from './worker';
 import { DEFAULT_FOUNDER_MISSION, MissionConfig } from './worker';
 import { buildResendIdempotencyKey, buildBrandedEmailHtml, resolveBveltSender, inspectOutboundEmailAuth, normalizeOutreachBody } from './emailDispatcher';
 import { fetchPermitContractors } from './permitSources';
@@ -36,6 +36,10 @@ tests.push({
     assert(normalizeWhatsAppPhone("0018135550100") === "18135550100", "Accept explicit 00 international prefix");
     assert(normalizeWhatsAppPhone("123") === null, "Reject short phone numbers");
     assert(extractPhoneDigits("813-555-0100") === "8135550100", "Keep a usable local phone without inventing its country code");
+    assert(hasUsableContactChannel("team@example.com", null), "Email is a usable contact channel");
+    assert(hasUsableContactChannel("", "813-555-0100"), "Phone-only businesses remain eligible for reviewed WhatsApp handoff");
+    assert(!hasUsableContactChannel("", "123"), "Reject malformed phone-only contact data");
+    assert(!hasUsableContactChannel("", null), "Reject prospects without any usable contact channel");
     const genericShare = buildWhatsAppClickToChatUrl("813-555-0100", "Hi team");
     assert(!!genericShare && genericShare.startsWith("https://wa.me/?text="), "Use WhatsApp contact picker for local numbers");
     const link = buildWhatsAppClickToChatUrl("+1 813 555 0100", "Hi team — quick question");
@@ -304,9 +308,13 @@ tests.push({
       return counts;
     }, {});
     assert(balanced.length === 8, "Founder should fill the requested target count from the merged gazetteer");
+    const primaryCount = ["US", "CA", "GB", "AU"].reduce((sum, country) => sum + (countryCounts[country] || 0), 0);
+    const explorationCount = balanced.length - primaryCount;
     for (const country of ["US", "CA", "GB", "AU"]) {
-      assert((countryCounts[country] || 0) >= 2, "Each primary market must receive two targets per 8-target selection: " + country);
+      assert((countryCounts[country] || 0) >= 1, "Each available primary market must receive a target: " + country);
     }
+    assert(primaryCount >= 6, "At least 75% of targets should come from the four primary markets");
+    assert(explorationCount >= 2, "The remaining target share should explore non-primary gazetteer countries");
   }
 });
 
@@ -1309,7 +1317,7 @@ tests.push({
     const { getBudgetLimit, reserveBudget, releaseBudget, getCircuitBreakerStatus, tripCircuitBreaker, trackProviderFailure } = await import('./worker');
     
     // 1. Verify budget limits
-    assert(getBudgetLimit('discovery_units') === 30, "Discovery daily budget must be 30");
+    assert(getBudgetLimit('discovery_units') === 45, "Discovery daily budget must be 45");
     assert(getBudgetLimit('enrichment_units') === 20, "Enrichment daily budget must be 20");
     assert(getBudgetLimit('ai_units') === 10, "AI daily budget must be 10");
     assert(getBudgetLimit('hunter_units') === 8, "Hunter daily budget must be 8");
