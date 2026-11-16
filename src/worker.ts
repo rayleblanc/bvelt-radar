@@ -3030,6 +3030,10 @@ export default {
         let rejectedCount = 0;
 
         const now = new Date().toISOString();
+        const tenantSnapshot: any = mode === 'tenant'
+          ? await env.RADAR_DB.prepare('SELECT profile_snapshot_version FROM tenant_config WHERE tenant_id = ?').bind(tenantId).first()
+          : null;
+        const profileSnapshotVersion = tenantSnapshot?.profile_snapshot_version || null;
 
         // Check if runner reported failure
         if (body.status === "failed" || body.run_status === "failed") {
@@ -3050,18 +3054,18 @@ export default {
 
         for (const item of records) {
           const prospectId = item.prospect_id;
-          const sourceId = item.source_id || "scrapling_business_website";
-          const sourceUrl = item.source_url || item.url || "";
-          const evidenceType = item.evidence_type || "business_website_profile";
-          const contentHash = item.content_hash || "";
-          const extractorVersion = item.extractor_version || body.extractor_version || "bvelt-scrapling-1.0.0";
+          const sourceId = String(item.source_id || "scrapling_business_website").trim().slice(0, 120);
+          const sourceUrl = String(item.source_url || item.url || "").trim().slice(0, 2000);
+          const evidenceType = String(item.evidence_type || "business_website_profile").trim().slice(0, 120);
+          const contentHash = String(item.content_hash || "").trim();
+          const extractorVersion = String(item.extractor_version || body.extractor_version || "bvelt-scrapling-1.0.0").trim().slice(0, 120);
           const confidence = typeof item.confidence === "number" && Number.isFinite(item.confidence)
             ? Math.min(1, Math.max(0, item.confidence))
             : 0.65;
-          const observedAt = item.observed_at || now;
+          const observedAt = String(item.observed_at || now).slice(0, 40);
           const evidenceData = item.evidence || {};
 
-          if (!prospectId || !sourceUrl || !/^[a-f0-9]{64}$/i.test(String(contentHash))) {
+          if (!prospectId || !sourceUrl || !/^[a-f0-9]{64}$/i.test(contentHash) || !Number.isFinite(Date.parse(observedAt))) {
             rejectedCount++;
             continue;
           }
@@ -3120,6 +3124,10 @@ export default {
 
           const evidenceId = existingEvidence ? existingEvidence.id : (item.id || `ev_${crypto.randomUUID().replace(/-/g, '').substring(0, 16)}`);
           const evidenceJson = typeof evidenceData === "string" ? evidenceData : JSON.stringify(evidenceData);
+          if (evidenceJson.length > 50000) {
+            rejectedCount++;
+            continue;
+          }
 
           if (existingEvidence) {
             duplicatedCount++;
@@ -3137,9 +3145,6 @@ export default {
               const limitations = Array.isArray(item.limitations)
                 ? item.limitations.filter((v: any) => typeof v === 'string').slice(0, 20).map((v: string) => v.slice(0, 240))
                 : [];
-              const tenantSnapshot = mode === 'tenant'
-                ? await env.RADAR_DB.prepare('SELECT profile_snapshot_version FROM tenant_config WHERE tenant_id = ?').bind(tenantId).first() as any
-                : null;
               await env.RADAR_DB.prepare(`
                 INSERT INTO source_evidence (
                   id, run_id, mode, realm, tenant_id, prospect_id, subject_id, source_id, source_label, source_url,
@@ -3173,7 +3178,7 @@ export default {
                 null,
                 JSON.stringify(limitations),
                 null,
-                tenantSnapshot?.profile_snapshot_version || null,
+                profileSnapshotVersion,
                 1,
                 now
               ).run();
