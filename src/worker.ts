@@ -10410,7 +10410,7 @@ async function generateAICopy(
   let aiUnitReserved = false;
   const tenantId = prospect.tenant_id || "founder";
 
-  if (apiKey || env.GROQ_API_KEY) {
+  if (apiKey || env.GROQ_API_KEY || (env.AI && typeof env.AI.run === "function")) {
     aiUnitReserved = await reserveBudget(env.RADAR_DB, tenantId, 'ai_units', 1);
   }
 
