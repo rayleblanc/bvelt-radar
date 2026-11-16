@@ -288,6 +288,23 @@ tests.push({
       countries: []
     });
     assert(picks.length === 0, "GeoFrontier must not invent a trade when none is supplied");
+
+    const balanced = await pickTargets({ prepare: () => ({ bind: () => ({ all: async () => ({ results: [] }) }) }) } as any, {
+      tenantId: "founder",
+      trades: ["plumbing"],
+      count: 8,
+      countries: [],
+      priorityCountries: ["US", "CA", "GB", "AU"]
+    });
+    const marketCounts = balanced.reduce((counts, item) => {
+      counts[item.place.country] = (counts[item.place.country] || 0) + 1;
+      return counts;
+    }, {} as Record<string, number>);
+    for (const country of ["US", "CA", "GB", "AU"]) {
+      assert((marketCounts[country] || 0) > 0, `Founder rotation must include ${country} when its gazetteer has eligible places`);
+    }
+    const coreCounts = ["US", "CA", "GB", "AU"].map(country => marketCounts[country] || 0);
+    assert(Math.max(...coreCounts) - Math.min(...coreCounts) <= 1, "Founder picks must be balanced across the four core markets");
   }
 });
 
