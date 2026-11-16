@@ -440,7 +440,7 @@ tests.push({
 
 // Test 1: Market-Agnostic config rotation with custom geographies, countries, and niches
 tests.push({
-  name: "Radar accepts customized niches, cities, and countries",
+  name: "Founder uses bundled global market rotation without country environment variables",
   run: async () => {
     const envMock = {
       RADAR_DB: { prepare: () => ({ bind: () => ({ first: () => Promise.resolve(null) }) }) } as any,
@@ -462,11 +462,13 @@ tests.push({
     assert(activeCities.length > 0, "Should select at least one active city");
     assert(activeTrades.length > 0, "Should select at least one active niche");
     
-    // Assert no US, Texas, HVAC or Landscaping limits are enforced in active selection
-    assert(missionConfig.geographies.includes("Toronto, ON"), "Should include custom geographies");
-    assert(missionConfig.geographies.includes("Madrid, ES"), "Should include custom geographies");
-    assert(missionConfig.geographies.includes("Bogota, CO"), "Should include custom geographies");
-    assert(missionConfig.niches.includes("accounting"), "Should include custom niche 'accounting'");
+    // Founder geography comes from the bundled gazetteer, not Cloudflare city/country variables.
+    assert(missionConfig.geographies.length === 0, "Founder mission must not pin custom city lists");
+    assert(missionConfig.countries.length === 0, "Founder mission must not require a country allowlist");
+    assert(activeCities.length > 0, "Founder must still select locations from the bundled gazetteer");
+    assert(missionConfig.niches.includes("accounting"), "Should preserve custom niche 'accounting'");
+    assert(missionConfig.niches.includes("law_firm"), "Should preserve custom niche 'law_firm'");
+    assert(missionConfig.niches.includes("dental_clinic"), "Should preserve custom niche 'dental_clinic'");
   }
 });
 
