@@ -3039,9 +3039,10 @@ export default {
 
           // 3. Idempotent check: UNIQUE (prospect_id, source_id, evidence_type, content_hash)
           const existingEvidence = (await env.RADAR_DB.prepare(`
-            SELECT id FROM source_evidence 
-            WHERE prospect_id = ? AND source_id = ? AND evidence_type = ? AND content_hash = ?
-          `).bind(prospectId, sourceId, evidenceType, contentHash).first()) as any;
+            SELECT id FROM source_evidence
+            WHERE mode = ? AND realm = ? AND tenant_id = ? AND prospect_id = ?
+              AND source_id = ? AND evidence_type = ? AND content_hash = ?
+          `).bind(mode, mode === 'tenant' ? 'TENANT' : 'FOUNDER', tenantId, prospectId, sourceId, evidenceType, contentHash).first()) as any;
 
           const evidenceId = existingEvidence ? existingEvidence.id : (item.id || `ev_${crypto.randomUUID().replace(/-/g, '').substring(0, 16)}`);
           const evidenceJson = typeof evidenceData === "string" ? evidenceData : JSON.stringify(evidenceData);
@@ -3051,26 +3052,55 @@ export default {
           } else {
             // 4. Insert into source_evidence
             try {
+              const sourceLabel = new URL(String(sourceUrl)).hostname.toLowerCase().replace(/^www\\./, '');
+              const realm = mode === 'tenant' ? 'TENANT' : 'FOUNDER';
+              const unit = typeof item.unit === 'string' ? item.unit.trim().slice(0, 40) || null : null;
+              const period = item.period && typeof item.period === 'object' ? {
+                start: typeof item.period.start === 'string' && Number.isFinite(Date.parse(item.period.start)) ? item.period.start : null,
+                end: typeof item.period.end === 'string' && Number.isFinite(Date.parse(item.period.end)) ? item.period.end : null,
+              } : null;
+              const sampleSize = Number.isInteger(item.sample_size) && item.sample_size >= 0 ? item.sample_size : null;
+              const limitations = Array.isArray(item.limitations)
+                ? item.limitations.filter((v: any) => typeof v === 'string').slice(0, 20).map((v: string) => v.slice(0, 240))
+                : [];
+              const tenantSnapshot = mode === 'tenant'
+                ? await env.RADAR_DB.prepare('SELECT profile_snapshot_version FROM tenant_config WHERE tenant_id = ?').bind(tenantId).first() as any
+                : null;
               await env.RADAR_DB.prepare(`
                 INSERT INTO source_evidence (
-                  id, run_id, mode, tenant_id, prospect_id, source_id, source_url,
-                  evidence_type, evidence_json, content_hash, extractor_version,
-                  confidence, observed_at, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  id, run_id, mode, realm, tenant_id, prospect_id, subject_id, source_id, source_label, source_url,
+                  evidence_type, evidence_status, method, evidence_json, content_hash, extractor_version,
+                  confidence, unit, period_json, sample_size, observed_at, fetched_at, valid_until,
+                  limitations_json, usage_policy_json, profile_snapshot_version, schema_version, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
               `).bind(
                 evidenceId,
                 runId,
                 mode,
+                realm,
                 tenantId,
                 prospectId,
+                prospectId,
                 sourceId,
+                sourceLabel,
                 sourceUrl,
                 evidenceType,
+                'DECLARED',
+                'WEBSITE_SCRAPE',
                 evidenceJson,
                 contentHash,
                 extractorVersion,
                 confidence,
+                unit,
+                period ? JSON.stringify(period) : null,
+                sampleSize,
                 observedAt,
+                now,
+                null,
+                JSON.stringify(limitations),
+                null,
+                tenantSnapshot?.profile_snapshot_version || null,
+                1,
                 now
               ).run();
               insertedCount++;
@@ -3456,18 +3486,32 @@ export async function ensureResearchSchema(db: D1Database): Promise<void> {
           id TEXT PRIMARY KEY,
           run_id TEXT NOT NULL,
           mode TEXT NOT NULL CHECK (mode IN ('founder', 'tenant')),
+          realm TEXT NOT NULL CHECK (realm IN ('FOUNDER', 'TENANT')),
           tenant_id TEXT NOT NULL,
           prospect_id TEXT NOT NULL,
+          subject_id TEXT NOT NULL,
           source_id TEXT NOT NULL,
+          source_label TEXT NOT NULL,
           source_url TEXT NOT NULL,
           evidence_type TEXT NOT NULL,
+          evidence_status TEXT NOT NULL CHECK (evidence_status IN ('VERIFIED', 'DECLARED', 'ESTIMATED', 'MODELED', 'BENCHMARK', 'DEMO', 'UNKNOWN')),
+          method TEXT NOT NULL,
           evidence_json TEXT NOT NULL,
           content_hash TEXT NOT NULL,
           extractor_version TEXT NOT NULL,
-          confidence REAL NOT NULL DEFAULT 0.5,
+          confidence REAL,
+          unit TEXT,
+          period_json TEXT,
+          sample_size INTEGER,
           observed_at TEXT NOT NULL,
+          fetched_at TEXT NOT NULL,
+          valid_until TEXT,
+          limitations_json TEXT NOT NULL DEFAULT '[]',
+          usage_policy_json TEXT,
+          profile_snapshot_version TEXT,
+          schema_version INTEGER NOT NULL DEFAULT 1,
           created_at TEXT NOT NULL,
-          UNIQUE (prospect_id, source_id, evidence_type, content_hash)
+          UNIQUE (mode, realm, tenant_id, prospect_id, source_id, evidence_type, content_hash)
         );
       `),
       db.prepare(`
