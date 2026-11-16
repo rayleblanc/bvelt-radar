@@ -3064,7 +3064,7 @@ export default {
             signalsObj.signals.scrapling = mergedScrapling;
             const terminalStatus = ["sent", "delivered", "opened", "clicked", "replied", "won", "lost", "bounced", "unsubscribed", "complained"].includes(String(prospectRow.status || "").toLowerCase());
             if (!quality.allowed && !terminalStatus) {
-              await env.RADAR_DB.prepare(\`
+              await env.RADAR_DB.prepare(`
                 UPDATE prospects SET signals_json = ?, status = 'disqualified', outcome = ?, email = NULL,
                   score = 0, opportunity_score = 0, confidence_score = 0, score_breakdown = '{}',
                   fit_score = 0, intent_score = 0, pain_score = 0, ability_to_pay_score = 0,
@@ -3072,14 +3072,14 @@ export default {
                   signal_freshness_score = 0, expected_value = 0, decision_state = 'disqualified',
                   bvelt_angle = NULL, draft_subject = NULL, draft_body = NULL, updated_at = ?
                 WHERE id = ? AND mode = ? AND COALESCE(tenant_id, 'founder') = ?
-              \`).bind(JSON.stringify(signalsObj), \`research_quality_rejected:\${quality.reason || "non_commercial_profile"}\`, now, prospectId, mode, tenantId).run();
+              `).bind(JSON.stringify(signalsObj), `research_quality_rejected:${quality.reason || "non_commercial_profile"}`, now, prospectId, mode, tenantId).run();
               if (mode === "founder") {
-                await env.RADAR_DB.prepare(\`
+                await env.RADAR_DB.prepare(`
                   UPDATE opportunities SET status = 'closed', strategic_score = 0, fit_score = 0,
                     intent_score = 0, pain_score = 0, ability_to_pay_score = 0, expected_value = 0,
                     decision_state = 'disqualified', why_now_json = '{}', updated_at = ?
                   WHERE prospect_id = ? AND mode = 'founder' AND COALESCE(tenant_id, 'founder') = 'founder'
-                \`).bind(now, prospectId).run();
+                `).bind(now, prospectId).run();
               }
             } else {
               await env.RADAR_DB.prepare(`
