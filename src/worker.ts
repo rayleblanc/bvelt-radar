@@ -9188,14 +9188,12 @@ export function calculateMultiFactorScore(
  * Official BizData categories (~37 fixed standard directory categories)
  */
 export const BIZDATA_OFFICIAL_CATEGORIES = new Set([
-  "accounting", "accountant", "attorney", "auto_repair", "bakery", "bank", "bar",
-  "beauty_salon", "book_store", "cafe", "car_dealer", "car_rental", "car_repair",
-  "car_wash", "dentist", "doctor", "drugstore", "dry_cleaning", "electrician",
-  "florist", "gas_station", "general_contractor", "gym", "hair_care", "hairdresser",
-  "hardware_store", "hospital", "insurance_agency", "laundry", "lawyer", "locksmith",
-  "lodging", "moving_company", "painter", "pharmacy", "physiotherapist", "plumber",
-  "real_estate_agency", "real_estate", "restaurant", "roofing_contractor", "school",
-  "shoe_store", "shopping_mall", "spa", "supermarket", "travel_agency", "veterinary_care"
+  "accountant", "bakery", "bank", "bar", "beauty", "bookstore", "cafe",
+  "car_dealer", "car_repair", "cinema", "clothing", "coworking", "dentist",
+  "doctor", "electronics", "florist", "furniture", "gallery", "gas_station",
+  "guest_house", "gym", "hairdresser", "hospital", "hostel", "hotel",
+  "insurance", "lawyer", "museum", "parking", "pet_shop", "pharmacy",
+  "real_estate", "restaurant", "school", "supermarket", "theatre", "university"
 ]);
 
 /**
@@ -9207,34 +9205,21 @@ export function mapTradeToBizDataCategory(trade: string): string | null {
   if (BIZDATA_OFFICIAL_CATEGORIES.has(norm)) return norm;
   
   const mapping: Record<string, string> = {
-    "plumbing": "plumber",
-    "roofing": "roofing_contractor",
-    "electrician": "electrician",
-    "electrical": "electrician",
-    "cleaning": "dry_cleaning",
-    "house_cleaning": "dry_cleaning",
-    "car_repair": "auto_repair",
-    "lawyer": "attorney",
-    "law_firm": "attorney",
-    "dentist": "dentist",
-    "dental_clinic": "dentist",
-    "locksmith": "locksmith",
-    "painter": "painter",
-    "painting": "painter",
-    "handyman": "general_contractor",
-    "real_estate": "real_estate_agency",
-    "auto_repair": "auto_repair",
+    "accounting": "accountant",
+    "accounting_firm": "accountant",
+    "attorney": "lawyer",
+    "law_firm": "lawyer",
+    "auto_repair": "car_repair",
     "auto_body": "car_repair",
+    "beauty_salon": "beauty",
+    "book_store": "bookstore",
+    "dry_cleaning": "laundry",
+    "hair_care": "hairdresser",
+    "insurance_agency": "insurance",
     "medical_clinic": "doctor",
-    "accounting_firm": "accounting",
-    "hotel": "lodging",
-    "tutoring_center": "school",
-    "training_center": "school",
-    "catering": "restaurant",
-    "moving": "moving_company",
-    "hardware_store": "hardware_store",
-    "car_wash": "car_wash",
-    "car_rental": "car_rental"
+    "pet_store": "pet_shop",
+    "real_estate_agency": "real_estate",
+    "guesthouse": "guest_house"
   };
 
   const mapped = mapping[norm];
@@ -9460,6 +9445,22 @@ export async function fetchOverpassBusinesses(
 /**
  * 3. BizData API Scraper (ONLY called if category is in official BizData list; skips on HTTP 400 or error without aborting)
  */
+export function normalizeBizDataBusinesses(data: any, city: string, trade: string): any[] {
+  const items = Array.isArray(data) ? data : (Array.isArray(data?.businesses) ? data.businesses : []);
+  return items.filter((item: any) => item && typeof item.name === "string" && item.name.trim()).map((item: any) => ({
+    name: item.name.trim(),
+    city,
+    trade,
+    address: item.address || null,
+    website: item.website || item.site || null,
+    phone: item.phone || null,
+    email: item.email || null,
+    lat: Number.isFinite(Number(item.lat ?? item.latitude)) ? Number(item.lat ?? item.latitude) : null,
+    lon: Number.isFinite(Number(item.lon ?? item.longitude)) ? Number(item.lon ?? item.longitude) : null,
+    source: "bizdata"
+  }));
+}
+
 export async function fetchBizDataBusinesses(city: string, trade: string): Promise<{ businesses: any[]; status: string }> {
   const category = mapTradeToBizDataCategory(trade);
   if (!category) {
@@ -9474,21 +9475,8 @@ export async function fetchBizDataBusinesses(city: string, trade: string): Promi
     });
     if (res.ok) {
       const data: any = await res.json();
-      const results: any[] = [];
-      if (Array.isArray(data)) {
-        for (const item of data) {
-          results.push({
-            name: item.name,
-            city,
-            trade,
-            website: item.website || item.site || null,
-            phone: item.phone || null,
-            email: item.email || null,
-            source: "bizdata"
-          });
-        }
-      }
-      return { businesses: results, status: "success" };
+      const results = normalizeBizDataBusinesses(data, city, trade);
+      return { businesses: results, status: `success (${results.length} businesses)` };
     } else {
       console.warn(`[BizData] HTTP ${res.status} for ${city} - ${trade}, skipping source (do not abort)`);
       return { businesses: [], status: `HTTP ${res.status} (skipped)` };
