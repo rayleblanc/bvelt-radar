@@ -4,7 +4,7 @@ import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter
 import { DEFAULT_FOUNDER_MISSION, MissionConfig } from './worker';
 import { buildResendIdempotencyKey, buildBrandedEmailHtml, resolveBveltSender, inspectOutboundEmailAuth, normalizeOutreachBody } from './emailDispatcher';
 import { fetchPermitContractors } from './permitSources';
-import { pickTargets } from './geoFrontier';
+import { pickTargets, findPlace } from './geoFrontier';
 import { isOffIcpName, sanitizeEmail } from './emailSanitizer';
 import { learningCounterDelta, readScopedLearningStats, recordScopedLearningEvent } from './learningIntegrity';
 
@@ -288,6 +288,33 @@ tests.push({
       countries: []
     });
     assert(picks.length === 0, "GeoFrontier must not invent a trade when none is supplied");
+  }
+});
+
+tests.push({
+  name: "Unified gazetteer resolves UK and Australia and Founder rotation covers all four primary markets",
+  run: async () => {
+    const london = findPlace("London, England");
+    const sydney = findPlace("Sydney, New South Wales");
+    assert(london?.country === "GB", "London must resolve from the supplemental UK gazetteer");
+    assert(sydney?.country === "AU", "Sydney must resolve from the supplemental Australia gazetteer");
+
+    const picks = await pickTargets({} as any, {
+      tenantId: "founder",
+      trades: ["plumbing", "hvac", "roofing", "landscaping"],
+      count: 12,
+      countries: [],
+      priorityCountries: ["US", "CA", "GB", "AU"],
+      countryRotation: ["US", "CA", "GB", "AU"]
+    });
+    const counts = picks.reduce((acc, item) => {
+      const country = String(item.place.country || item.place[2] || "").toUpperCase();
+      acc[country] = (acc[country] || 0) + 1;
+      return acc;
+    }, {} as Record<string, number>);
+    for (const country of ["US", "CA", "GB", "AU"]) {
+      assert((counts[country] || 0) >= 2, `Founder rotation must reserve a balanced share for ${country}; got ${JSON.stringify(counts)}`);
+    }
   }
 });
 
