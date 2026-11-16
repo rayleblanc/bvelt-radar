@@ -5694,7 +5694,21 @@ async function upsertOpportunity(
     _oppSchemaReady = true;
   }
   const nowIso = new Date().toISOString();
-  const mode = opts.mode || (opts.tenant_id === "founder" ? "founder" : "tenant");
+  // The prospect's persisted tenant scope is authoritative. Never let a stale
+  // queue payload or caller-supplied mode reclassify a Tenant prospect as Founder.
+  let canonicalTenantId = String(opts.tenant_id || "founder").trim() || "founder";
+  try {
+    const prospectScope = await db.prepare(
+      "SELECT tenant_id FROM prospects WHERE id = ? LIMIT 1"
+    ).bind(opts.prospect_id).first() as any;
+    if (prospectScope) {
+      canonicalTenantId = String(prospectScope.tenant_id || "founder").trim() || "founder";
+    }
+  } catch (scopeError: any) {
+    console.warn("[upsertOpportunity] prospect scope lookup failed:", scopeError?.message || scopeError);
+    return false; // fail closed: do not write an unverified scope
+  }
+  const mode = canonicalTenantId === "founder" ? "founder" : "tenant";
   const s = Math.round(opts.strategic_score || 50);
   try {
     await db.prepare(`
@@ -5707,6 +5721,8 @@ async function upsertOpportunity(
         decision_state, why_now_json, priority_tier, created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
+        tenant_id = excluded.tenant_id,
+        mode = excluded.mode,
         title = excluded.title,
         last_seen_at = excluded.last_seen_at,
         strategic_score = excluded.strategic_score,
@@ -5724,7 +5740,7 @@ async function upsertOpportunity(
         priority_tier = excluded.priority_tier,
         updated_at = excluded.updated_at
     `).bind(
-      opts.id, opts.prospect_id, opts.tenant_id || "founder", mode, opts.title,
+      opts.id, opts.prospect_id, canonicalTenantId, mode, opts.title,
       nowIso, nowIso, "open", s,
       opts.fit_score ?? s, opts.intent_score ?? Math.round(s * 0.8),
       opts.pain_score ?? Math.round(s * 0.7), opts.ability_to_pay_score ?? 60,
@@ -5743,7 +5759,7 @@ async function upsertOpportunity(
       const cols = new Set((info.results || []).map((r: any) => String(r.name)));
       const row: Record<string, any> = {
         id: opts.id, prospect_id: opts.prospect_id,
-        tenant_id: opts.tenant_id || "founder", mode, title: opts.title,
+        tenant_id: canonicalTenantId, mode, title: opts.title,
         first_seen_at: nowIso, last_seen_at: nowIso, status: "open",
         strategic_score: s, fit_score: opts.fit_score ?? s,
         intent_score: opts.intent_score ?? Math.round(s * 0.8),
