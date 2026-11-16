@@ -10594,27 +10594,27 @@ export function buildAttackKit(p: any): {
   };
   const tradeLabel = tradeLabels[tradeKey] || tradeKey.replace(/_/g, " ");
 
-  // 2. TENANT MODE: Pitch tenant's services to local property managers / commercial buyers (NO Bvelt SaaS pitch)
+  // 2. TENANT MODE: analyze the buyer opportunity; actual outbound copy comes only from generateAICopy.
   if (isTenantLead) {
-    const whyTenant = `${name} en ${city} (${tradeLabel}): comprador B2B potencial para tus servicios con necesidades de mantenimiento o gestión en ${city}.`;
-    const subjectTenant = `Disponibilidad de servicio de ${tradeLabel} para ${name} en ${city}`;
-    const emailBodyTenant = `Hola equipo de ${name},\n\nNos ponemos en contacto porque gestionan propiedades en ${city} y sabemos lo crítico que es contar con especialistas en ${tradeLabel} de respuesta rápida cuando surge una avería o necesidad de mantenimiento.\n\nContamos con técnicos locales disponibles y tiempos de atención inmediata para instalaciones comerciales y residenciales.\n\n¿Tienen un momento esta semana para una llamada breve y ver si podemos colaborar?\n\nSaludos cordiales,\nEquipo de servicio local`;
-    const smsTenant = `Hola ${name}, ofrecemos servicio rápido de ${tradeLabel} en ${city} para propiedades comerciales y residenciales. ¿Tienen necesidades de mantenimiento activas?`;
-    const callTenant = `- Contexto: Presentar servicio local de ${tradeLabel} en ${city}.\n- Pregunta: "¿Tienen incidencias abiertas o retrasos con contratistas actuales en sus propiedades?"\n- Propuesta: Ofrecer respuesta local garantizada y presupuestos en el día.\n- Cierre: Pedir contacto del responsable de mantenimiento para coordinar tarifas.`;
-    const nextTenant = phone ? "Llamar directo o contactar por WhatsApp (cliente B2B local)." : p.email ? "Enviar propuesta B2B por email." : "Buscar teléfono y llamar.";
+    const whyTenant = name + " en " + city + " (" + tradeLabel + "): comprador B2B potencial según el nicho y la ubicación configurados para este Tenant.";
+    const callTenant = "- Presentar únicamente los servicios configurados por el Tenant.\n- Preguntar si tienen necesidades próximas relacionadas con " + tradeLabel + ".\n- No prometer disponibilidad, tiempos de respuesta, garantías ni precios no verificados.\n- Registrar el resultado real después del contacto.";
+    const nextTenant = p.email || phone
+      ? "Generar y revisar el mensaje IA; abrir solo un canal con destinatario disponible."
+      : p.website
+        ? "Enriquecer un destinatario; la web es contexto, no un canal directo."
+        : "Prospecto comercial sin canal directo; enriquecer contacto antes de enviar."; 
 
     return {
       prospect_id: String(p.id || ""),
       name,
       why_this_lead: whyTenant,
-      email: { subject: subjectTenant, body: emailBodyTenant },
-      sms: smsTenant,
+      email: { subject: "", body: "" },
+      sms: "",
       call_script: callTenant,
       next_action: nextTenant,
       angle: "tenant_b2b_service"
     };
   }
-
   // 3. FOUNDER MODE: Selling Bvelt to US home-service contractors
   let signals: any = {};
   try {
@@ -10660,52 +10660,30 @@ export function buildAttackKit(p: any): {
     };
   }
 
-  const firstName = name.split(/\s+/)[0] || name;
-
   const reasons: string[] = [];
-  if (selectedAngle === 'weather_surge') reasons.push(`señal climática/demanda: ${p.signal_event || 'alerta meteorológica'}`);
-  else if (selectedAngle === 'stale_quotes') reasons.push("solicitud de presupuestos/estimaciones sin seguimiento");
-  else if (selectedAngle === 'no_sms') reasons.push("sin canal SMS/respuesta por texto");
-  else reasons.push(`contratista activo de ${tradeLabel} en ${city} con llamadas entrantes no atendidas`);
+  if (selectedAngle === "weather_surge") reasons.push("señal climática/demanda: " + String(p.signal_event || "alerta meteorológica"));
+  else if (selectedAngle === "stale_quotes") reasons.push("señal de solicitud de presupuesto/estimación");
+  else if (selectedAngle === "no_sms") reasons.push("señal de limitación del canal escrito");
+  else reasons.push("señal verificada relacionada con atención de llamadas para " + tradeLabel + " en " + city);
 
-  const why = `${name} en ${city} (${tradeLabel}): ${reasons.join("; ")}.`;
+  const why = name + " en " + city + " (" + tradeLabel + "): " + reasons.join("; ") + ".";
+  const question = selectedAngle === "weather_surge" && p.signal_event
+    ? "Preguntar cómo gestionan las consultas relacionadas con " + p.signal_event + " en " + (p.signal_area || city) + "."
+    : selectedAngle === "stale_quotes"
+      ? "Preguntar cómo dan seguimiento a una solicitud de presupuesto concreta."
+      : selectedAngle === "no_sms"
+        ? "Preguntar qué canal escrito prefieren sus clientes."
+        : "Preguntar cómo retoman una consulta cuando el equipo no puede responder una llamada.";
 
-  let subject = "";
-  let emailBody = "";
-  let sms = "";
-  let call_script = "";
-
-  const question = selectedAngle === 'weather_surge' && p.signal_event
-    ? `I saw the public ${p.signal_event} notice for ${p.signal_area || city}. How are you handling incoming enquiries during that period?`
-    : selectedAngle === 'stale_quotes'
-    ? `How do you follow up on estimates that are still open after the first quote?`
-    : selectedAngle === 'no_sms'
-    ? `When a customer prefers a written reply, which channel do you use to continue the conversation?`
-    : `When a call cannot be answered while the team is working, how do you make sure the enquiry gets a reply?`;
-
-  // Product capability statement deliberately avoids SMS automation claims:
-  // SMS is not an active Bvelt delivery channel in this release.
-  const valueProp = `Bvelt helps service businesses organize customer enquiries so follow-up is easier to manage.`;
-  subject = `${name} — a question about enquiry follow-up`;
-  sms = `Hi ${firstName} — Rainer from Bvelt. ${question} ${valueProp} Would a short example be useful?`;
-  emailBody = `Hi ${name} team,\n\n${question}\n\n${valueProp}\n\nWould a short example be useful?`;
-  call_script = `- Opening Question: "${question}"\n- Key Point: ${valueProp}\n- Next Step: Offer a short example only if the problem is relevant to their business.`;
-  // Enforce max ~300 chars on SMS
-  if (sms.length > 310) {
-    sms = sms.slice(0, 307) + "...";
-  }
-
-  const next =
-    phone && !p.email ? "Llamar o contactar por WhatsApp primero (solo teléfono)." :
-    p.email ? "Enviar correo + registrar decisión Enviar." :
-    "Buscar contacto y luego preparar un mensaje manual o una llamada.";
+  const call_script = "- Una sola pregunta: " + question + "\n- Explicar únicamente la capacidad verificada de Bvelt: organizar el seguimiento de consultas de clientes.\n- No solicitar listas de presupuestos, inventarios de cotizaciones ni auditorías en el primer contacto.";
+  const next = "Generar y revisar un mensaje IA contextual antes de abrir un canal.";
 
   return {
     prospect_id: String(p.id || ""),
     name,
     why_this_lead: why,
-    email: { subject, body: emailBody },
-    sms,
+    email: { subject: "", body: "" },
+    sms: "",
     call_script,
     next_action: next,
     angle: selectedAngle
