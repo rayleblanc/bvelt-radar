@@ -757,34 +757,51 @@ tests.push({
   }
 });
 
-// Test 4: BizData Category Mapping (Invalid categories skipped safely without crashing)
+// Test 4: BizData Category Mapping and documented response normalization
 tests.push({
-  name: "BizData category mapping safely skips unsupported niches without crashing",
+  name: "BizData uses only its documented 37 categories and parses its businesses envelope",
   run: async () => {
-    const { mapTradeToBizDataCategory, fetchBizDataBusinesses } = await import('./worker');
+    const {
+      BIZDATA_OFFICIAL_CATEGORIES,
+      mapTradeToBizDataCategory,
+      normalizeBizDataBusinesses,
+      fetchBizDataBusinesses
+    } = await import('./worker');
 
-    // Niche not in BizData's ~37 categories
-    const unsupported1 = mapTradeToBizDataCategory("hvac");
-    const unsupported2 = mapTradeToBizDataCategory("landscaping");
-    const unsupported3 = mapTradeToBizDataCategory("pool_cleaning");
+    assert(BIZDATA_OFFICIAL_CATEGORIES.size === 37, "BizData allowlist must match the documented 37 categories");
 
-    assert(unsupported1 === null, "HVAC should not be mapped as official BizData category");
-    assert(unsupported2 === null, "Landscaping should not be mapped as official BizData category");
-    assert(unsupported3 === null, "Pool cleaning should not be mapped as official BizData category");
+    // Local-service trades not present in BizData's published category list must be skipped.
+    assert(mapTradeToBizDataCategory("hvac") === null, "HVAC must be skipped");
+    assert(mapTradeToBizDataCategory("plumbing") === null, "Plumbing must be skipped");
+    assert(mapTradeToBizDataCategory("electrician") === null, "Electrician must be skipped");
+    assert(mapTradeToBizDataCategory("moving") === null, "Moving must be skipped");
 
-    // Supported niches
-    const supported1 = mapTradeToBizDataCategory("plumbing");
-    const supported2 = mapTradeToBizDataCategory("electrician");
-    const supported3 = mapTradeToBizDataCategory("lawyer");
+    // Only exact supported categories or safe semantic aliases may be queried.
+    assert(mapTradeToBizDataCategory("accounting") === "accountant", "Accounting must map to accountant");
+    assert(mapTradeToBizDataCategory("lawyer") === "lawyer", "Lawyer must map to lawyer");
+    assert(mapTradeToBizDataCategory("auto_repair") === "car_repair", "Auto repair must map to car_repair");
+    assert(mapTradeToBizDataCategory("real estate agency") === "real_estate", "Real estate agency must map to real_estate");
 
-    assert(supported1 === "plumber", "Plumbing should map to plumber");
-    assert(supported2 === "electrician", "Electrician should map to electrician");
-    assert(supported3 === "attorney" || supported3 === "lawyer", "Lawyer should map to attorney or lawyer");
+    const normalized = normalizeBizDataBusinesses({
+      total: 1,
+      location_resolved: "Tampa, Florida",
+      businesses: [{
+        name: "Example Auto Repair",
+        address: "10 Main Street",
+        website: "https://example.test",
+        phone: "+1 555 0100",
+        lat: 27.95,
+        lon: -82.46
+      }]
+    }, "Tampa, FL", "auto_repair");
+    assert(normalized.length === 1, "The documented businesses envelope must be parsed");
+    assert(normalized[0].address === "10 Main Street", "Address should be retained");
+    assert(normalized[0].website === "https://example.test", "Website should be retained");
+    assert(normalized[0].lat === 27.95 && normalized[0].lon === -82.46, "Coordinates should be retained");
 
-    // Calling fetchBizDataBusinesses on an unsupported niche returns skipped status without crash
     const res = await fetchBizDataBusinesses("Tampa, FL", "hvac");
-    assert(res.status === "skipped_unsupported_category", "Unsupported category should return skipped status");
-    assert(Array.isArray(res.businesses) && res.businesses.length === 0, "Businesses should be empty array");
+    assert(res.status === "skipped_unsupported_category", "Unsupported category should return skipped status without a request");
+    assert(Array.isArray(res.businesses) && res.businesses.length === 0, "Unsupported category should return an empty business array");
   }
 });
 
