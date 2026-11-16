@@ -259,7 +259,7 @@ def _extract_contact_candidates(html: str) -> tuple[set[str], set[str], list[dic
 
     # Structured business data is extracted separately from executable scripts.
     for block in re.findall(r"(?is)<script\b[^>]*type\s*=\s*['\\"]application/ld\+json['\\"][^>]*>(.*?)</script>", html):
-        for key, raw in re.findall(r'(?is)["\\'](email|telephone|phone)["\\']\s*:\s*["\\']([^"\\']+)["\\']', block):
+        for key, raw in re.findall(r"""(?is)["'](email|telephone|phone)["']\s*:\s*["']([^"']+)["']""", block):
             value = raw.strip()
             if key.lower() == "email":
                 candidate = value.lower()
