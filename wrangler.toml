@@ -24,10 +24,10 @@ directory = "./dist"
 not_found_handling = "single-page-application"
 binding = "ASSETS"
 
-# Founder targeting is intentionally NOT hardcoded in this file.
-# Configure these existing variables in Cloudflare Dashboard > Settings > Variables:
-# FOUNDING_CITIES, FOUNDING_TRADES, FOUNDING_COUNTRIES, FOUNDING_LANGUAGES, FOUNDING_MIN_SCORE
-# keep_vars=true preserves dashboard values across deployments.
+# Founder geography is sourced from src/geoData.ts + src/geoDataAnglosphere.ts
+# and sidecar/config/market-universe.json. No FOUNDING_COUNTRIES variable is required.
+# Optional manual overrides: FOUNDING_CITIES, FOUNDING_TRADES, FOUNDING_LANGUAGES, FOUNDING_MIN_SCORE.
+# keep_vars=true preserves existing dashboard values across deployments.
 
 [[d1_databases]]
 binding = "RADAR_DB"
