@@ -6990,9 +6990,9 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
       .bind(new Date().toISOString(), prospect_id).run();
     return;
   }
-  // Phone-only Founder prospect: generate a reviewed WhatsApp draft and hand it
-  // to the founder. A wa.me link does NOT prove that the number has WhatsApp.
-  if (!String(prospect.email || "").trim()) {
+  // If there is no provider-verified email, use a phone-based manual WhatsApp
+  // fallback when possible. Never treat the unverified email as deliverable.
+  if (shouldUseManualWhatsAppFallback(prospect.email, prospect.phone, prospect.signals_json || "{}")) {
     const phoneDigits = extractPhoneDigits(prospect.phone);
     const waPhone = normalizeWhatsAppPhone(prospect.phone);
     if (!phoneDigits) {
@@ -11499,6 +11499,12 @@ export function isEmailValidatedForOutreach(signals: unknown): boolean {
     try { metadata = JSON.parse(metadata); } catch { return false; }
   }
   return !!metadata && typeof metadata === "object" && metadata.is_email_validated === true;
+}
+
+export function shouldUseManualWhatsAppFallback(email: unknown, phone: unknown, signals: unknown): boolean {
+  const hasPhone = Boolean(extractPhoneDigits(phone));
+  const hasVerifiedEmail = Boolean(String(email || "").trim()) && isEmailValidatedForOutreach(signals);
+  return hasPhone && !hasVerifiedEmail;
 }
 
 export async function verifyEmail(email: string, env: Env): Promise<EmailVerificationResult> {
