@@ -4331,6 +4331,7 @@ export function buildProspectEvidenceContext(prospect: any): string {
       decision_state: prospect?.decision_state || null
     },
     declared_angle: prospect?.bvelt_angle || prospect?.angle || null,
+    observed_external_signal: { event: prospect?.signal_event || null, area: prospect?.signal_area || null },
     score_breakdown: parse(prospect?.score_breakdown || {}),
     why_now: parse(prospect?.why_now_json || {}),
     signals,
@@ -10323,26 +10324,6 @@ async function generateAICopy(
     allowed_markets: tenantInfo.allowed_markets_json
   }).slice(0, 3500) : "Founder mode: Bvelt customer enquiry follow-up platform.";
 
-  // Weather signal custom template branch
-  if (prospect.signal_event && prospect.signal_area && !tenantInfo) {
-    const subject = channel === "whatsapp" ? "" : isSpanish
-      ? `${prospect.signal_event} para ${prospect.signal_area} - consulta para ${prospect.name}`
-      : `${prospect.signal_event} for ${prospect.signal_area} - quick question for ${prospect.name}`;
-
-    const bodyBase = channel === "whatsapp"
-      ? isSpanish
-        ? `Hola equipo de ${prospect.name}. Vi el aviso de ${prospect.signal_event} en ${prospect.signal_area}. ¿Cómo están respondiendo a clientes que no logran comunicarse durante la interrupción? Si les sirve, puedo compartir un ejemplo breve de seguimiento.`
-        : `Hi ${prospect.name} team. I saw the ${prospect.signal_event} notice for ${prospect.signal_area}. How are you helping customers who cannot get through during the disruption? I can share a short follow-up example if useful.`
-      : isSpanish
-        ? `Hola equipo de ${prospect.name}, vi el aviso de ${prospect.signal_event} para ${prospect.signal_area}. Soy Rainer, fundador de Bvelt. Ayudo a negocios de servicios a dar seguimiento a consultas de clientes que necesitan seguimiento. ¿Tienen un proceso para contactar a quienes no logran comunicarse durante una interrupción? Si le sirve, puedo enviarle un ejemplo breve.`
-        : `Hi ${prospect.name} team, I saw the ${prospect.signal_event} notice for ${prospect.signal_area}. I'm Rainer, founder of Bvelt. I work on follow-up for service businesses when customer enquiries need follow-up. Do you have a process for reaching people who could not get through during an interruption? I can send a short example if useful.`;
-
-    const footer = buildLegalFooter(env);
-    const fullBody = footer ? `${bodyBase}\n\n${footer}` : bodyBase;
-
-    return { subject, body: fullBody, source: "template" };
-  }
-
   let rawAngle = (prospect.bvelt_angle || prospect.bveltAngle || "missed_calls").toLowerCase().trim();
   if (rawAngle === "contact_gap") rawAngle = "sms_gap";
   else if (rawAngle === "lead_capture_gap") rawAngle = "lead_reactivation";
@@ -10359,9 +10340,13 @@ async function generateAICopy(
     }
   } else {
     // Founder mode: evidence-first copy. No prospect-specific facts are supplied unless independently verified.
-    angleFocus = isSpanish
-      ? "No hay hallazgos específicos verificados sobre este negocio. No afirmes que su web es lenta, que pierde llamadas, que pierde ingresos. Pregunta de forma natural cómo hacen seguimiento cuando no pueden atender una llamada o queda un presupuesto pendiente."
-      : "No verified prospect-specific findings are available. Do not claim their website is slow, that they miss calls, or lose revenue. Ask naturally how they follow up when they cannot answer a call or an estimate is left pending.";
+    angleFocus = prospect.signal_event && prospect.signal_area
+      ? (isSpanish
+        ? "Usa únicamente esta señal pública observada: " + prospect.signal_event + " en " + prospect.signal_area + ". No infieras pérdidas, llamadas perdidas ni problemas internos. Formula una pregunta breve sobre cómo gestionan las consultas relacionadas con este evento."
+        : "Use only this observed public signal: " + prospect.signal_event + " in " + prospect.signal_area + ". Do not infer lost revenue, missed calls, or internal problems. Ask one brief question about how they handle enquiries related to this event.")
+      : (isSpanish
+        ? "No hay hallazgos específicos verificados sobre este negocio. No afirmes que su web es lenta, que pierde llamadas ni que pierde ingresos. Pregunta de forma natural cómo hacen seguimiento de las consultas de clientes."
+        : "No verified prospect-specific findings are available. Do not claim their website is slow, that they miss calls, or lose revenue. Ask naturally how they follow up with customer enquiries.");
   }
 
   const prompt = isSpanish ? `
