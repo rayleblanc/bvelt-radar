@@ -2413,10 +2413,10 @@ const submitDecision = async (prospectId: string, action: string) => {
                                     )}
                                   </div>
                                 ) : (
-                                  <p className="text-[10px] text-slate-500">Pulsa Generar kit → guion de llamada + SMS + por qué este lead.</p>
+                                  <p className="text-[10px] text-slate-500">Genera un mensaje contextual con IA y revisa las señales antes de abrir un canal. La generación no registra un contacto.</p>
                                 )}
                               </div>
-                              {(() => {
+                              {currentMode === 'founder' && (() => {
                                 const activeKit = attackKits[p.id] || (p.attack_kit ? (typeof p.attack_kit === 'string' ? JSON.parse(p.attack_kit) : p.attack_kit) : null);
                                 const isDoNotContact =
                                   !activeKit?.sms ||
