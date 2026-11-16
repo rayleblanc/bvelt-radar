@@ -150,7 +150,7 @@ After a prospect is enriched and scored, Radar now maintains:
 
 ### Targeting safety
 
-Founder targets can be persisted in D1 through `/api/config`; these targets take precedence over legacy `FOUNDING_CITIES` / `FOUNDING_TRADES`. With no explicit city list, Founder rotates through the available gazetteer; with no custom niche list, it seeds broad Bvelt-compatible segments from `market-universe.json`. No fixed city or country is hardcoded, and custom industries are not rejected by a closed allowlist.
+Founder targets can be persisted in D1 through `/api/config`; these targets take precedence over legacy `FOUNDING_CITIES` / `FOUNDING_TRADES`. With no explicit city list, Founder rotates through the bundled gazetteer (`geoData.ts` + `geoDataAnglosphere.ts`) without requiring `FOUNDING_COUNTRIES`; the first four markets (US, CA, GB, AU) receive balanced discovery opportunities, then other available gazetteer countries remain eligible. With no custom niche list, it seeds broad Bvelt-compatible segments from `market-universe.json`. No fixed city list is hardcoded, and custom industries are not rejected by a closed allowlist.
 
 ### Database migrations
 
