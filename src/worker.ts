@@ -5903,7 +5903,7 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
 
     // Founder: do not spend discovery units on map-only POIs with no actionable contact path.
     // A real website is enough because enrichment can extract an email or phone.
-    if (job.mode !== "tenant" && !hasActionableContactData(candidate.email, candidate.phone, candidate.website)) {
+    if (job.mode !== "tenant" && !hasEnrichableContactData(candidate.email, candidate.phone, candidate.website)) {
       contactlessFilteredCount++;
       filteredCount++;
       continue;
@@ -9549,7 +9549,7 @@ export async function fetchLocalBusinessesWithDiagnostics(
         isNonBusinessEntity(name, item.website, mode) ||
         (mode === "tenant" && !tenantBuyerNameFits(name, candidateTrade))
       ) continue;
-      if (mode !== "tenant" && !hasActionableContactData(item.email, item.phone, item.website)) continue;
+      if (mode !== "tenant" && !hasEnrichableContactData(item.email, item.phone, item.website)) continue;
       const key = name.toLowerCase().replace(/[^a-z0-9]/g, "");
       if (!key || seen.has(key)) continue;
       seen.add(key);
@@ -10598,10 +10598,6 @@ export function extractPhoneDigits(value: string | null | undefined): string | n
 
 export function hasUsableContactChannel(email: string | null | undefined, phone: string | null | undefined): boolean {
   return !!String(email || "").trim() || !!extractPhoneDigits(phone);
-}
-
-export function hasActionableContactData(email: string | null | undefined, phone: string | null | undefined, website: string | null | undefined): boolean {
-  return sanitizeEmail(String(email || "")).valid || !!extractPhoneDigits(phone) || isRealWebsite(String(website || ""));
 }
 
 export function hasEnrichableContactData(
