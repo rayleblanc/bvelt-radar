@@ -11,6 +11,8 @@
  * - D1 Feedback loop & Outcome learning engine
  */
 
+import { buildRadarEvidenceProvenance } from './evidenceProvenance.js';
+import { validateTenantProfileContract } from './tenantProfileContract.js';
 import { getAlerts, tradeForEvent, eventAppliesToTrade, WeatherAlert } from './weatherSignals';
 import { dispatchEmail, normalizeOutreachBody, BVELT_SITE, EmailDispatchResult, inspectOutboundEmailAuth } from './emailDispatcher';
 import { auditDomainSecurityAndMx, auditWebsitePerformance, auditCityWeatherEmergency } from './openAudits';
@@ -2109,7 +2111,28 @@ export default {
           return Response.json({ error: "Forbidden: cannot modify configuration for another tenant" }, { status: 403, headers: corsHeaders });
         }
 
-        const industry = String(body.industry || body.trade || "").trim();
+        const contractValidation = validateTenantProfileContract(body, tenantId);
+        if (!contractValidation.ok) {
+          return Response.json({ error: contractValidation.error }, { status: contractValidation.status, headers: corsHeaders });
+        }
+        const {
+          contractVersion, realm, profileId, businessId, profileSnapshotVersion, profileSnapshotAt,
+          profileSource, locationSource, verificationState, correlationId, idempotencyKey,
+          timezone, language, source, territoryJson
+        } = contractValidation.value;
+
+        const previousConfig: any = await env.RADAR_DB.prepare(
+          'SELECT profile_snapshot_version, profile_snapshot_at, idempotency_key FROM tenant_config WHERE tenant_id = ?'
+        ).bind(tenantId).first();
+        if (previousConfig?.idempotency_key === idempotencyKey && previousConfig?.profile_snapshot_version === profileSnapshotVersion) {
+          return Response.json({ success: true, duplicate: true, tenant_id: tenantId, contract_version: 1, profile_snapshot_version: profileSnapshotVersion, correlation_id: correlationId }, { headers: corsHeaders });
+        }
+        const previousSnapshotAt = previousConfig?.profile_snapshot_at ? Date.parse(previousConfig.profile_snapshot_at) : NaN;
+        if (Number.isFinite(previousSnapshotAt) && Date.parse(profileSnapshotAt) < previousSnapshotAt) {
+          return Response.json({ error: 'stale_profile_snapshot', tenant_id: tenantId }, { status: 409, headers: corsHeaders });
+        }
+
+        const industry = String(body.industry || body.trade || '').trim();
         const niche = String(body.niche || body.trade || "").trim();
         const cities = (Array.isArray(body.cities) ? body.cities : body.city ? [body.city] : [])
           .map((value: any) => String(value || "").trim())
@@ -2130,11 +2153,28 @@ export default {
 
         await env.RADAR_DB.prepare(`
           INSERT INTO tenant_config (
-            tenant_id, tenant_name, industry, niche, subniches_json, services_json, service_areas_json,
+            tenant_id, contract_version, realm, profile_id, business_id, profile_snapshot_version, profile_snapshot_at,
+            profile_source, location_source, verification_state, territory_json, timezone, language, correlation_id,
+            idempotency_key, source, tenant_name, industry, niche, subniches_json, services_json, service_areas_json,
             countries_json, regions_json, cities_json, languages_json, icp_description, icp_keywords_json,
             minimum_score, daily_outreach_limit, allowed_markets_json, campaign_goal, messaging_angle, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(tenant_id) DO UPDATE SET
+            contract_version = excluded.contract_version,
+            realm = excluded.realm,
+            profile_id = excluded.profile_id,
+            business_id = excluded.business_id,
+            profile_snapshot_version = excluded.profile_snapshot_version,
+            profile_snapshot_at = excluded.profile_snapshot_at,
+            profile_source = excluded.profile_source,
+            location_source = excluded.location_source,
+            verification_state = excluded.verification_state,
+            territory_json = excluded.territory_json,
+            timezone = excluded.timezone,
+            language = excluded.language,
+            correlation_id = excluded.correlation_id,
+            idempotency_key = excluded.idempotency_key,
+            source = excluded.source,
             tenant_name = excluded.tenant_name,
             industry = excluded.industry,
             niche = excluded.niche,
@@ -2155,6 +2195,21 @@ export default {
             updated_at = excluded.updated_at
         `).bind(
           tenantId,
+          contractVersion,
+          realm,
+          profileId,
+          businessId || profileId,
+          profileSnapshotVersion,
+          profileSnapshotAt,
+          profileSource,
+          locationSource,
+          verificationState,
+          territoryJson,
+          timezone,
+          language,
+          correlationId,
+          idempotencyKey,
+          source,
           body.tenant_name || body.business_name || "",
           industry,
           niche,
@@ -2178,7 +2233,7 @@ export default {
 
         // Saving a profile must never launch discovery. Tenant discovery is
         // explicitly requested by the user or triggered by a recent app session.
-        return Response.json({ success: true, tenant_id: tenantId, run_id: null, message: "Tenant config saved. Prospecting has not started." }, { headers: corsHeaders });
+        return Response.json({ success: true, tenant_id: tenantId, realm: 'TENANT', contract_version: contractVersion, profile_id: profileId, profile_snapshot_version: profileSnapshotVersion, correlation_id: correlationId, idempotency_key: idempotencyKey, run_id: null, message: "Tenant profile contract synchronized. Prospecting has not started." }, { headers: corsHeaders });
       }
 
       // 16a2. Explicit and activity-triggered Tenant prospecting.
@@ -2956,6 +3011,10 @@ export default {
         let rejectedCount = 0;
 
         const now = new Date().toISOString();
+        const tenantSnapshot: any = mode === 'tenant'
+          ? await env.RADAR_DB.prepare('SELECT profile_snapshot_version FROM tenant_config WHERE tenant_id = ?').bind(tenantId).first()
+          : null;
+        const profileSnapshotVersion = tenantSnapshot?.profile_snapshot_version || null;
 
         // Check if runner reported failure
         if (body.status === "failed" || body.run_status === "failed") {
@@ -2976,18 +3035,18 @@ export default {
 
         for (const item of records) {
           const prospectId = item.prospect_id;
-          const sourceId = item.source_id || "scrapling_business_website";
-          const sourceUrl = item.source_url || item.url || "";
-          const evidenceType = item.evidence_type || "business_website_profile";
-          const contentHash = item.content_hash || "";
-          const extractorVersion = item.extractor_version || body.extractor_version || "bvelt-scrapling-1.0.0";
+          const sourceId = String(item.source_id || "scrapling_business_website").trim().slice(0, 120);
+          const sourceUrl = String(item.source_url || item.url || "").trim().slice(0, 2000);
+          const evidenceType = String(item.evidence_type || "business_website_profile").trim().slice(0, 120);
+          const contentHash = String(item.content_hash || "").trim();
+          const extractorVersion = String(item.extractor_version || body.extractor_version || "bvelt-scrapling-1.0.0").trim().slice(0, 120);
           const confidence = typeof item.confidence === "number" && Number.isFinite(item.confidence)
             ? Math.min(1, Math.max(0, item.confidence))
             : 0.65;
-          const observedAt = item.observed_at || now;
+          const observedAt = String(item.observed_at || now).slice(0, 40);
           const evidenceData = item.evidence || {};
 
-          if (!prospectId || !sourceUrl || !/^[a-f0-9]{64}$/i.test(String(contentHash))) {
+          if (!prospectId || !sourceUrl || !/^[a-f0-9]{64}$/i.test(contentHash) || !Number.isFinite(Date.parse(observedAt))) {
             rejectedCount++;
             continue;
           }
@@ -3037,40 +3096,72 @@ export default {
             continue;
           }
 
-          // 3. Idempotent check: UNIQUE (prospect_id, source_id, evidence_type, content_hash)
+          // 3. Idempotent check: unique within mode + realm + tenant + prospect + source + evidence type + content hash
           const existingEvidence = (await env.RADAR_DB.prepare(`
-            SELECT id FROM source_evidence 
-            WHERE prospect_id = ? AND source_id = ? AND evidence_type = ? AND content_hash = ?
-          `).bind(prospectId, sourceId, evidenceType, contentHash).first()) as any;
+            SELECT id FROM source_evidence
+            WHERE mode = ? AND realm = ? AND tenant_id = ? AND prospect_id = ?
+              AND source_id = ? AND evidence_type = ? AND content_hash = ?
+          `).bind(mode, mode === 'tenant' ? 'TENANT' : 'FOUNDER', tenantId, prospectId, sourceId, evidenceType, contentHash).first()) as any;
 
           const evidenceId = existingEvidence ? existingEvidence.id : (item.id || `ev_${crypto.randomUUID().replace(/-/g, '').substring(0, 16)}`);
           const evidenceJson = typeof evidenceData === "string" ? evidenceData : JSON.stringify(evidenceData);
+          if (evidenceJson.length > 50000) {
+            rejectedCount++;
+            continue;
+          }
 
           if (existingEvidence) {
             duplicatedCount++;
           } else {
             // 4. Insert into source_evidence
             try {
-              await env.RADAR_DB.prepare(`
-                INSERT INTO source_evidence (
-                  id, run_id, mode, tenant_id, prospect_id, source_id, source_url,
-                  evidence_type, evidence_json, content_hash, extractor_version,
-                  confidence, observed_at, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-              `).bind(
-                evidenceId,
-                runId,
+              const provenance = buildRadarEvidenceProvenance({
                 mode,
                 tenantId,
                 prospectId,
                 sourceId,
                 sourceUrl,
+                observedAt,
+                fetchedAt: now,
+                profileSnapshotVersion,
+                confidence,
+                item,
+              });
+              await env.RADAR_DB.prepare(`
+                INSERT INTO source_evidence (
+                  id, run_id, mode, realm, tenant_id, prospect_id, subject_id, source_id, source_label, source_url,
+                  evidence_type, evidence_status, method, evidence_json, content_hash, extractor_version,
+                  confidence, unit, period_json, sample_size, observed_at, fetched_at, valid_until,
+                  limitations_json, usage_policy_json, profile_snapshot_version, schema_version, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              `).bind(
+                evidenceId,
+                runId,
+                mode,
+                provenance.realm,
+                tenantId,
+                prospectId,
+                provenance.subject_id,
+                sourceId,
+                provenance.source_label,
+                sourceUrl,
                 evidenceType,
+                provenance.evidence_status,
+                provenance.method,
                 evidenceJson,
                 contentHash,
                 extractorVersion,
-                confidence,
-                observedAt,
+                provenance.confidence,
+                provenance.unit,
+                provenance.period_json,
+                provenance.sample_size,
+                provenance.observed_at,
+                provenance.fetched_at,
+                provenance.valid_until,
+                provenance.limitations_json,
+                provenance.usage_policy_json,
+                provenance.profile_snapshot_version,
+                provenance.schema_version,
                 now
               ).run();
               insertedCount++;
@@ -3456,18 +3547,32 @@ export async function ensureResearchSchema(db: D1Database): Promise<void> {
           id TEXT PRIMARY KEY,
           run_id TEXT NOT NULL,
           mode TEXT NOT NULL CHECK (mode IN ('founder', 'tenant')),
+          realm TEXT NOT NULL CHECK (realm IN ('FOUNDER', 'TENANT')),
           tenant_id TEXT NOT NULL,
           prospect_id TEXT NOT NULL,
+          subject_id TEXT NOT NULL,
           source_id TEXT NOT NULL,
+          source_label TEXT NOT NULL,
           source_url TEXT NOT NULL,
           evidence_type TEXT NOT NULL,
+          evidence_status TEXT NOT NULL CHECK (evidence_status IN ('VERIFIED', 'DECLARED', 'ESTIMATED', 'MODELED', 'BENCHMARK', 'DEMO', 'UNKNOWN')),
+          method TEXT NOT NULL,
           evidence_json TEXT NOT NULL,
           content_hash TEXT NOT NULL,
           extractor_version TEXT NOT NULL,
-          confidence REAL NOT NULL DEFAULT 0.5,
+          confidence REAL,
+          unit TEXT,
+          period_json TEXT,
+          sample_size INTEGER,
           observed_at TEXT NOT NULL,
+          fetched_at TEXT NOT NULL,
+          valid_until TEXT,
+          limitations_json TEXT NOT NULL DEFAULT '[]',
+          usage_policy_json TEXT,
+          profile_snapshot_version TEXT,
+          schema_version INTEGER NOT NULL DEFAULT 1,
           created_at TEXT NOT NULL,
-          UNIQUE (prospect_id, source_id, evidence_type, content_hash)
+          UNIQUE (mode, realm, tenant_id, prospect_id, source_id, evidence_type, content_hash)
         );
       `),
       db.prepare(`
