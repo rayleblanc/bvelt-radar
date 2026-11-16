@@ -4569,6 +4569,11 @@ async function handleDecision(
         return Response.json({ success: false, blocked: true, reason: "outreach_reservation_conflict", id }, { status: 409, headers });
       }
 
+      try {
+        await db.prepare("INSERT INTO prospect_events (id, prospect_id, event_type, content, created_at) VALUES (?, ?, ?, ?, ?)")
+          .bind("msg_" + crypto.randomUUID(), id, "message_send_authorized", JSON.stringify({ channel: "email", authorization: "founder_manual_action" }), timestamp).run();
+      } catch (eventError: any) { console.warn("[ManualEmail] send authorization log failed:", eventError?.message || eventError); }
+
       dispatchOutcome = await dispatchEmail({
         to: prospect.email,
         recipientName: prospect.name,
