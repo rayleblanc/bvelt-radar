@@ -445,15 +445,16 @@ export default function App() {
       });
     }
 
-    const items = opportunities.length > 0
+    const items = (opportunities.length > 0
       ? opportunities.map(o => ({
-          createdAt: o.created_at || new Date().toISOString(),
-          ev: Number(o.expected_value || o.strategic_score * 25 || 0)
+          createdAt: String(o.created_at || ""),
+          ev: Number(o.expected_value ?? 0)
         }))
       : prospects.map(p => ({
-          createdAt: p.created_at || new Date().toISOString(),
-          ev: Number(p.expected_value || p.score * 25 || 0)
-        }));
+          createdAt: String(p.created_at || ""),
+          ev: Number(p.expected_value ?? 0)
+        })))
+      .filter(item => Number.isFinite(Date.parse(item.createdAt)) && Number.isFinite(item.ev) && item.ev >= 0);
 
     let runningCumulative = 0;
     const oldestSixMonthKey = months[0]?.yearMonth || '';
@@ -475,19 +476,10 @@ export default function App() {
       m.cumulativeEv = runningCumulative;
     });
 
-    if (runningCumulative === 0) {
-      const totalCurrentEv = items.reduce((sum, i) => sum + i.ev, 0) || 18500;
-      let base = Math.round(totalCurrentEv * 0.35);
-      const step = Math.round((totalCurrentEv - base) / 5);
-      months.forEach((m, idx) => {
-        const val = base + (step * idx);
-        m.cumulativeEv = val;
-        m.ev = idx === 0 ? base : step;
-      });
-    }
-
     return months;
   }, [opportunities, prospects]);
+
+  const hasObservedEvData = evTrendData.some(month => month.ev > 0);
 
   // Load all telemetry endpoints with HttpOnly session cookie credentials
   const fetchTelemetry = async () => {
@@ -1803,11 +1795,11 @@ const submitDecision = async (prospectId: string, action: string) => {
                       <span className="text-xs font-bold text-slate-300 uppercase">Tendencia Expected Value (EV) Acumulado</span>
                     </div>
                     <span className="text-[10px] text-emerald-400 font-semibold font-sans">
-                      Últimos 6 meses · Total: ${evTrendData[evTrendData.length - 1]?.cumulativeEv?.toLocaleString() || 0}
+                      Últimos 6 meses · Total: ${hasObservedEvData ? evTrendData[evTrendData.length - 1]?.cumulativeEv?.toLocaleString() : 'N/D'}
                     </span>
                   </div>
                   <div className="w-full h-48 pt-2">
-                    <ResponsiveContainer width="100%" height="100%">
+                    {hasObservedEvData ? <ResponsiveContainer width="100%" height="100%">
                       <AreaChart data={evTrendData} margin={{ top: 10, right: 10, left: -10, bottom: 0 }}>
                         <defs>
                           <linearGradient id="evGradient" x1="0" y1="0" x2="0" y2="1">
@@ -1840,7 +1832,11 @@ const submitDecision = async (prospectId: string, action: string) => {
                           activeDot={{ r: 6, fill: '#34d399' }}
                         />
                       </AreaChart>
-                    </ResponsiveContainer>
+                    </ResponsiveContainer> : (
+                      <div className="h-full flex items-center justify-center text-xs text-slate-500 font-sans">
+                        Sin evidencia de valor comercial observado para este período.
+                      </div>
+                    )}
                   </div>
                 </div>
 
