@@ -540,16 +540,16 @@ tests.push({
 });
 
 tests.push({
-  name: "Founder follow-ups enforce contact spacing, reply stop, and three-touch cap",
+  name: "Founder outreach allows only one respectful follow-up after the first touch",
   run: async () => {
     const now = Date.parse("2026-11-14T12:00:00.000Z");
     const fiveDaysAgo = "2026-11-09T12:00:00.000Z";
     const fourDaysAgo = "2026-11-10T12:00:00.000Z";
     assert(shouldSendFounderFollowUp("sent", fiveDaysAgo, null, 1, now), "Sent prospects may follow up after five days");
-    assert(shouldSendFounderFollowUp("delivered", fiveDaysAgo, null, 2, now), "Delivered prospects remain eligible for controlled follow-up");
+    assert(!shouldSendFounderFollowUp("delivered", fiveDaysAgo, null, 2, now), "A second follow-up after silence must be blocked");
     assert(!shouldSendFounderFollowUp("delivered", fourDaysAgo, null, 1, now), "Follow-up must wait at least five days");
     assert(!shouldSendFounderFollowUp("opened", fiveDaysAgo, "Thanks, received.", 1, now), "A reply stops follow-ups");
-    assert(!shouldSendFounderFollowUp("sent", fiveDaysAgo, null, 3, now), "No more than three total touches are allowed");
+    assert(!shouldSendFounderFollowUp("sent", fiveDaysAgo, null, 3, now), "No follow-up is allowed after two total touches");
     assert(!shouldSendFounderFollowUp("bounced", fiveDaysAgo, null, 1, now), "Bounced prospects are never followed up");
     assert(resolveOutreachTouchCount(1, 5) === 5, "Historical provider messages must override missing legacy touch metadata");
     assert(buildOutreachIdempotencyKey("founder", "p1", "resend_live", 1) !== buildOutreachIdempotencyKey("founder", "p1", "resend_live", 2), "Each touch needs its own D1 idempotency key");
@@ -557,7 +557,7 @@ tests.push({
     assert(evaluateFounderOutreachEligibility("qualified", null, 0, null, null, null, now).allowed, "A new prospect can receive its first touch");
     assert(!evaluateFounderOutreachEligibility("delivered", null, 2, "2026-11-14T11:00:00.000Z", "2026-11-14T11:00:00.000Z", null, now).allowed, "A recent prior message blocks a duplicate");
     assert(evaluateFounderOutreachEligibility("delivered", null, 1, fiveDaysAgo, fiveDaysAgo, null, now).nextTouch === 2, "A follow-up after five days is touch two");
-    assert(!evaluateFounderOutreachEligibility("delivered", null, 3, fiveDaysAgo, fiveDaysAgo, null, now).allowed, "Three historical touches block any more email");
+    assert(!evaluateFounderOutreachEligibility("delivered", null, 2, fiveDaysAgo, fiveDaysAgo, null, now).allowed, "Two historical touches block any more email");
     assert(!evaluateFounderOutreachEligibility("delivered", "Thanks, received.", 1, fiveDaysAgo, fiveDaysAgo, null, now).allowed, "Actual reply content stops future outreach");
     assert(!evaluateFounderOutreachEligibility("bounced", null, 1, fiveDaysAgo, fiveDaysAgo, null, now).allowed, "Bounced prospects are terminal");
     assert(!evaluateFounderOutreachEligibility("delivered", null, 1, fiveDaysAgo, fiveDaysAgo, "2026-11-20T12:00:00.000Z", now).allowed, "Existing cooldowns are respected");
