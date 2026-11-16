@@ -9515,7 +9515,7 @@ export async function fetchLocalBusinessesWithDiagnostics(
         isNonBusinessEntity(name, item.website, mode) ||
         (mode === "tenant" && !tenantBuyerNameFits(name, candidateTrade))
       ) continue;
-      if (mode !== "tenant" && !hasEnrichableContactData(item.email, item.phone, item.website)) continue;
+      if (mode !== "tenant" && !(sanitizeEmail(String(item.email || "")).valid || !!extractPhoneDigits(item.phone) || isRealWebsite(String(item.website || "")))) continue;
       const key = name.toLowerCase().replace(/[^a-z0-9]/g, "");
       if (!key || seen.has(key)) continue;
       seen.add(key);
