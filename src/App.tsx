@@ -2128,6 +2128,8 @@ const submitDecision = async (prospectId: string, action: string) => {
                       const signalsList = parseSignals(p);
                       const isExpanded = inspectedProspect?.id === p.id;
                       const websiteHref = getWebsiteUrl(p.website);
+                      const messageBody = attackKits[p.id]?.generated_message?.body || p.draft_body || "";
+                      const messageSubject = attackKits[p.id]?.generated_message?.subject || p.draft_subject || "";
 
                       return (
                         <div 
@@ -2210,7 +2212,7 @@ const submitDecision = async (prospectId: string, action: string) => {
                           <div className="flex flex-wrap items-center gap-2 pt-1 font-mono text-[11px]">
                             {isValidEmailRecipient(p.email) && (
                               <a 
-                                href={`mailto:${p.email}?subject=${encodeURIComponent(p.draft_subject || '')}&body=${encodeURIComponent(p.draft_body || '')}`}
+                                href={`mailto:${p.email}?subject=${encodeURIComponent(messageSubject)}&body=${encodeURIComponent(messageBody)}`}
                                 target="_blank" 
                                 rel="noreferrer" 
                                 className="px-2.5 py-1 rounded-lg bg-blue-950/50 border border-blue-800/40 text-blue-300 hover:bg-blue-900/60 flex items-center gap-1 font-bold"
@@ -2224,9 +2226,9 @@ const submitDecision = async (prospectId: string, action: string) => {
                                 Correo
                               </a>
                             )}
-                            {p.phone && hasDirectWhatsAppRecipient(p.phone) && toWhatsAppUrl(p.phone, p.draft_body || '') && (
+                            {p.phone && hasDirectWhatsAppRecipient(p.phone) && toWhatsAppUrl(p.phone, messageBody) && (
                               <a 
-                                href={toWhatsAppUrl(p.phone, p.draft_body || '')!}
+                                href={toWhatsAppUrl(p.phone, messageBody)!}
                                 target="_blank" 
                                 rel="noreferrer" 
                                 className="px-2.5 py-1 rounded-lg bg-emerald-950/50 border border-emerald-800/40 text-emerald-300 hover:bg-emerald-900/60 flex items-center gap-1 font-bold"
@@ -2240,9 +2242,9 @@ const submitDecision = async (prospectId: string, action: string) => {
                                 WhatsApp <span className="text-[8px] opacity-70">· no verificado</span>
                               </a>
                             )}
-                            {p.phone && toSmsUrl(p.phone, p.draft_body || '') && (
+                            {p.phone && toSmsUrl(p.phone, messageBody) && (
                               <a
-                                href={toSmsUrl(p.phone, p.draft_body || '')!}
+                                href={toSmsUrl(p.phone, messageBody)!}
                                 className="px-2.5 py-1 rounded-lg bg-sky-950/50 border border-sky-800/40 text-sky-300 hover:bg-sky-900/60 flex items-center gap-1 font-bold"
                                 onClick={(e) => {
                                   e.stopPropagation();
@@ -2348,7 +2350,7 @@ const submitDecision = async (prospectId: string, action: string) => {
                                     className="text-[10px] text-indigo-400 font-bold"
                                     onClick={async () => {
                                       try {
-                                         const channel = isValidEmailRecipient(p.email) ? 'email' : 'whatsapp';
+                                         const channel = isValidEmailRecipient(p.email) || !hasDirectWhatsAppRecipient(p.phone) ? 'email' : 'whatsapp';
                                          const r = await fetch(`${apiUrl}/api/prospects/attack-kit`, {
                                            method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': selectedTenantId || 'founder' },
                                            body: JSON.stringify({ prospect_id: p.id, channel })
@@ -2387,10 +2389,9 @@ const submitDecision = async (prospectId: string, action: string) => {
                                     ) : (
                                       <>
                                         <p className="text-amber-200">{attackKits[p.id].why_this_lead}</p>
-                                        <p><span className="text-slate-500">SMS:</span> {attackKits[p.id].sms}</p>
-                                        <p className="whitespace-pre-wrap"><span className="text-slate-500">Llamada:</span>{'\n'}{attackKits[p.id].call_script}</p>
+                                                                                <p className="whitespace-pre-wrap"><span className="text-slate-500">Llamada:</span>{'\n'}{attackKits[p.id].call_script}</p>
                                         <p><span className="text-slate-500">Siguiente:</span> {attackKits[p.id].next_action}</p>
-                                        {p.phone && hasDirectWhatsAppRecipient(p.phone) && toWhatsAppUrl(p.phone, attackKits[p.id].sms || '') && (
+                                        {p.phone && hasDirectWhatsAppRecipient(p.phone) && toWhatsAppUrl(p.phone, attackKits[p.id].generated_message?.body || '') && (
                                           <a
                                             href={toWhatsAppUrl(p.phone, attackKits[p.id].sms || '')!}
                                             target="_blank"
