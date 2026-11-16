@@ -5951,8 +5951,7 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
     if (!signalEvent) {
       try {
         const cityLabel = String(job.payload?.city || candidate.city || env.FOUNDING_CITIES || "");
-        const configuredCountries = String(env.FOUNDING_COUNTRIES || "").split(";").map(value => value.trim().toUpperCase());
-        const isUsMarket = String(candidate.country || job.payload?.country || "").toUpperCase() === "US" || configuredCountries.includes("US");
+        const isUsMarket = String(candidate.country || job.payload?.country || "").toUpperCase() === "US";
         const extractedStates = isUsMarket ? extractUsStateCodes(cityLabel.split(";")) : [];
         if (extractedStates.length > 0) {
           const alerts = await getAlerts(extractedStates);
