@@ -5606,6 +5606,11 @@ export async function reconcileResendDeliveries(env: Env): Promise<{ checked: nu
 
       if (ev === "bounced" || ev === "complained") {
         const email = String(p.email || "").trim().toLowerCase();
+        const logStatus = ev === "complained" ? "complained" : "bounced";
+        await env.RADAR_DB.prepare("UPDATE email_dispatch_logs SET status = ? WHERE message_id = ?")
+          .bind(logStatus, p.dispatch_message_id).run();
+        await recordNegativeSignal(env.RADAR_DB, ev === "complained" ? "complaint" : "bounce",
+          `Resend reconciliation: ${ev} for ${p.id}`);
         await env.RADAR_DB.prepare(
           "UPDATE prospects SET status = ?, outcome = ?, dispatch_status = ?, updated_at = ? WHERE id = ?"
         ).bind(ev === "complained" ? "suppressed" : "bounced", ev, ev, now, p.id).run();
@@ -5615,6 +5620,8 @@ export async function reconcileResendDeliveries(env: Env): Promise<{ checked: nu
         }
         if (ev === "bounced") out.bounced++; else out.complained++;
       } else if (["delivered", "opened", "clicked"].includes(ev)) {
+        await env.RADAR_DB.prepare("UPDATE email_dispatch_logs SET status = ? WHERE message_id = ?")
+          .bind(ev, p.dispatch_message_id).run();
         await env.RADAR_DB.prepare("UPDATE prospects SET dispatch_status = ?, updated_at = ? WHERE id = ?")
           .bind(ev, now, p.id).run();
       }
@@ -5788,7 +5795,8 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
     return 0;
   });
 
-  const perJobCap = 3;
+  // Raise the per-city ceiling modestly; the shared daily discovery budget remains authoritative.
+  const perJobCap = 5;
   // BUG CORREGIDO: antes se cortaba la lista a los 3 primeros ANTES de filtrar duplicados. Cuando esos 3 ya eran
   // prospectos (lo normal desde la segunda corrida de una ciudad+oficio), el job daba 0 leads y los demás
   // candidatos nunca se miraban. Ahora se revisan hasta maxScan candidatos y se corta al llegar a perJobCap aceptados.
@@ -7180,8 +7188,10 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
   const isElite = (scoreVal >= 80 && confVal >= 75) || (scoreVal >= 80 && !prospect.confidence_score);
   const isStrongAuto = scoreVal >= autoMinScore && Boolean(prospect.email);
   const autoFlag = String(env.FOUNDER_AUTO_OUTREACH !== undefined && env.FOUNDER_AUTO_OUTREACH !== "" ? env.FOUNDER_AUTO_OUTREACH : "true").toLowerCase();
+  const outreachPaused = ["true", "1", "yes"].includes(String(env.RADAR_OUTREACH_PAUSE || "").trim().toLowerCase());
   const isAutoOutreachEnabled =
     job.mode === "founder" &&
+    !outreachPaused &&
     (autoFlag === "true" || autoFlag === "1" || autoFlag === "yes") &&
     (isElite || isStrongAuto);
 
