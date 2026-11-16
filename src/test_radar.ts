@@ -1,10 +1,10 @@
 declare const process: any;
 
-import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, resolveTenantBuyerSegments, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey, notifyOnce, isVerifiedDeliverableEmail, evaluateFounderOutreachEligibility, buildTechnicalAuditSnapshot, isEmailValidatedForOutreach, isCompletePostalAddress, sendTelegramWithRetry, extractEmailAddress, evaluateResearchEvidenceQuality, classifyReplyText, getTelegramApprovalFeedback, getManualSendPreflightError, buildScheduledRunId, getCurrentDaySenderCount, normalizeWhatsAppPhone, extractPhoneDigits, buildWhatsAppClickToChatUrl, buildWhatsAppOutreachBody } from './worker';
+import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, resolveTenantBuyerSegments, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey, notifyOnce, isVerifiedDeliverableEmail, evaluateFounderOutreachEligibility, buildTechnicalAuditSnapshot, isEmailValidatedForOutreach, isCompletePostalAddress, sendTelegramWithRetry, extractEmailAddress, evaluateResearchEvidenceQuality, classifyReplyText, getTelegramApprovalFeedback, getManualSendPreflightError, buildScheduledRunId, getCurrentDaySenderCount, normalizeWhatsAppPhone, extractPhoneDigits, hasUsableContactChannel, buildWhatsAppClickToChatUrl, buildWhatsAppOutreachBody } from './worker';
 import { DEFAULT_FOUNDER_MISSION, MissionConfig } from './worker';
 import { buildResendIdempotencyKey, buildBrandedEmailHtml, resolveBveltSender, inspectOutboundEmailAuth, normalizeOutreachBody } from './emailDispatcher';
 import { fetchPermitContractors } from './permitSources';
-import { pickTargets } from './geoFrontier';
+import { pickTargets, findPlace } from './geoFrontier';
 import { isOffIcpName, sanitizeEmail } from './emailSanitizer';
 import { learningCounterDelta, readScopedLearningStats, recordScopedLearningEvent } from './learningIntegrity';
 
@@ -36,6 +36,10 @@ tests.push({
     assert(normalizeWhatsAppPhone("0018135550100") === "18135550100", "Accept explicit 00 international prefix");
     assert(normalizeWhatsAppPhone("123") === null, "Reject short phone numbers");
     assert(extractPhoneDigits("813-555-0100") === "8135550100", "Keep a usable local phone without inventing its country code");
+    assert(hasUsableContactChannel("team@example.com", null), "Email is a usable contact channel");
+    assert(hasUsableContactChannel("", "813-555-0100"), "Phone-only businesses remain eligible for reviewed WhatsApp handoff");
+    assert(!hasUsableContactChannel("", "123"), "Reject malformed phone-only contact data");
+    assert(!hasUsableContactChannel("", null), "Reject prospects without any usable contact channel");
     const genericShare = buildWhatsAppClickToChatUrl("813-555-0100", "Hi team");
     assert(!!genericShare && genericShare.startsWith("https://wa.me/?text="), "Use WhatsApp contact picker for local numbers");
     const link = buildWhatsAppClickToChatUrl("+1 813 555 0100", "Hi team — quick question");
@@ -288,6 +292,29 @@ tests.push({
       countries: []
     });
     assert(picks.length === 0, "GeoFrontier must not invent a trade when none is supplied");
+
+    assert(findPlace("London, England")?.country === "GB", "Supplemental UK gazetteer places must be resolvable");
+    assert(findPlace("Sydney, NSW")?.country === "AU", "Supplemental Australian gazetteer places must be resolvable");
+
+    const balanced = await pickTargets({} as any, {
+      tenantId: "founder",
+      trades: ["plumbing"],
+      count: 8,
+      countries: [],
+      priorityCountries: ["US", "CA", "GB", "AU"]
+    });
+    const countryCounts = balanced.reduce((counts: Record<string, number>, item) => {
+      counts[item.place.country] = (counts[item.place.country] || 0) + 1;
+      return counts;
+    }, {});
+    assert(balanced.length === 8, "Founder should fill the requested target count from the merged gazetteer");
+    const primaryCount = ["US", "CA", "GB", "AU"].reduce((sum, country) => sum + (countryCounts[country] || 0), 0);
+    const explorationCount = balanced.length - primaryCount;
+    for (const country of ["US", "CA", "GB", "AU"]) {
+      assert((countryCounts[country] || 0) >= 1, "Each available primary market must receive a target: " + country);
+    }
+    assert(primaryCount >= 6, "At least 75% of targets should come from the four primary markets");
+    assert(explorationCount >= 2, "The remaining target share should explore non-primary gazetteer countries");
   }
 });
 
@@ -421,11 +448,10 @@ tests.push({
 
 // Test 1: Market-Agnostic config rotation with custom geographies, countries, and niches
 tests.push({
-  name: "Radar accepts customized niches, cities, and countries",
+  name: "Founder uses bundled global market rotation without country environment variables",
   run: async () => {
     const envMock = {
       RADAR_DB: { prepare: () => ({ bind: () => ({ first: () => Promise.resolve(null) }) }) } as any,
-      FOUNDING_CITIES: "Toronto, ON;Madrid, ES;Bogota, CO",
       FOUNDING_TRADES: "accounting;law_firm;dental_clinic",
       FOUNDER_SERVICE_KEY: "test_key",
       TELEGRAM_BOT_TOKEN: "",
@@ -443,11 +469,13 @@ tests.push({
     assert(activeCities.length > 0, "Should select at least one active city");
     assert(activeTrades.length > 0, "Should select at least one active niche");
     
-    // Assert no US, Texas, HVAC or Landscaping limits are enforced in active selection
-    assert(missionConfig.geographies.includes("Toronto, ON"), "Should include custom geographies");
-    assert(missionConfig.geographies.includes("Madrid, ES"), "Should include custom geographies");
-    assert(missionConfig.geographies.includes("Bogota, CO"), "Should include custom geographies");
-    assert(missionConfig.niches.includes("accounting"), "Should include custom niche 'accounting'");
+    // Founder geography comes from the bundled gazetteer, not Cloudflare city/country variables.
+    assert(missionConfig.geographies.length === 0, "Founder mission must not pin custom city lists");
+    assert(missionConfig.countries.length === 0, "Founder mission must not require a country allowlist");
+    assert(activeCities.length > 0, "Founder must still select locations from the bundled gazetteer");
+    assert(missionConfig.niches.includes("accounting"), "Should preserve custom niche 'accounting'");
+    assert(missionConfig.niches.includes("law_firm"), "Should preserve custom niche 'law_firm'");
+    assert(missionConfig.niches.includes("dental_clinic"), "Should preserve custom niche 'dental_clinic'");
   }
 });
 
@@ -1289,7 +1317,7 @@ tests.push({
     const { getBudgetLimit, reserveBudget, releaseBudget, getCircuitBreakerStatus, tripCircuitBreaker, trackProviderFailure } = await import('./worker');
     
     // 1. Verify budget limits
-    assert(getBudgetLimit('discovery_units') === 30, "Discovery daily budget must be 30");
+    assert(getBudgetLimit('discovery_units') === 45, "Discovery daily budget must be 45");
     assert(getBudgetLimit('enrichment_units') === 20, "Enrichment daily budget must be 20");
     assert(getBudgetLimit('ai_units') === 10, "AI daily budget must be 10");
     assert(getBudgetLimit('hunter_units') === 8, "Hunter daily budget must be 8");

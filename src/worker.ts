@@ -97,9 +97,9 @@ export interface Env {
   TRUST_SERVICE_KEY?: string;
   TRUST_STACK_KEY?: string;
   WEBHOOK_SECRET?: string; // token para webhooks de correo (?token=...)
-  FOUNDING_CITIES?: string; // semicolon-separated explicit city labels; no implicit defaults
+  // Founder geography is sourced from the bundled gazetteer; no city/country env vars required.
+  FOUNDING_CITIES?: string; // optional explicit override; Founder defaults to bundled gazetteer
   FOUNDING_TRADES?: string; // semicolon-separated explicit niches; no implicit defaults
-  FOUNDING_COUNTRIES?: string; // ISO country codes used only for automatic geo rotation
   FOUNDING_LANGUAGES?: string;
   FOUNDING_MIN_SCORE?: string;
   FOUNDER_AUTO_OUTREACH?: string;
@@ -137,7 +137,7 @@ export interface Env {
 
 export function getBudgetLimit(unitType: string): number {
   switch (unitType) {
-    case 'discovery_units': return 30;
+    case 'discovery_units': return 45;
     case 'enrichment_units': return 20;
     case 'ai_units': return 10;
     case 'hunter_units': return 8;
@@ -366,6 +366,7 @@ export interface MissionConfig {
 }
 
 const MARKET_UNIVERSE_POLICY = marketUniverse as {
+  founder_primary_countries?: string[];
   market_tiers?: {
     core_english_commercial?: string[];
     additional_english_commercial?: string[];
@@ -378,12 +379,9 @@ const MARKET_UNIVERSE_POLICY = marketUniverse as {
   excluded_business_categories?: string[];
 };
 
-const MARKET_PRIORITY_COUNTRIES = Array.from(new Set([
-  ...(MARKET_UNIVERSE_POLICY.market_tiers?.core_english_commercial || []),
-  ...(MARKET_UNIVERSE_POLICY.market_tiers?.additional_english_commercial || []),
-  ...(MARKET_UNIVERSE_POLICY.geography_policy?.default_priority_countries || []),
-  ...(MARKET_UNIVERSE_POLICY.geography_policy?.priority_countries || [])
-].map(country => String(country).trim().toUpperCase()).filter(Boolean)));
+const MARKET_PRIMARY_COUNTRIES = (MARKET_UNIVERSE_POLICY.founder_primary_countries || ["US", "CA", "GB", "AU"])
+  .map(country => String(country).trim().toUpperCase())
+  .filter(Boolean);
 
 const DEFAULT_FOUNDER_SEGMENTS = (MARKET_UNIVERSE_POLICY.bvelt_compatible_segments || [])
   .map(segment => String(segment).trim().toLowerCase())
@@ -466,10 +464,10 @@ function extractUsStateCodes(cityLabels: string[]): string[] {
 
 // Hard daily execution limits (respect free-tier API ceilings)
 const LIMITS = {
-  max_discover_per_day: 40,
-  max_finalize_per_day: 12,
-  max_ai_calls_per_day: 20,
-  max_hunter_credits_per_day: 10,
+  max_discover_per_day: 45,
+  max_finalize_per_day: 10,
+  max_ai_calls_per_day: 10,
+  max_hunter_credits_per_day: 8,
 };
 
 // Mapping of contractor trades to their ideal B2B target niches
@@ -3107,7 +3105,7 @@ export default {
     }
   },
 
-  // Daily Scheduled Trigger (Cron: "0 12 * * *")
+  // Daily scheduled discovery waves (Cron: "0 12,17,22 * * *").
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
     console.log(`[Radar Cron] Scheduled trigger initiated at ${new Date().toISOString()}`);
     const scheduledAt = Number(event?.scheduledTime);
@@ -5172,7 +5170,7 @@ export async function startProspectingRun(
   if ((!activeCities || activeCities.length === 0 || !activeTrades || activeTrades.length === 0) && (!pairs || pairs.length === 0)) {
     const reason = mode === "tenant"
       ? `Tenant "${tId}" no tiene mercados o segmentos compradores válidos. Configura cities_json e ICP buyer segments antes de correr el Radar.`
-      : "No hay mercados y nichos activos para discovery. Configura FOUNDING_CITIES + FOUNDING_TRADES, o FOUNDING_COUNTRIES + FOUNDING_TRADES.";
+      : "La geografía automática no produjo objetivos. Comprueba el catálogo geográfico integrado y los segmentos de Founder; no requiere FOUNDING_CITIES ni FOUNDING_COUNTRIES.";
     console.warn(`[startProspectingRun] ${reason}`);
     return {
       run_id: "no_targets",
@@ -5205,7 +5203,7 @@ export async function startProspectingRun(
   const hasOverrides = !!(overrides && (overrides.cities || overrides.trades || overrides.countries || overrides.languages || overrides.min_score));
 
   // Cap jobs per run to avoid queue flood (max 8 discovery pairs)
-  const MAX_JOBS = Math.min(8, Number(env.RADAR_JOBS_PER_RUN || 8));
+  const MAX_JOBS = Math.max(1, Math.min(8, Math.floor(Number(env.RADAR_JOBS_PER_RUN) || 8)));
 
   if (pairs && pairs.length > 0 && !hasOverrides) {
     for (const pair of pairs.slice(0, MAX_JOBS)) {
@@ -5951,9 +5949,8 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
 
     if (!signalEvent) {
       try {
-        const cityLabel = String(job.payload?.city || candidate.city || env.FOUNDING_CITIES || "");
-        const configuredCountries = String(env.FOUNDING_COUNTRIES || "").split(";").map(value => value.trim().toUpperCase());
-        const isUsMarket = String(candidate.country || job.payload?.country || "").toUpperCase() === "US" || configuredCountries.includes("US");
+        const cityLabel = String(job.payload?.city || candidate.city || "");
+        const isUsMarket = String(candidate.country || job.payload?.country || "").toUpperCase() === "US";
         const extractedStates = isUsMarket ? extractUsStateCodes(cityLabel.split(";")) : [];
         if (extractedStates.length > 0) {
           const alerts = await getAlerts(extractedStates);
@@ -6656,18 +6653,19 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
   const valueBand = finalScore >= 80 ? "premium" : finalScore >= 60 ? "high" : finalScore >= 45 ? "medium" : "low";
 
   // Contactable = email OR phone (WhatsApp-first businesses are real leads)
-  const contactable = !!(prospect.email || prospect.phone);
+  const contactable = hasUsableContactChannel(prospect.email, prospect.phone);
   const minScoreGate = isTenant
     ? (Number(overrides?.min_score) || Number(missionConfig?.min_score) || 40)
     : 45;
   const isDisqualified = finalScore < minScoreGate || !contactable;
 
   if (isDisqualified) {
+    const disqualificationOutcome = finalScore < minScoreGate ? "below_minimum_score" : "no_contact_channel";
     await env.RADAR_DB.prepare(`
       UPDATE prospects
       SET score = ?, opportunity_score = ?, confidence_score = ?, evidence_json = ?, commercial_value_band = ?, pain_hypothesis_json = ?, signals_json = ?, score_breakdown = ?, variant_id = ?, bvelt_angle = ?,
           fit_score = ?, intent_score = ?, pain_score = ?, ability_to_pay_score = ?, contactability_score = ?, timing_score = ?, evidence_score = ?, signal_freshness_score = ?, expected_value = ?, decision_state = 'disqualified', why_now_json = ?,
-          status = 'disqualified', outcome = 'low_score_or_no_email', updated_at = ?
+          status = 'disqualified', outcome = ?, updated_at = ?
       WHERE id = ?
     `).bind(
       finalScore,
@@ -6690,6 +6688,7 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
       strat.signal_freshness_score,
       strat.expected_value,
       strat.why_now_json,
+      disqualificationOutcome,
       new Date().toISOString(),
       prospect_id
     ).run();
@@ -6891,9 +6890,15 @@ async function handleApproveJob(job: RadarJobMessage, env: Env): Promise<void> {
     return;
   }
 
-  // Quality gate check: score >= 45 and email must be present
-  if ((prospect.score || 0) < 45 || !prospect.email) {
-    await env.RADAR_DB.prepare("UPDATE prospects SET status = 'disqualified', outcome = 'low_score_or_no_email', updated_at = ? WHERE id = ?")
+  // Email prospects continue to the email path; valid phone-only prospects use
+  // the reviewed WhatsApp handoff below. Never discard a usable phone for lack of email.
+  if (Number(prospect.score || 0) < 45) {
+    await env.RADAR_DB.prepare("UPDATE prospects SET status = 'disqualified', outcome = 'below_outreach_score', updated_at = ? WHERE id = ?")
+      .bind(new Date().toISOString(), prospect_id).run();
+    return;
+  }
+  if (!hasUsableContactChannel(prospect.email, prospect.phone)) {
+    await env.RADAR_DB.prepare("UPDATE prospects SET status = 'disqualified', outcome = 'no_contact_channel', updated_at = ? WHERE id = ?")
       .bind(new Date().toISOString(), prospect_id).run();
     return;
   }
@@ -7884,15 +7889,13 @@ export async function getPriorityTargets(
     config.niches = [];
     config.icp = { description: "", keywords: [] };
   } else {
-    // Founder mode
+    // Founder mode. Explicit city override remains backward-compatible, but is optional.
+    // With no override, geoFrontier rotates through the bundled global gazetteer.
     if (env.FOUNDING_CITIES) {
-      config.geographies = env.FOUNDING_CITIES.split(";").map(c => c.trim()).filter(Boolean);
+      config.geographies = env.FOUNDING_CITIES.split(";").map(city => city.trim()).filter(Boolean);
     }
     if (env.FOUNDING_TRADES) {
       config.niches = env.FOUNDING_TRADES.split(";").map(t => t.trim()).filter(Boolean);
-    }
-    if ((env as any).FOUNDING_COUNTRIES) {
-      config.countries = String((env as any).FOUNDING_COUNTRIES).split(";").map(c => c.trim().toUpperCase()).filter(Boolean);
     }
     if ((env as any).FOUNDING_LANGUAGES) {
       config.languages = String((env as any).FOUNDING_LANGUAGES).split(";").map(l => l.trim().toLowerCase()).filter(Boolean);
@@ -7916,7 +7919,7 @@ export async function getPriorityTargets(
       const marketsJson = JSON.stringify(config.geographies);
       const icpJson = JSON.stringify(config.icp);
       const budgetJson = JSON.stringify({
-        discovery_units: 30,
+        discovery_units: 45,
         enrichment_units: 20,
         ai_units: 10,
         hunter_units: 8,
@@ -8061,9 +8064,9 @@ export async function getPriorityTargets(
       picks = await pickTargets(env.RADAR_DB, {
         tenantId: "founder",
         trades: sortedNiches,
-        count: Math.min(20, Number(env.RADAR_JOBS_PER_RUN || 15)),
+        count: Math.max(1, Math.min(8, Math.floor(Number(env.RADAR_JOBS_PER_RUN) || 8))),
         countries: config.countries,
-        priorityCountries: MARKET_PRIORITY_COUNTRIES
+        priorityCountries: MARKET_PRIMARY_COUNTRIES
       });
     } catch (e) {
       console.warn("[getPriorityTargets] pickTargets error:", e);
@@ -10457,6 +10460,10 @@ export function extractPhoneDigits(value: string | null | undefined): string | n
   return /^\d{7,15}$/.test(digits) ? digits : null;
 }
 
+export function hasUsableContactChannel(email: string | null | undefined, phone: string | null | undefined): boolean {
+  return !!String(email || "").trim() || !!extractPhoneDigits(phone);
+}
+
 export function normalizeWhatsAppPhone(value: string | null | undefined): string | null {
   const raw = String(value || "").trim();
   if (!raw) return null;
@@ -10628,9 +10635,8 @@ export async function collectRadarDigest(env: Env): Promise<RadarDigest> {
   if (!hasProvider) blockers.push("Sin proveedor de email (RESEND_API_KEY / BREVO_API_KEY / Hunter)");
   if (autoOn && !isCompletePostalAddress(env.SENDER_POSTAL_ADDRESS)) blockers.push("SENDER_POSTAL_ADDRESS ausente o incompleta: bloquea todo envío automático");
   if (gov && gov.status && gov.status !== "active") blockers.push(`Sender governor en estado "${gov.status}"`);
-  if (!has(env.FOUNDING_CITIES)) blockers.push("FOUNDING_CITIES vacío (OK: rotación geoData/geoFrontier activa — no hace falta lista manual)");
 
-  const hardBlock = blockers.filter(b => !b.startsWith("FOUNDING_CITIES"));
+  const hardBlock = blockers;
   let verdict: RadarDigest["verdict"] = "ok";
   let headline = "🟢 Funcionando: el embudo está produciendo";
   if (hardBlock.length > 0) {

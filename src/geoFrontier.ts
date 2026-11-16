@@ -1,4 +1,19 @@
-import { GEO_PLACES, GeoPlace } from "./geoData";
+import { GEO_PLACES as NORTH_AMERICA_GEO_PLACES, GeoPlace } from "./geoData";
+import { ANGLOSPHERE_GEO_PLACES } from "./geoDataAnglosphere";
+
+// Founder and Tenant share one deduplicated gazetteer. The North American
+// GeoNames file remains intact; supplemental English-market centres extend it.
+const GEO_PLACES: GeoPlace[] = (() => {
+  const seen = new Set<string>();
+  const merged: GeoPlace[] = [];
+  for (const place of [...NORTH_AMERICA_GEO_PLACES, ...ANGLOSPHERE_GEO_PLACES]) {
+    const key = `${place.name.toLowerCase()}|${place.region.toLowerCase()}|${place.country.toUpperCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(place);
+  }
+  return merged;
+})();
 
 export type D1Like = {
   prepare(q: string): {
@@ -283,31 +298,46 @@ export async function pickTargets(
       }
     }
   } else {
-    // Founder: explore every available country unless the operator explicitly narrows scope.
-    // Priority countries are ranked higher, never used as an allowlist.
+    // Founder explores the repository gazetteer. The four primary markets each
+    // get a guaranteed candidate slice; the remaining pool stays globally open.
     const eligible = GEO_PLACES.filter((p) => countries.length === 0 || countries.includes(p.country));
-    const byPop = [...eligible].sort((a, b) => {
-      const priorityA = priorityCountries.has(a.country) ? 1.15 : 1;
-      const priorityB = priorityCountries.has(b.country) ? 1.15 : 1;
-      return (Math.log(Math.max(b.population || 1, 1)) * priorityB) -
-        (Math.log(Math.max(a.population || 1, 1)) * priorityA);
-    });
-    const top = byPop.slice(0, 150);
-    const mid = byPop.slice(150).filter((p) => (p.population || 0) >= 15000);
-    const extra: GeoPlace[] = [];
-    const midCopy = [...mid];
-    for (let i = 0; i < 150 && midCopy.length > 0; i++) {
-      const idx = Math.floor(Math.random() * midCopy.length);
-      extra.push(midCopy.splice(idx, 1)[0]);
+    const selected = new Map<string, GeoPlace>();
+    const add = (place: GeoPlace) => selected.set(placeKey(place), place);
+
+    for (const country of priorityCountries) {
+      const countryPlaces = eligible
+        .filter((place) => place.country.toUpperCase() === country)
+        .sort(POP_DESC);
+      for (const place of countryPlaces.slice(0, 30)) add(place);
+      const countryMid = countryPlaces.slice(30).filter((place) => (place.population || 0) >= 15000);
+      for (let i = 0; i < 20 && countryMid.length > 0; i++) {
+        add(countryMid.splice(Math.floor(Math.random() * countryMid.length), 1)[0]);
+      }
     }
-    const seen = new Set<string>();
-    pool = [];
-    for (const p of [...top, ...extra]) {
-      const k = placeKey(p);
-      if (seen.has(k)) continue;
-      seen.add(k);
-      pool.push(p);
+
+    // Keep non-primary markets represented in the candidate pool. Without this,
+    // the much larger US/CA gazetteer can crowd every smaller country out before
+    // the 25% exploration share is selected.
+    const globalByCountry = new Map<string, GeoPlace[]>();
+    for (const place of eligible) {
+      const country = place.country.toUpperCase();
+      if (priorityCountries.has(country)) continue;
+      const list = globalByCountry.get(country) || [];
+      list.push(place);
+      globalByCountry.set(country, list);
     }
+    for (const places of globalByCountry.values()) {
+      for (const place of places.sort(POP_DESC).slice(0, 5)) add(place);
+    }
+
+    const remaining = eligible.filter((place) => !selected.has(placeKey(place)));
+    const byPop = [...remaining].sort(POP_DESC);
+    for (const place of byPop.slice(0, 150)) add(place);
+    const mid = byPop.slice(150).filter((place) => (place.population || 0) >= 15000);
+    for (let i = 0; i < 150 && mid.length > 0; i++) {
+      add(mid.splice(Math.floor(Math.random() * mid.length), 1)[0]);
+    }
+    pool = Array.from(selected.values());
   }
   if (pool.length === 0) return [];
 
@@ -369,7 +399,8 @@ export async function pickTargets(
   const allowed = (c: Cand): boolean => {
     const key = `${placeKey(c.place)}::${c.trade.toLowerCase()}`;
     if (chosenKeys.has(key)) return false;
-    if ((regionCount.get(c.place.region) || 0) >= regionCap) return false;
+    const regionKey = `${c.place.country}::${c.place.region}`;
+    if ((regionCount.get(regionKey) || 0) >= regionCap) return false;
     if ((tradeCount.get(c.trade.toLowerCase()) || 0) >= tradeCap) return false;
     if (!isTenantArea) {
       // Founder: un lugar por zona y por corrida (evita NYC + Brooklyn)
@@ -386,7 +417,8 @@ export async function pickTargets(
   const take = (c: Cand, why: string) => {
     out.push({ place: withTuple(c.place), trade: c.trade, why });
     chosenKeys.add(`${placeKey(c.place)}::${c.trade.toLowerCase()}`);
-    regionCount.set(c.place.region, (regionCount.get(c.place.region) || 0) + 1);
+    const regionKey = `${c.place.country}::${c.place.region}`;
+    regionCount.set(regionKey, (regionCount.get(regionKey) || 0) + 1);
     tradeCount.set(c.trade.toLowerCase(), (tradeCount.get(c.trade.toLowerCase()) || 0) + 1);
     chosen.push({ lat: c.place.lat, lon: c.place.lon, r: radiusKm(c.place.population || 0) });
   };
@@ -399,6 +431,51 @@ export async function pickTargets(
   };
 
   const neverList = isTenantArea ? [] : cands.filter((c) => c.isNew && (c.place.population || 0) >= 20000);
+
+  // Founder targeting is deliberately weighted, not closed: reserve about 75%
+  // for the four primary markets and keep about 25% for other gazetteer countries.
+  // Each available primary country gets at least one target; the starting order
+  // rotates daily so the same country does not always receive the extra slot.
+  const founderCountries = !isTenantArea
+    ? Array.from(priorityCountries).filter((country) => cands.some((candidate) => candidate.place.country.toUpperCase() === country))
+    : [];
+  const primaryTargetCount = founderCountries.length > 0
+    ? Math.min(count, Math.max(founderCountries.length, Math.ceil(count * 0.75)))
+    : 0;
+  if (founderCountries.length > 0 && primaryTargetCount > 0) {
+    const dayIndex = Math.floor(now / DAY_MS);
+    const offset = dayIndex % founderCountries.length;
+    const countryOrder = [...founderCountries.slice(offset), ...founderCountries.slice(0, offset)];
+    const countryQuota = Math.ceil(primaryTargetCount / countryOrder.length);
+    let progress = true;
+    while (out.length < primaryTargetCount && progress) {
+      progress = false;
+      for (const country of countryOrder) {
+        if (out.length >= primaryTargetCount) break;
+        const alreadyPicked = out.filter((item) => item.place.country.toUpperCase() === country).length;
+        if (alreadyPicked >= countryQuota) continue;
+        const candidate = cands.find((item) =>
+          item.place.country.toUpperCase() === country && allowed(item)
+        );
+        if (!candidate) continue;
+        take(candidate, candidate.isNew ? "exploración de mercado prioritario" : describe(candidate));
+        progress = true;
+      }
+    }
+  }
+
+  // Fill the exploration share from countries outside the primary set. The pool
+  // is intentionally small and rotates by historical coverage/score, not by a
+  // hard-coded list of global cities.
+  const explorationCandidates = !isTenantArea
+    ? cands.filter((candidate) => !priorityCountries.has(candidate.place.country.toUpperCase()))
+    : [];
+  for (const candidate of explorationCandidates) {
+    if (out.length >= count) break;
+    if (allowed(candidate)) {
+      take(candidate, candidate.isNew ? "exploración global" : describe(candidate));
+    }
+  }
 
   let cursor = 0;
   while (out.length < count) {
