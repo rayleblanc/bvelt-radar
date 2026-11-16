@@ -5701,9 +5701,11 @@ async function upsertOpportunity(
     const prospectScope = await db.prepare(
       "SELECT tenant_id FROM prospects WHERE id = ? LIMIT 1"
     ).bind(opts.prospect_id).first() as any;
-    if (prospectScope) {
-      canonicalTenantId = String(prospectScope.tenant_id || "founder").trim() || "founder";
+    if (!prospectScope) {
+      console.warn("[upsertOpportunity] prospect not found; refusing unverified opportunity scope:", opts.prospect_id);
+      return false;
     }
+    canonicalTenantId = String(prospectScope.tenant_id || "founder").trim() || "founder";
   } catch (scopeError: any) {
     console.warn("[upsertOpportunity] prospect scope lookup failed:", scopeError?.message || scopeError);
     return false; // fail closed: do not write an unverified scope
