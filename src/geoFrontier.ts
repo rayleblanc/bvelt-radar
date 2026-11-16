@@ -87,6 +87,9 @@ export function findNearestPlace(lat: number, lon: number, maxKm = 80): GeoPlace
   let best: GeoPlace | null = null;
   let bestD = Infinity;
   for (const p of GEO_PLACES) {
+    // This helper bootstraps Bvelt's existing US/Canada local-analysis flow;
+    // the global Founder gazetteer must not change that behavior.
+    if (p.country !== "US" && p.country !== "CA") continue;
     if (Math.abs(p.lat - lat) > 1.2) continue;
     const d = haversineKm(lat, lon, p.lat, p.lon);
     if (d < bestD) {
@@ -435,8 +438,20 @@ export async function pickTargets(
 
     // Cada 4º pick (solo founder): exploración aleatoria entre lugares nunca buscados
     if (!isTenantArea && turn % 4 === 0 && neverList.length > 0) {
+      // Exploration remains random, but cannot undo the four-market balance:
+      // sample only from currently least-served core countries when available.
+      const minCoreCount = availableCoreCountries.length > 0
+        ? Math.min(...availableCoreCountries.map(country => countryCount.get(country) || 0))
+        : 0;
+      const balancedExploration = availableCoreCountries.length > 0
+        ? neverList.filter(candidate =>
+            availableCoreCountries.includes(candidate.place.country) &&
+            (countryCount.get(candidate.place.country) || 0) === minCoreCount
+          )
+        : neverList;
+      const explorationPool = balancedExploration.length > 0 ? balancedExploration : neverList;
       for (let tries = 0; tries < 30; tries++) {
-        const c = neverList[Math.floor(Math.random() * neverList.length)];
+        const c = explorationPool[Math.floor(Math.random() * explorationPool.length)];
         if (allowed(c)) {
           take(c, "exploración");
           picked = true;
