@@ -5864,6 +5864,7 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
   const bounded = ranked.slice(0, maxScan);
   let enqueuedEnrich = 0;
   let filteredCount = 0;
+  let contactlessFilteredCount = 0;
   let aiClassifyCalls = 0;
 
   for (const candidate of bounded) {
@@ -5896,6 +5897,14 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
       isNonBusinessEntity(candidate.name, candidate.website, job.mode) ||
       (job.mode === "tenant" && !tenantBuyerNameFits(candidate.name, trade))
     ) {
+      filteredCount++;
+      continue;
+    }
+
+    // Founder: do not spend discovery units on map-only POIs with no actionable contact path.
+    // A real website is enough because enrichment can extract an email or phone.
+    if (job.mode !== "tenant" && !hasActionableContactData(candidate.email, candidate.phone, candidate.website)) {
+      contactlessFilteredCount++;
       filteredCount++;
       continue;
     }
@@ -6122,7 +6131,8 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
   try {
     diagnostics.discovered_raw = scraped.length;
     diagnostics.filtered = (scraped.length - bounded.length) + filteredCount;
-    diagnostics.reason = `Discovered ${scraped.length} raw, ${enqueuedEnrich} enqueued for enrichment, ${diagnostics.filtered} filtered`;
+    diagnostics.contactless_filtered = contactlessFilteredCount;
+    diagnostics.reason = `Discovered ${scraped.length} raw, ${enqueuedEnrich} enqueued for enrichment, ${diagnostics.filtered} filtered (${contactlessFilteredCount} contactless)`;
 
     const existingRun = await env.RADAR_DB.prepare("SELECT errors_json FROM runs WHERE id = ?").bind(job.run_id).first() as any;
     let errorsArr: any[] = [];
@@ -9246,6 +9256,7 @@ export interface DiscoveryDiagnostics {
   discovered_raw: number;
   filtered: number;
   viable_candidates?: number;
+  contactless_filtered?: number;
   reason: string;
   permits_found?: number;
   geoapify_status?: string;
@@ -9538,7 +9549,7 @@ export async function fetchLocalBusinessesWithDiagnostics(
         isNonBusinessEntity(name, item.website, mode) ||
         (mode === "tenant" && !tenantBuyerNameFits(name, candidateTrade))
       ) continue;
-      if (mode !== "tenant" && !(sanitizeEmail(String(item.email || "")).valid || !!extractPhoneDigits(item.phone) || isRealWebsite(String(item.website || "")))) continue;
+      if (mode !== "tenant" && !hasActionableContactData(item.email, item.phone, item.website)) continue;
       const key = name.toLowerCase().replace(/[^a-z0-9]/g, "");
       if (!key || seen.has(key)) continue;
       seen.add(key);
@@ -10587,6 +10598,10 @@ export function extractPhoneDigits(value: string | null | undefined): string | n
 
 export function hasUsableContactChannel(email: string | null | undefined, phone: string | null | undefined): boolean {
   return !!String(email || "").trim() || !!extractPhoneDigits(phone);
+}
+
+export function hasActionableContactData(email: string | null | undefined, phone: string | null | undefined, website: string | null | undefined): boolean {
+  return sanitizeEmail(String(email || "")).valid || !!extractPhoneDigits(phone) || isRealWebsite(String(website || ""));
 }
 
 export function hasEnrichableContactData(
