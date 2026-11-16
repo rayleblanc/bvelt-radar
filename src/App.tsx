@@ -2301,7 +2301,10 @@ const submitDecision = async (prospectId: string, action: string) => {
                                 target="_blank" 
                                 rel="noreferrer" 
                                 className="px-2.5 py-1 rounded-lg bg-slate-900 border border-slate-800 text-slate-400 hover:text-blue-400 flex items-center gap-1" 
-                                onClick={(e) => e.stopPropagation()}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  void recordProspectMessageEvent(p.id, 'message_channel_opened', 'website');
+                                }}
                               >
                                 <ExternalLink className="w-3 h-3 text-slate-500" />
                                 {p.website}

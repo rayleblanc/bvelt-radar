@@ -4595,7 +4595,7 @@ async function handleDecision(
 
       try {
         await db.prepare("INSERT INTO prospect_events (id, prospect_id, event_type, content, created_at) VALUES (?, ?, ?, ?, ?)")
-          .bind("msg_" + crypto.randomUUID(), id, "message_send_authorized", JSON.stringify({ channel: "email", authorization: "founder_manual_action" }), timestamp).run();
+          .bind("msg_" + crypto.randomUUID(), id, "message_send_authorized", JSON.stringify({ channel: "email", authorization: "explicit_user_action", mode: prospect.mode || "founder", tenant_id: prospect.tenant_id || "founder" }), timestamp).run();
       } catch (eventError: any) { console.warn("[ManualEmail] send authorization log failed:", eventError?.message || eventError); }
 
       dispatchOutcome = await dispatchEmail({
@@ -7279,6 +7279,11 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
       );
     }
 
+    try {
+      await env.RADAR_DB.prepare("INSERT INTO prospect_events (id, prospect_id, event_type, content, created_at) VALUES (?, ?, ?, ?, ?)")
+        .bind("msg_" + crypto.randomUUID(), prospect.id, "message_generated", JSON.stringify({ channel: "whatsapp", source: (draft as any).source || "fallback_template", body_length: String(draft.body || "").length, mode: "founder", tenant_id: "founder" }), new Date().toISOString()).run();
+    } catch (eventError: any) { console.warn("[WhatsApp Draft] generation event log failed:", eventError?.message || eventError); }
+
     const whatsappBody = buildWhatsAppOutreachBody(draft.body);
     const whatsappUrl = buildWhatsAppClickToChatUrl(prospect.phone, whatsappBody);
     if (!whatsappBody || !whatsappUrl) {
@@ -7420,6 +7425,10 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
   // Strip any old legacy generic footer and append buildLegalFooter
   draft.body = draft.body.replace(/\n\nReply STOP to opt out/gi, "").replace(/Reply STOP to opt out/gi, "").trim();
   draft.body = draft.body + "\n\n" + buildLegalFooter(env);
+  try {
+    await env.RADAR_DB.prepare("INSERT INTO prospect_events (id, prospect_id, event_type, content, created_at) VALUES (?, ?, ?, ?, ?)")
+      .bind("msg_" + crypto.randomUUID(), prospect.id, "message_generated", JSON.stringify({ channel: "email", source: (draft as any).source || "fallback_template", subject: draft.subject || "", body_length: String(draft.body || "").length, mode: prospect.mode || "founder", tenant_id: prospect.tenant_id || "founder" }), new Date().toISOString()).run();
+  } catch (eventError: any) { console.warn("[Outreach Job] generation event log failed:", eventError?.message || eventError); }
 
   prospect.draft_subject = draft.subject;
   prospect.draft_body = draft.body;
