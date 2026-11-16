@@ -5776,8 +5776,8 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
     // Contactability first (email > phone > real website) — founder lives or dies by outreach
     const contactScore = (x: any) => {
       let s = 0;
-      if (x.email && String(x.email).includes('@')) s += 8;
-      if (x.phone && String(x.phone).replace(/\D/g, '').length >= 7) s += 4;
+      if (sanitizeEmail(String(x.email || "")).valid) s += 8;
+      if (extractPhoneDigits(x.phone)) s += 4;
       if (x.website && isRealWebsite(String(x.website))) s += 2;
       return s;
     };
@@ -5797,6 +5797,7 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
   const bounded = ranked.slice(0, maxScan);
   let enqueuedEnrich = 0;
   let filteredCount = 0;
+  let contactlessFilteredCount = 0;
   let aiClassifyCalls = 0;
 
   for (const candidate of bounded) {
@@ -5833,7 +5834,17 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
       continue;
     }
 
-    // Atomically reserve a discovery unit before processing the candidate
+    // Founder budget is for actionable prospects, not map-only POIs. A real
+    // website is enough to attempt scraping/Hunter; a valid phone supports the
+    // reviewed WhatsApp path; a valid email supports email enrichment.
+    if (job.mode !== "tenant" && !hasEnrichableContactData(candidate.email, candidate.phone, candidate.website)) {
+      contactlessFilteredCount++;
+      filteredCount++;
+      console.log(`[Contact Gate: Skipped] "${candidate.name}" has no valid email, phone, or real website; discovery unit preserved.`);
+      continue;
+    }
+
+    // Atomically reserve a discovery unit only after the contactability gate.
     const reserved = await reserveBudget(env.RADAR_DB, tenantId, 'discovery_units', 1);
     if (!reserved) {
       console.log(`[Job: discovery] Failed to reserve discovery unit. Budget exhausted for tenant: ${tenantId}`);
@@ -6055,7 +6066,8 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
   try {
     diagnostics.discovered_raw = scraped.length;
     diagnostics.filtered = (scraped.length - bounded.length) + filteredCount;
-    diagnostics.reason = `Discovered ${scraped.length} raw, ${enqueuedEnrich} enqueued for enrichment, ${diagnostics.filtered} filtered`;
+    diagnostics.contactless_filtered = contactlessFilteredCount;
+    diagnostics.reason = `Discovered ${scraped.length} raw, ${enqueuedEnrich} enqueued for enrichment, ${diagnostics.filtered} filtered (${contactlessFilteredCount} without usable contact data)`;
 
     const existingRun = await env.RADAR_DB.prepare("SELECT errors_json FROM runs WHERE id = ?").bind(job.run_id).first() as any;
     let errorsArr: any[] = [];
@@ -9166,6 +9178,7 @@ export interface DiscoveryDiagnostics {
   bizdata_status: string;
   discovered_raw: number;
   filtered: number;
+  contactless_filtered?: number;
   reason: string;
   permits_found?: number;
   geoapify_status?: string;
@@ -12654,6 +12667,17 @@ function isRealWebsite(url: string): boolean {
   } catch {
     return false;
   }
+}
+
+export function hasEnrichableContactData(
+  email: string | null | undefined,
+  phone: string | null | undefined,
+  website: string | null | undefined
+): boolean {
+  const validEmail = sanitizeEmail(String(email || "")).valid;
+  const validPhone = !!extractPhoneDigits(phone);
+  const realWebsite = isRealWebsite(String(website || ""));
+  return validEmail || validPhone || realWebsite;
 }
 
 function getDomain(url: string): string | null {
