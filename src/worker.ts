@@ -4330,6 +4330,13 @@ export function buildProspectEvidenceContext(prospect: any): string {
     try { return JSON.parse(value); } catch { return { raw_observation: value.slice(0, 1200) }; }
   };
   const signals = parse(prospect?.signals_json || prospect?.signals || {});
+  const additionalObservedFields = Object.fromEntries(
+    Object.entries(prospect || {})
+      .filter(([key]) => /signal|evidence|research|scrap|audit|review|observation|source|profile|website|contact|opportunity|score|service|trade|city|name|address|description|rating|hours|category|customer|reply|response|last_contact|outcome|draft|business|social|maps|market/i.test(key))
+      .filter(([key]) => !/token|secret|password|credential|cookie|api_key/i.test(key))
+      .slice(0, 60)
+      .map(([key, value]) => [key, typeof value === "string" ? value.slice(0, 1000) : value])
+  );
   const evidence = {
     business: {
       name: prospect?.name || null, city: prospect?.city || null, trade: prospect?.trade || null,
@@ -4355,7 +4362,17 @@ export function buildProspectEvidenceContext(prospect: any): string {
     signals,
     research: parse(prospect?.research_json || prospect?.research || {}),
     website_evidence: parse(prospect?.website_evidence_json || prospect?.website_evidence || {}),
-    opportunity_signals: parse(prospect?.opportunity_signals_json || prospect?.opportunity_signals || {})
+    opportunity_signals: parse(prospect?.opportunity_signals_json || prospect?.opportunity_signals || {}),
+    contact_history: {
+      outcome: prospect?.outcome || null,
+      response_type: prospect?.response_type || null,
+      last_reply_content: prospect?.last_reply_content || null,
+      last_contact_at: prospect?.last_contact_at || null,
+      touch_count: prospect?.touch_count || prospect?.outreach_touch || null,
+      previous_subject: prospect?.draft_subject || null,
+      previous_message: prospect?.draft_body || null
+    },
+    additional_observed_fields: additionalObservedFields
   };
   return JSON.stringify(evidence).slice(0, 7000);
 }
