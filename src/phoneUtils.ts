@@ -45,8 +45,8 @@ export function toWhatsAppUrl(
   const e164 = normalizePhoneE164(value);
   if (!e164) return null;
   const digits = e164.slice(1);
-  const query = message ? \`?text=\${encodeURIComponent(message)}\` : "";
-  return \`https://wa.me/\${digits}\${query}\`;
+  const query = message ? `?text=${encodeURIComponent(message)}` : "";
+  return `https://wa.me/${digits}${query}`;
 }
 
 /** Opens the user's native SMS composer; it does not send a message or need a provider. */
