@@ -43,6 +43,8 @@ tests.push({
   run: () => {
     const none = resolveProspectContactability({ name: "Lead", website: null, phone: null, email: null });
     assert(none.commercial_prospect && !none.contact_available && !none.send_authorized, "A commercial prospect can exist without a direct channel or send authorization");
+    const disqualified = resolveProspectContactability({ status: "disqualified", email: "owner@northstarplumbing.com" });
+    assert(!disqualified.commercial_prospect && disqualified.contact_available && !disqualified.send_authorized, "Disqualification must not erase the independent contactability fact");
     const webOnly = resolveProspectContactability({ website: "https://northstarplumbing.com" });
     assert(webOnly.channels.website && !webOnly.contact_available && !webOnly.channels.email && !webOnly.channels.phone, "A website is research context, not a message recipient");
     const emailOnly = resolveProspectContactability({ email: "owner@northstarplumbing.com" });
