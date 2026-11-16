@@ -2595,11 +2595,9 @@ tests.push({
     const missedKit = buildAttackKit(verifiedMissedCallProspect);
     assert(missedKit.angle === "missed_calls", "Verified friction must select missed_calls angle");
     assert(missedKit.sms === "" && missedKit.email.body === "", "buildAttackKit must not create a second static outbound message generator");
-    assert(missedKit.sms.length > 0, "A short manual outreach message must be generated for verified angle");
-    assert(missedKit.sms.includes("Rainer"), "Must identify the sender");
-    assert(!/SMS|instant text|under a minute|60 seconds/i.test(missedKit.sms), "Must not promise unsupported SMS automation or response times");
-    assert(!/voicemail|rarely leave|call the next contractor/i.test(missedKit.email.body), "Must not invent caller behavior or lost jobs");
-    assert(!missedKit.email.body.includes("https://bvelt.app/"), "First-touch email should ask permission before sending a demo link");
+    assert(missedKit.call_script.includes("Una sola pregunta"), "Call preparation must remain concise and evidence-led");
+    assert(missedKit.call_script.includes("No solicitar listas de presupuestos"), "First contact must not ask for estimate inventories or checklists");
+    assert(missedKit.next_action.includes("mensaje IA"), "The shared AI generator owns the actual outbound message");
 
     // 3. Candidate with verified quote request friction -> stale_quotes angle
     const verifiedQuoteProspect = {
