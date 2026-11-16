@@ -7402,6 +7402,13 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
     }
   } catch (e: any) {
     console.warn(`[Copy/Subject Cascade Fallback] AI generation failed or rejected: ${e.message}`);
+    if (prospect.mode === "tenant" || tenantId !== "founder") {
+      await releaseBudget(env.RADAR_DB, tenantId, "finalize_units", 1);
+      await env.RADAR_DB.prepare("UPDATE prospects SET status = 'hold', outcome = 'tenant_copy_generation_failed', updated_at = ? WHERE id = ? AND COALESCE(tenant_id,'founder') = ?")
+        .bind(new Date().toISOString(), prospect.id, tenantId).run();
+      console.error("[Outreach Job] Tenant message generation failed; dispatch blocked to prevent Founder copy leakage.");
+      return;
+    }
     draft = getTradePsychologyFallback(prospect.name, prospect.trade, prospect.city, prospect.variant_id || 'missed_calls', primaryLanguage, prospect.phone, prospect.demo_token, prospect.signal_event, prospect.signal_area, env, prospect.signals_json || prospect.signals);
   }
 
