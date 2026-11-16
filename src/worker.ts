@@ -4304,8 +4304,11 @@ export function resolveProspectContactability(prospect: any): {
   } catch { website = false; }
   const emailAvailable = Boolean(email.valid && email.email);
   const phoneAvailable = Boolean(phoneDigits);
+  const status = String(prospect?.status || "").toLowerCase();
+  const decisionState = String(prospect?.decision_state || "").toLowerCase();
+  const commercialProspect = !["disqualified", "discarded", "suppressed", "blocked"].includes(status) && decisionState !== "disqualified";
   return {
-    commercial_prospect: true,
+    commercial_prospect: commercialProspect,
     contact_available: emailAvailable || phoneAvailable,
     channels: { email: emailAvailable, phone: phoneAvailable, whatsapp_direct: whatsappDirect, website },
     send_authorized: false
