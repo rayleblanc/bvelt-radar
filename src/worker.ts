@@ -2353,7 +2353,8 @@ export default {
           `).bind(tenantId, limit).all();
           const leads = (rows.results || []).map((p: any) => ({
             ...p,
-            attack_kit: buildAttackKit(p)
+            attack_kit: buildAttackKit(p),
+            contactability: resolveProspectContactability(p)
           }));
           return Response.json({ tenant_id: tenantId, leads, count: leads.length }, { headers: corsHeaders });
         } catch (e: any) {
@@ -2628,7 +2629,8 @@ export default {
           `).bind(tenantId).first() as any;
           const leads = (top.results || []).map((p: any) => ({
             ...p,
-            attack_kit: buildAttackKit(p)
+            attack_kit: buildAttackKit(p),
+            contactability: resolveProspectContactability(p)
           }));
           return Response.json({
             tenant_id: tenantId,
@@ -5182,7 +5184,7 @@ export async function bootstrapBveltTenant(
       if (exists) {
         const existing = await env.RADAR_DB.prepare("SELECT * FROM prospects WHERE id = ?").bind((exists as any).id).first();
         if (existing) {
-          leads.push({ ...existing, attack_kit: buildAttackKit(existing) });
+          leads.push({ ...existing, attack_kit: buildAttackKit(existing), contactability: resolveProspectContactability(existing) });
         }
         continue;
       }
@@ -5225,7 +5227,7 @@ export async function bootstrapBveltTenant(
         demo_token: demoToken
       };
       newInserted++;
-      leads.push({ ...row, attack_kit: buildAttackKit(row) });
+      leads.push({ ...row, attack_kit: buildAttackKit(row), contactability: resolveProspectContactability(row) });
     }
   } catch (e: any) {
     console.warn("[bootstrapBveltTenant] fast discovery error:", e?.message || e);
