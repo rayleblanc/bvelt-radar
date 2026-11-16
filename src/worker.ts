@@ -3057,8 +3057,8 @@ export default {
               updated_at: now
             };
 
-            const quality = evaluateResearchEvidenceQuality(String(prospectRow.name || ""), incomingFacts);
-            mergedScrapling.quality_gate = { allowed: quality.allowed, reason: quality.reason || null, checked_at: now };
+            const quality = evaluateResearchEvidenceQuality(String(prospectRow.name || ""), incomingFacts, String(prospectRow.trade || ""));
+            mergedScrapling.quality_gate = { allowed: quality.allowed, reason: quality.reason || null, inferred_trade: quality.inferredTrade || null, checked_at: now };
             signalsObj.scrapling = mergedScrapling;
             if (!signalsObj.signals) signalsObj.signals = {};
             signalsObj.signals.scrapling = mergedScrapling;
@@ -12579,19 +12579,32 @@ export interface TradeInferenceResult {
   detectedClue?: string;
 }
 
-export function evaluateResearchEvidenceQuality(businessName: string, facts: any): { allowed: boolean; reason?: string } {
+export function evaluateResearchEvidenceQuality(businessName: string, facts: any, declaredTrade?: string | null): { allowed: boolean; reason?: string; inferredTrade?: string | null } {
   const name = String(businessName || "").trim();
   if (/\b(?:variation|variant)\s*#?\s*\d+\b/i.test(name)) return { allowed: false, reason: "synthetic_variation_name" };
   const title = String(facts && (facts.page_title || facts.title) || "");
   const description = String(facts && (facts.meta_description || facts.description) || "");
-  const governmentPage = /\b(department of|county department|city of|government|municipal|civic art|public works|parks and recreation|school district|arts and culture)\b/i.test(title + " " + description);
   const serviceTerms = Array.isArray(facts && facts.service_terms_observed) ? facts.service_terms_observed.filter(Boolean) : [];
   const capabilities = facts && facts.observed_capabilities || {};
+  const observedText = [title, description, ...serviceTerms].join(" ");
+  const governmentPage = /\b(department of|county department|city of|government|municipal|civic art|public works|parks and recreation|school district|arts and culture)\b/i.test(observedText);
   const hasServiceIntent = serviceTerms.length > 0 || Boolean(capabilities.quote_or_estimate_language_observed || capabilities.booking_or_appointment_observed || capabilities.click_to_call_observed || capabilities.whatsapp_link_observed);
   if (governmentPage && !hasServiceIntent) return { allowed: false, reason: "government_or_public_program_website_without_service_intent" };
+
+  // Mandatory post-Scrapling identity/rubric gate. Never silently relabel a
+  // discovered prospect from a weak clue on its website.
+  if (declaredTrade && String(declaredTrade).trim()) {
+    const inferred = inferTradeFromTextDetailed(name, title, description, serviceTerms.join(" "));
+    const declared = String(declaredTrade).toLowerCase().replace(/[\s-]+/g, "_");
+    const compatible = inferred.trade === declared
+      || (inferred.trade === "lawn_care" && declared === "landscaping")
+      || (inferred.trade === "landscaping" && declared === "lawn_care");
+    if (inferred.confidence === "high" && inferred.trade !== "general" && !compatible) {
+      return { allowed: false, reason: "scrapling_category_mismatch", inferredTrade: inferred.trade };
+    }
+  }
   return { allowed: true };
 }
-
 function inferTradeFromTextDetailed(...textParts: (string | undefined)[]): TradeInferenceResult {
   const combined = textParts.filter(Boolean).join(' ').toLowerCase();
   if (!combined.trim()) {
