@@ -1,120 +1,64 @@
-# AGENTS.md — Bvelt Radar (bvelt-radar)
+# AGENTS.md — Bvelt Radar
 
-Operating guide for any AI coding agent working in this repository.
+## Fuente de verdad y precedencia
 
-## Source of truth
+1. **Plan de ecosistema único:** `rayleblanc/LocalFlowPro/docs/BVELT_MASTER_PLAN.md`. Está sincronizado con `BVELT_MASTER_PLAN_2026-11-16_MASTER.md` de la Biblioteca (revisión integrada 2026-11-16, 1.929 líneas y adenda operativa posterior). Leerlo completo al cambiar contratos transversales.
+2. **Orden obligatorio:** P0–P11 del plan maestro; capas A–I siguen vigentes. Radar participa especialmente en P0/P1/P2/P5/P7/P8/P10/P11 y en el circuito BEM↔Radar.
+3. Este archivo define reglas específicas de Radar, aislamiento, outreach y operación. En seguridad/compliance prevalece sobre instrucciones genéricas de acelerar entregas.
+4. Inspeccionar siempre `main`, Cloudflare Worker activo, D1, bindings, cron, queues y logs actuales. Los snapshots documentales son históricos, no estado presente.
 
-1. **Ecosystem plan:** LocalFlowPro `docs/BVELT_MASTER_PLAN.md` (2026-11-15+).  
-   Radar is the **capture layer** of that circuit. Fetch/read that plan when changing cross-repo contracts (learning events, tenant bootstrap, identity links).
-2. **This file (AGENTS.md):** Radar-specific non-negotiables (Founder outreach compliance, deploy, isolation).  
-   Safety/compliance here wins over generic “ship faster” pressure.
-3. **Live `main` + Cloudflare Worker state:** inspect before editing. Another agent may have changed the same zone.
+## Rol y límites
 
-Legacy name `Bvelt_Intelligence_Documento_Maestro_v2.1.md` is superseded by LocalFlowPro `docs/BVELT_MASTER_PLAN.md`.
+- Radar es la capa de observación de mercado y prospección operativa: Founder Mode encuentra compradores para Bvelt; Tenant Mode busca oportunidades para el negocio cliente.
+- Radar conserva observaciones originales, fuentes, corridas, prospectos y estado operativo. BEM en LocalFlowPro conserva identidad canónica, evidencia, outcomes y memoria comercial autoritativa.
+- No implementar UI Bvelt, Stripe ni reglas Brain dentro de este repositorio.
+- Founder, Tenant y Public deben estar separados en tablas/consultas, rutas, credenciales, cache keys, idempotency keys, agregaciones, métricas y aprendizaje.
+- Nunca confiar en tenant_id crudo del cliente. Tenant auth/ownership debe venir del servicio Bvelt autenticado y validarse server-side.
+- No usar datos Founder para Tenant ni reutilizar cachés de otro tenant, perfil, territorio o snapshot.
 
----
+## Prioridades de ejecución
 
-## What Radar is (one paragraph)
+- P0/P1: no fabricar datos, proteger realms, procedencia y seguridad.
+- P2/P3: territorio, geografía y contrato de perfil.
+- P5: mensajes naturales, sanitización y contacto responsable.
+- P7: bootstrap Tenant automático desde perfil canónico; calidad y cobertura de discovery; Founder separado.
+- P10: observaciones y aprendizaje integrados con BEM, sin ledger duplicado.
+- P11: CI, logs, despliegue, observabilidad y smoke verificables.
 
-Radar **observes real markets**: discovers businesses, scores ICP/email trust/trade coherence, serves Founder prospecting and **Tenant buyer search**, emits learning/observation history, and never pretends a reply is a sale. Canonical **outcomes and revenue truth live in BEM (LocalFlowPro)**. Radar keeps source observations and operational prospecting records.
+## Reglas no negociables
 
----
+1. Nunca inventar observaciones, compradores, señales de demanda, ICP, evidencia, outcomes, ingresos, tests, migraciones, secrets, CI ni deploy.
+2. No confundir negocio proveedor/competidor con comprador potencial. El trade del prospecto no debe excluirlo automáticamente si su rol es comprador; buyer-fit y trade coherence deben usar contexto explícito.
+3. No degradar filtros de calidad, dedupe, coherencia de trade, consentimiento o límites para aumentar el volumen.
+4. Medir por separado tiles/áreas intentadas, consultas, fuentes, candidatos brutos, únicos, evaluados, aceptados/rechazados y motivos. Timeout, 401/403, rate limit, fuente caída, auth requerida, cron detenido o cola rota no son cero prospectos.
+5. Respetar archivos/índices geográficos versionados como fuente de cobertura. No fijar ciudades históricas ni Florida como universo. No usar VPN, GPS o dirección del desarrollador como territorio del tenant.
+6. Perfil Tenant debe provenir de Bvelt: trade, subtrades, servicios, buyer/ICP, ubicación, cobertura, idioma, zona horaria, estado de verificación, provenance, snapshot/version y correlation/idempotency IDs. No inventar campos faltantes; perfil incompleto debe quedar pendiente con error accionable.
+7. Cambios de perfil/territorio deben invalidar o versionar cachés y trabajos; no servir resultados antiguos como actuales.
+8. Cada prospecto debe tener identidad/fuente/timestamp/URL/territorio/categoría/señales/contactabilidad y motivo de inclusión/exclusión. `NO_CONTACT`, `UNKNOWN` y `NOT_FOUND` son estados distintos.
+9. Scraping solo desde fuentes públicas permitidas; respetar términos, privacidad, robots cuando corresponda, rate limits y cambios de HTML. No eludir bloqueos.
+10. No outreach automático al descubrir prospectos. Discovery y envío son capacidades separadas; confirmación humana y guardas de cumplimiento antes de contacto.
+11. Founder email fail-closed: dirección postal completa del remitente, verificación positiva del destinatario respaldada por proveedor, supresión/cooldown/idempotencia. Aprobación manual no omite guardas.
+12. Founder: máximo 3 toques (inicial + 2 seguimientos), al menos 5 días entre toques; detener al responder, rebotar, darse de baja o quejarse. Primera comunicación plain text y sin URL; seguimientos como máximo un enlace.
+13. No inventar métricas de velocidad, llamadas perdidas, conversión, auditorías gratis, garantías ni relación previa. Resend delivered significa aceptación del servidor receptor, no inbox placement.
+14. Mirror de bounces/suppressions en D1; no volver a contactar destinatarios suprimidos. Discovery puede seguir si email está bloqueado por compliance.
+15. No cambiar Gemini/Groq ni nombres de modelos sin instrucción explícita.
+16. No añadir servicios pagados/anuncios sin aprobación. Mantener operación compatible con recursos/capa gratuita.
+17. Secrets: jamás en texto plano, código, logs, tool output o chat. `GITHUB_ACTIONS_TOKEN` y credenciales deben ser Worker secrets cifrados, nunca vars plaintext. No leer ni revelar valores.
+18. Migraciones productivas, rotación de secrets y cambios de bindings requieren aprobación específica. No considerar una autorización general de código como permiso para rotar credenciales.
+19. **Autorización permanente limitada:** después de una fase de código terminada, diff revisado y todos los checks requeridos verdes, está autorizado el deploy de producción de Radar. No extiende esta autorización al Worker Bvelt/LocalFlowPro. Antes de deploy verificar secretos/bindings/configuración para no sobrescribirlos.
+20. Antes de merge, leer logs completos de los jobs. No saltarse branch protection.
+21. Después de merge/deploy confirmar SHA, versión Worker activa con 100% tráfico, bindings/secrets/schedules intactos, cron Founder activo y logs/smoke post-deploy. Build verde no equivale a producción verificada.
+22. Mantener Founder discovery, outreach, queues y cron operativos; no deshabilitarlos sin instrucción explícita.
+23. Mantener leases, retries, DLQ y reaper recuperables; no perder jobs al reiniciar ni duplicar acciones.
+24. Cambios de contrato Bvelt↔Radar deben actualizarse coordinadamente en ambos repos o versionar API. No romper producción silenciosamente.
+25. No introducir refactors ajenos al requisito ni mergear ramas divergentes completas sin revisión selectiva.
 
-## Place in the Master Plan circuit
+## Protocolo
 
-```
-Radar (this repo) → BEM → Intelligence → Bvelt UI → Brain → outcomes → BEM → learning back to Radar
-```
-
-Relevant Master Plan layers for this repo:
-
-| Layer | Radar responsibility |
-|-------|----------------------|
-| **B** Territory → Leads | Tenant bootstrap/search/leads quality; no silent empty; diagnostics |
-| **D** Learning closed | Accept BEM outbox events; Founder≠Tenant counters; idempotent writes |
-| **G** Radar depth | ICP coverage, change detection, dedup, observation history, cost-controlled sidecar |
-| **I** Anti-extinction | Secrets encrypted; degradable paths; no fabricated prod events |
-
-Do **not** implement Bvelt UI, Stripe, or Brain rules inside this repo.
-
----
-
-## Non-negotiable rules
-
-1. **Full ambition.** Do not silently delete target capabilities from the ecosystem architecture because of missing customers or budget.
-2. **Never invent** evidence, outcomes, revenue, tests, migrations, secrets, CI results, or deployments.
-3. Label fixtures, modeled metrics, real observations, and verified outcomes **distinctly**.
-4. Before changing code: inspect `main`, PRs, CI **job logs**, recent collaborator commits. Diff first.
-5. Do not merge stale branches without reconciling against current `main`.
-6. **Isolate** Founder, Tenant, and Public scopes in storage, routes, credentials, idempotency keys, aggregation, and reporting.
-7. Tenant identity/authorization for learning is **service-to-service** and scoped to what Bvelt authenticated — never trust a raw client tenant id as authority.
-8. **BEM is memory; Brain is intelligence** (both primarily in LocalFlowPro). Radar does not become a second outcome ledger of record.
-9. Learning writes are **idempotent**. Conflicts → **409**. Unconfirmed persistence → retryable failure, **never** success.
-10. Unknown revenue is **NULL**. Sent/delivered ≠ reply ≠ booking ≠ win ≠ sale. Tenant counters must not conflate those events.
-11. Never create fictitious production events. Inspect real post-deploy Founder runs for discovery, filters, email, Telegram.
-12. Do not change Gemini/Groq cascade or model names without Ray’s explicit instruction (if used here).
-13. Do not introduce new paid services/ads without approval.
-14. Never expose secrets in code, logs, tool output, or chat. Rotate leaks. Keep `GITHUB_ACTIONS_TOKEN` and credentials as **encrypted Worker secrets**, never plaintext vars.
-15. Production migrations / secret rotation / binding changes require Ray’s explicit approval unless already granted for the task.
-16. **Standing authorization for `bvelt-radar` only:** after a completed code phase, exact diff reviewed, and every required GitHub check **green**, deploy to production Worker. This does **not** authorize Bvelt (LocalFlowPro) deploys.
-17. Before merge: read Actions job logs, not only badges. Never bypass branch protection.
-18. After merge/deploy: confirm Worker version at **100%**, bindings/secrets/schedules intact, Founder cron active. Do not claim deploy without Cloudflare confirmation.
-19. Keep Radar operational. Do not disable Founder discovery, outreach, queues, or cron unless Ray explicitly instructs.
-20. Founder outreach: **max three touches** (initial + two follow-ups), ≥5 days apart; stop on reply, bounce, unsubscribe, or complaint. Per-touch idempotency + historical counts protect legacy prospects.
-21. Founder email **fail closed** unless: sender has complete physical postal address, recipient has positive provider-backed verification, and suppression/cooldown/idempotency pass. Manual approval does not bypass these controls.
-22. Founder first-touch: **plain text, no URL**. Follow-ups: at most one product link. Never invent site-speed metrics, missed-call facts, conversion %, free audits, or response-time guarantees.
-23. Resend “delivered” = receiving server accepted the message, **not** inbox placement. State Gmail-folder limits when unknown.
-24. Mirror provider bounce suppressions into Radar D1; never contact suppressed addresses again. Discovery may continue while email is held for compliance.
-25. Never claim production success from a green build or “Worker exists” alone.
-26. End of session: report files, commit/PR, CI logs, Cloudflare deploy evidence, post-deploy runtime evidence, risks, Ray actions.
-
----
-
-## Repository ownership — bvelt-radar
-
-- Owns **original market observations** and operational prospecting records.
-- Preserve source records; link to BEM via canonical business IDs when available — do not silently steal ownership of outcomes.
-- Tenant learning ingestion is authenticated and tenant-scoped from Bvelt.
-- Founder learning is a **separate** scope and contract; never route Founder through Tenant learning ingestion.
-- Keep Founder and Tenant datasets separate in storage, routes, aggregation, and reporting.
-
-### Contracts with LocalFlowPro
-
-- Tenant bootstrap / search / leads APIs consumed by `radarBootstrapService` and related Bvelt clients.
-- Learning events from BEM outbox (`/learning/events` or equivalent) — idempotent, realm-separated counters.
-- Observation history append-only for tenant territory snapshots when Master Plan **Territory Lock** is implemented.
-
-When changing request/response shapes, update both repos or version the API; do not break Bvelt prod silently.
-
----
-
-## Working sequence
-
-1. Verify repo + Cloudflare state.
-2. Prefer Master Plan items that unblock **B** (tenant leads quality/diagnostics) and **D** (learning integrity) over speculative features.
-3. Keep migrations separate, versioned, reconciled against live D1, with rollback notes.
-4. CI green before merge; deploy per standing Radar authorization only when checks pass.
-
----
-
-## Anti-patterns
-
-- Treating a positive reply as a won deal in counters.
-- Mixing Founder and Tenant learning tables or routes.
-- Returning success when D1 write was not confirmed.
-- Plaintext secrets in `wrangler` vars or logs.
-- Disabling Founder cron “temporarily” without Ray.
-- Inventing compliance-sensitive claims in outreach copy.
-- Changing Bvelt app code in this repository.
-
----
-
-## Collaboration with other AIs
-
-- Read current `main` before writes.
-- Coordinate learning/bootstrap contract changes with LocalFlowPro agents.
-- Tag work to Master Plan layer IDs (`B6`, `D3`, `G2`, …) when possible.
-
----
-
-*Aligned to BVELT_MASTER_PLAN · bvelt-radar · 2026-11-15*
+1. Leer este archivo y el plan maestro completo.
+2. Verificar repositorio, ramas, PRs, commits, workflows y logs; inspeccionar Worker, D1, cron, queues, KV, sidecar y bindings afectados.
+3. Mapear requisito → código → test → telemetría → criterio de producción.
+4. Comparar esquema/migraciones con D1 real antes de migrar. Mantener migraciones versionadas y reversibles.
+5. Separar cambios de Founder/Tenant y probar aislamiento, idempotencia, errores de fuente y recuperación.
+6. Tras checks verdes y diff revisado, usar la autorización permanente de deploy Radar; comprobar versión 100%, bindings, cron y runtime.
+7. Reportar archivos, SHA, PR/merge, logs, pruebas, deploy/smoke, riesgos y bloqueos reales.
