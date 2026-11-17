@@ -12,4 +12,6 @@ VALUES
   ('0030_tenant_profile_contract.sql', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
    'Applied and schema-verified before ledger initialization; legacy tenant rows retain UNKNOWN verification.'),
   ('0031_source_evidence_provenance.sql', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
-   'Applied with a pre-migration backup; all legacy website-scrape evidence preserved as DECLARED.');
+   'Applied with a pre-migration backup; all legacy website-scrape evidence preserved as DECLARED.'),
+  ('0032_schema_migration_ledger.sql', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+   'Created the migration ledger; older untracked migrations are not backfilled.');
