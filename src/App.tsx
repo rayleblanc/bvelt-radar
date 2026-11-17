@@ -736,6 +736,32 @@ export default function App() {
       return ["http:", "https:"].includes(parsed.protocol) && parsed.hostname ? parsed.toString() : null;
     } catch { return null; }
   };
+  const generateProspectMessage = async (prospect: Prospect, channel: "email" | "whatsapp") => {
+    setGeneratingMessageIds(prev => ({ ...prev, [prospect.id]: true }));
+    setErrorState(null);
+    try {
+      const response = await fetch(apiUrl + "/api/prospects/attack-kit", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json", "X-Tenant-Id": selectedTenantId || "founder" },
+        body: JSON.stringify({ prospect_id: prospect.id, channel })
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        setErrorState(data.error === "unauthorized" ? "Sesión expirada: vuelve a autenticarte." : "No se pudo generar el mensaje: " + (data.error || response.status));
+        return;
+      }
+      if (!data.generated_message?.body) {
+        setErrorState("El generador no devolvió un mensaje utilizable.");
+        return;
+      }
+      setAttackKits(prev => ({ ...prev, [prospect.id]: data }));
+    } catch (error: any) {
+      setErrorState("Error de conexión al generar el mensaje: " + (error?.message || "desconocido"));
+    } finally {
+      setGeneratingMessageIds(prev => ({ ...prev, [prospect.id]: false }));
+    }
+  };
 
   // Copy proposal draft trigger
   const copyToClipboard = (text: string, id: string) => {
@@ -2370,40 +2396,33 @@ const submitDecision = async (prospectId: string, action: string) => {
                               )}
                               {/* Attack kit: call + SMS + email — product surface */}
                               <div className="bg-indigo-950/30 border border-indigo-800/40 rounded-xl p-3 space-y-2">
-                                <div className="flex items-center justify-between">
+                                <div className="flex flex-wrap items-center justify-between gap-2">
                                   <span className="text-[10px] font-bold uppercase text-indigo-300">Kit de ataque</span>
-                                  <button
-                                    type="button"
-                                    className="text-[10px] text-indigo-400 font-bold"
-                                    disabled={Boolean(generatingMessageIds[p.id])}
-                                    onClick={async () => {
-                                      setGeneratingMessageIds(prev => ({ ...prev, [p.id]: true }));
-                                      setErrorState(null);
-                                      try {
-                                        const channel = isVerifiedEmailRecipient(p) ? 'email' : hasDirectWhatsAppRecipient(p.phone) ? 'whatsapp' : 'email';
-                                        const r = await fetch(apiUrl + "/api/prospects/attack-kit", {
-                                          method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': selectedTenantId || 'founder' },
-                                          body: JSON.stringify({ prospect_id: p.id, channel })
-                                        });
-                                        const data = await r.json().catch(() => ({}));
-                                        if (!r.ok) {
-                                          setErrorState(data.error === 'unauthorized' ? 'Sesión expirada: vuelve a autenticarte.' : 'No se pudo generar el mensaje: ' + (data.error || r.status));
-                                          return;
-                                        }
-                                        if (!data.generated_message?.body) {
-                                          setErrorState('El generador no devolvió un mensaje utilizable.');
-                                          return;
-                                        }
-                                        setAttackKits(prev => ({ ...prev, [p.id]: data }));
-                                      } catch (error: any) {
-                                        setErrorState('Error de conexión al generar el mensaje: ' + (error?.message || 'desconocido'));
-                                      } finally {
-                                        setGeneratingMessageIds(prev => ({ ...prev, [p.id]: false }));
-                                      }
-                                    }}
-                                  >
-                                    {generatingMessageIds[p.id] ? 'Generando…' : attackKits[p.id] ? 'Regenerar mensaje IA' : 'Generar mensaje IA'}
-                                  </button>
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    <button
+                                      type="button"
+                                      className="text-[10px] text-indigo-300 font-bold"
+                                      disabled={Boolean(generatingMessageIds[p.id])}
+                                      onClick={() => void generateProspectMessage(p, emailRecipient ? "email" : hasDirectWhatsAppRecipient(p.phone) ? "whatsapp" : "email")}
+                                    >
+                                      {generatingMessageIds[p.id] ? "Generando…" : emailRecipient ? "Generar correo IA" : hasDirectWhatsAppRecipient(p.phone) ? "Generar WhatsApp IA" : "Generar mensaje IA"}
+                                    </button>
+                                    {emailRecipient && hasDirectWhatsAppRecipient(p.phone) && (
+                                      <button
+                                        type="button"
+                                        className="text-[10px] text-emerald-300 font-bold"
+                                        disabled={Boolean(generatingMessageIds[p.id])}
+                                        onClick={() => void generateProspectMessage(p, "whatsapp")}
+                                      >
+                                        Generar WhatsApp
+                                      </button>
+                                    )}
+                                    {emailRecipient && (
+                                      <span className="text-[9px] text-slate-500">
+                                        {isVerifiedEmailRecipient(p) ? "Email validado" : "Email · revisión manual"}
+                                      </span>
+                                    )}
+                                  </div>
                                 </div>
                                 {attackKits[p.id] ? (
                                   <div className="space-y-2 text-[10px] text-slate-300 font-mono">
