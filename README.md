@@ -48,7 +48,7 @@ npx wrangler secret put TELEGRAM_CHAT_ID       # Chat ID de Telegram
 # Opcionales:
 npx wrangler secret put GEMINI_FOUNDER_API_KEY   # Key Principal para Cascada Gemini
 npx wrangler secret put GEMINI_SECONDARY_API_KEY # Key Secundaria para ampliación de cuota
-npx wrangler secret put GROQ_API_KEY             # Key de Groq (Llama-3.3-70b)
+npx wrangler secret put GROQ_API_KEY             # Key de Groq (GPT-OSS 20B/120B)
 npx wrangler secret put HUNTER_API_KEY           # Búsqueda de emails en dominio (max 8/día)
 npx wrangler secret put ABSTRACT_API_KEY         # Validación de entregabilidad
 npx wrangler secret put GITHUB_ACTIONS_TOKEN      # GitHub Actions: dispatch de Scrapling (SIEMPRE como Secret)
@@ -117,8 +117,19 @@ Some ideas from earlier strategy notes were rejected rather than blindly added:
 
 1. **Direct SMTP handshake from Workers** — not a reliable/appropriate way to prove mailbox deliverability in this runtime.
 2. **Indeed scraping/API assumption** — no verified public anonymous search API was found, so Radar does not depend on undocumented endpoints.
-3. **Workers AI as a Gemini/Groq fallback** — deliberately not added because the existing Gemini/Groq cascade is preserved exactly.
+3. **Workers AI fallback** — enabled after Groq and paid-tier Gemini, using the active GLM-4.7 Flash model; the daily free Neurons allocation is enforced by Cloudflare.
 4. **Vectorize as a mandatory dependency** — not forced into deployment because it would require provisioning an external Vectorize index. Current deterministic D1 dedup remains the fail-safe.
+
+## AI provider policy (2026-11-17)
+
+Radar uses a privacy-aware provider cascade for tenant business data:
+
+1. **Groq first:** `openai/gpt-oss-20b`, then `openai/gpt-oss-120b`. Both are production models listed in Groq's Free Plan rate-limit table. Published base limits are 30 RPM, 1,000 RPD, 8,000 TPM and 200,000 TPD per model and organization; verify the exact organization limits in Groq Console. Enable Zero Data Retention in Groq Data Controls for the strongest available retention posture.
+2. **Gemini only on confirmed paid processing:** stable model order is `gemini-3.8-flash`, then `gemini-3.5-flash-lite`. Both appear in the free-tier pricing table, but Google's unpaid-service terms permit use of submitted content to improve products and human review. Do not send tenant-confidential or personal data through unpaid Gemini quota. The Worker defaults `GEMINI_PAID_TIER_CONFIRMED=false`; set it to `true` only after verifying that the API project has active billing and is using paid quota.
+3. **Cloudflare Workers AI:** `@cf/zai-org/glm-4.7-flash`, with zero data retention and a 10,000-Neuron daily free allocation. The Worker falls through to deterministic templates if the provider is unavailable or the free allocation is exhausted.
+4. **Deterministic fallback:** never marks an AI-generated message as delivered and never invents evidence.
+
+Tenant ICP expansion follows Groq first and uses Gemini only when paid processing is confirmed. Founder outreach follows the same privacy gate. Model IDs and the paid-tier switch are configured in `wrangler.toml`; provider keys remain Cloudflare Secrets.
 
 ## Radar 16 — Autonomous Opportunity Engine
 
