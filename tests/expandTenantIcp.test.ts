@@ -83,7 +83,7 @@ describe("expandTenantIcp provider fallback and tenant budget", () => {
     const db = createDb(0);
     let calls = 0;
     const env: any = { RADAR_DB: db, AI: { async run() { calls += 1; return {}; } } };
-    const result = await expandTenantIcp(env, tenant);
+    const result = await expandTenantIcp(env, { ...tenant });
     assert.equal(result, null);
     assert.equal(calls, 0);
   });
@@ -91,7 +91,7 @@ describe("expandTenantIcp provider fallback and tenant budget", () => {
   it("releases the reserved unit when every provider returns unusable output", async () => {
     const db = createDb();
     const env: any = { RADAR_DB: db, AI: { async run() { return { response: "not json" }; } } };
-    const result = await expandTenantIcp(env, tenant);
+    const result = await expandTenantIcp(env, { ...tenant });
     assert.equal(result, null);
     assert.ok(db.statements.some(x => x.sql.includes("SET ai_units = MAX(0, ai_units -")));
   });
