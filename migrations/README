@@ -56,6 +56,14 @@ Apply each file exactly once, in the order below. Several historical files share
 
 The legacy database had no `d1_migrations` history table. `0032_schema_migration_ledger.sql` introduces `radar_schema_migrations` and records 0030/0031 after live verification. Older migrations (0001–0029) remain unbackfilled because reliable per-file deployment records are unavailable. For all future migrations, the ledger must be updated in the same migration batch; never assume a file has run because it exists in Git.
 
+### Verified production application (2026-11-17)
+
+- `0030_tenant_profile_contract.sql`: applied; both pre-existing tenant rows remain at `contract_version = 0` and `verification_state = 'UNKNOWN'` until a canonical Bvelt profile synchronizes them.
+- `0031_source_evidence_provenance.sql`: applied; all 56 prior Founder website-scrape rows were preserved and classified as `DECLARED`, with 0 reclassified as `VERIFIED`.
+- Backup retained: `source_evidence_backup_pre_p1_20261117` (56 rows).
+- `0032_schema_migration_ledger.sql`: applied; ledger now records 0030, 0031 and 0032. Legacy 0001–0029 are not backfilled.
+- Tenant discovery was not run and no synthetic tenant profile or outcome was inserted.
+
 ## Important migration notes
 
 - `0030_tenant_profile_contract.sql` adds the versioned Bvelt → Radar Tenant profile contract. Legacy rows retain `contract_version = 0` and `verification_state = 'UNKNOWN'`; they must not be silently treated as verified.
