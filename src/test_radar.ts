@@ -1,6 +1,6 @@
 declare const process: any;
 
-import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, resolveTenantBuyerSegments, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey, notifyOnce, isVerifiedDeliverableEmail, evaluateFounderOutreachEligibility, buildTechnicalAuditSnapshot, isEmailValidatedForOutreach, isCompletePostalAddress, sendTelegramWithRetry, extractEmailAddress, evaluateResearchEvidenceQuality, classifyReplyText, getTelegramApprovalFeedback, getManualSendPreflightError, hasAIGenerationProvider, resolveProspectContactability, buildProspectEvidenceContext, buildScheduledRunId, getCurrentDaySenderCount, normalizeWhatsAppPhone, extractPhoneDigits, hasUsableContactChannel, hasEnrichableContactData, buildWhatsAppClickToChatUrl, buildWhatsAppOutreachBody, shouldUseManualWhatsAppFallback, isDiscoveryInfrastructureFailure, hasConfirmedWhatsAppOptIn, isValidWhatsAppConsentEvidenceRef } from './worker';
+import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey, notifyOnce, isVerifiedDeliverableEmail, evaluateFounderOutreachEligibility, buildTechnicalAuditSnapshot, isEmailValidatedForOutreach, isCompletePostalAddress, sendTelegramWithRetry, extractEmailAddress, evaluateResearchEvidenceQuality, classifyReplyText, getTelegramApprovalFeedback, getManualSendPreflightError, hasAIGenerationProvider, resolveProspectContactability, buildProspectEvidenceContext, buildScheduledRunId, getCurrentDaySenderCount, normalizeWhatsAppPhone, extractPhoneDigits, hasUsableContactChannel, hasEnrichableContactData, buildWhatsAppClickToChatUrl, buildWhatsAppOutreachBody, shouldUseManualWhatsAppFallback, isDiscoveryInfrastructureFailure, hasConfirmedWhatsAppOptIn, isValidWhatsAppConsentEvidenceRef } from './worker';
 import { DEFAULT_FOUNDER_MISSION, MissionConfig } from './worker';
 import { buildResendIdempotencyKey, buildBrandedEmailHtml, resolveBveltSender, inspectOutboundEmailAuth, normalizeOutreachBody } from './emailDispatcher';
 import { fetchPermitContractors } from './permitSources';
@@ -8,6 +8,7 @@ import { pickTargets, findPlace } from './geoFrontier';
 import { isOffIcpName, sanitizeEmail } from './emailSanitizer';
 import { learningCounterDelta, readScopedLearningStats, recordScopedLearningEvent } from './learningIntegrity';
 import { toWhatsAppUrl, toSmsUrl, toTelUrl } from "./phoneUtils";
+import { resolveTenantBuyerSegments, resolveTenantBuyerSegmentsForProfile } from "./tenantBuyerSegments.js";
 
 console.log("=========================================");
 console.log("RUNNING BVELT RADAR CUSTOM MISSION TESTS");
@@ -320,6 +321,8 @@ tests.push({
   name: "Tenant buyer segments never fall back to the tenant's own trade or generic unrelated markets",
   run: () => {
     const hvacBuyers = resolveTenantBuyerSegments("HVAC");
+    const plumbingBuyers = resolveTenantBuyerSegmentsForProfile("Plumbing", "Water Heater Repair");
+    assert(plumbingBuyers.includes("property management"), "Buyer map should use the contractor trade before a narrow service niche");
     assert(hvacBuyers.length > 0, "Known tenant trade should resolve buyer segments");
     assert(!hvacBuyers.some(value => value.toLowerCase() === "hvac"), "Tenant must not prospect for more HVAC businesses");
     assert(resolveTenantBuyerSegments("specialized unknown service").length === 0, "Unknown trade must fail closed instead of defaulting to property management");
