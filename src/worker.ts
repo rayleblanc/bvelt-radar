@@ -86,6 +86,19 @@ export interface RadarJobMessage {
 
 export const WORKERS_AI_FALLBACK_MODEL = "@cf/zai-org/glm-4.7-flash";
 
+export function normalizeGeneratedMessage(
+  value: any,
+  channel: "email" | "whatsapp"
+): { subject: string; body: string } | null {
+  const body = typeof value?.body === "string" ? value.body.trim() : "";
+  if (!body) return null;
+  const subject = channel === "whatsapp"
+    ? ""
+    : (typeof value?.subject === "string" ? value.subject.trim() : "");
+  if (channel === "email" && !subject) return null;
+  return { subject, body };
+}
+
 export function extractWorkersAiText(result: any): string {
   if (typeof result === "string") return result.trim();
   if (typeof result?.response === "string") return result.response.trim();
@@ -10737,10 +10750,11 @@ export async function generateAICopy(
             const raw = data.choices?.[0]?.message?.content;
             if (raw) {
               const content = typeof raw === "string" ? JSON.parse(raw) : raw;
-              if (content.subject && content.body) {
+              const normalized = normalizeGeneratedMessage(content, channel);
+              if (normalized) {
                 console.log(`[AI Cascade] Success using Groq ${groqModel}`);
                 await commitBudget(env.RADAR_DB, tenantId, 'ai_units', 1);
-                return { subject: content.subject, body: content.body, source: "groq" };
+                return { ...normalized, source: "groq" };
               }
             }
           } else {
@@ -10757,9 +10771,10 @@ export async function generateAICopy(
     if (apiKey && String(env.GEMINI_PAID_TIER_CONFIRMED || "").trim().toLowerCase() === "true") {
       for (const model of modelsToTry) {
         const res = await tryGemini(model, apiKey, prompt);
-        if (res) {
+        const normalized = normalizeGeneratedMessage(res, channel);
+        if (normalized) {
           await commitBudget(env.RADAR_DB, tenantId, 'ai_units', 1);
-          return { subject: String(res.subject), body: String(res.body), source: "gemini" };
+          return { ...normalized, source: "gemini" };
         }
       }
     }
@@ -10781,10 +10796,11 @@ export async function generateAICopy(
         const jsonMatch = rawText.match(/\{[\s\S]*\}/);
         if (jsonMatch) {
           const content = JSON.parse(jsonMatch[0]);
-          if (content.subject && content.body) {
+          const normalized = normalizeGeneratedMessage(content, channel);
+          if (normalized) {
             console.log(`[AI Cascade] Success using Workers AI backup`);
             await commitBudget(env.RADAR_DB, tenantId, 'ai_units', 1);
-            return { subject: String(content.subject), body: String(content.body), source: "workers_ai" };
+            return { ...normalized, source: "workers_ai" };
           }
         }
       } catch (e: any) {
@@ -10799,6 +10815,12 @@ export async function generateAICopy(
   // 4. Deterministic fallback is explicitly labelled; Tenant must never fall back to a Bvelt sales pitch.
   console.log(`[AI Cascade] All AI providers failed or budget exceeded. Reverting to deterministic backup template.`);
   if (tenantInfo) {
+    if (channel === "whatsapp") {
+      const body = isSpanish
+        ? `Hola ${prospect.name || "equipo"}, soy de ${tenantInfo.tenant_name}. ¿Está bien si le hago una pregunta breve sobre cómo gestionan las consultas de clientes?`
+        : `Hi ${prospect.name || "team"}, I'm reaching out from ${tenantInfo.tenant_name}. Would it be okay if I asked how your team handles new customer enquiries?`;
+      return { subject: "", body, source: "template" };
+    }
     const services = tenantServices || String(tenantInfo.industry || "configured services");
     const area = tenantAreas ? ` in ${tenantAreas}` : "";
     const goal = String(tenantInfo.campaign_goal || tenantInfo.messaging_angle || "your upcoming service needs");
@@ -10810,8 +10832,8 @@ export async function generateAICopy(
   }
   if (channel === "whatsapp") {
     const body = isSpanish
-      ? `Hola ${prospect.name || "equipo"}, soy Rainer, de Bvelt. ¿Cómo dan seguimiento a las consultas de clientes cuando el equipo está ocupado? Estoy creando una herramienta para organizar ese proceso. ¿Le sería útil ver un ejemplo?`
-      : `Hi ${prospect.name || "team"} — I'm Rainer from Bvelt. How do you follow up with customer enquiries when the team is busy? I'm building a tool to help organize that process. Would an example be useful?`;
+      ? `Hola ${prospect.name || "equipo"}, encontré su negocio al buscar proveedores de ${prospect.trade || "servicios"} en ${prospect.city || "la zona"}. ¿Está bien si le hago una pregunta breve sobre cómo dan seguimiento a las consultas?`
+      : `Hi ${prospect.name || "team"}, I came across your business while looking at ${prospect.trade || "local service"} providers in ${prospect.city || "your area"}. Would it be okay if I asked how you follow up with new customer enquiries?`;
     return { subject: "", body, source: "template" };
   }
   const fallback = getTradePsychologyFallback(prospect.name, prospect.trade, prospect.city, bveltAngle, language, prospect.phone, prospect.demo_token, prospect.signal_event, prospect.signal_area, env, prospect.signals_json || prospect.signals);
