@@ -150,6 +150,17 @@ export function getBudgetLimit(unitType: string): number {
   }
 }
 
+export function buildBudgetUsageSnapshot(budgetRow: Record<string, any> | null | undefined) {
+  const row = budgetRow || {};
+  return {
+    discovery: { used: row.discovery_units || 0, max: getBudgetLimit('discovery_units') },
+    enrichment: { used: row.enrichment_units || 0, max: getBudgetLimit('enrichment_units') },
+    AI: { used: row.ai_units || 0, max: getBudgetLimit('ai_units') },
+    Hunter: { used: row.hunter_units || 0, max: getBudgetLimit('hunter_units') },
+    outreach: { used: row.outreach_units || 0, max: getBudgetLimit('outreach_units') }
+  };
+}
+
 export async function reserveBudget(
   db: D1Database,
   tenantId: string,
@@ -298,6 +309,8 @@ export async function getRemainingBudget(db: D1Database, tenantId: string, unitT
     if (!row) return limit;
     return Math.max(0, limit - (row[unitType] || 0));
   } catch (e) {
+    const error = e instanceof Error ? { name: e.name, message: e.message.slice(0, 240) } : { message: String(e).slice(0, 240) };
+    console.error("[Budget Governor] Budget read failed", { tenantId, day, unitType, error });
     return 0; // fail closed
   }
 }
@@ -3872,13 +3885,7 @@ async function handleHealth(env: Env, headers: Record<string, string>, tenantId:
     outreach_pause: outreachPause,
     circuit_breaker: circuitBreakerActive,
     circuit_breaker_reason: circuitBreakerReason,
-    today: {
-      discovery: { used: budgetRow.discovery_units || 0, max: 45 },
-      enrichment: { used: budgetRow.enrichment_units || 0, max: 30 },
-      AI: { used: budgetRow.ai_units || 0, max: 10 },
-      Hunter: { used: budgetRow.hunter_units || 0, max: 8 },
-      outreach: { used: budgetRow.outreach_units || 0, max: 3 }
-    },
+    today: buildBudgetUsageSnapshot(budgetRow),
     telegram_configured: telegramConfigured,
     last_telegram_ok: lastTelegramOk,
     prospects_today: prospectsToday,
@@ -4319,13 +4326,7 @@ async function handleStats(env: Env, headers: Record<string, string>): Promise<R
     outreach_pause: outreachPause,
     circuit_breaker: circuitBreakerActive,
     circuit_breaker_reason: circuitBreakerReason,
-    today: {
-      discovery: { used: budgetRow.discovery_units || 0, max: 45 },
-      enrichment: { used: budgetRow.enrichment_units || 0, max: 30 },
-      AI: { used: budgetRow.ai_units || 0, max: 10 },
-      Hunter: { used: budgetRow.hunter_units || 0, max: 8 },
-      outreach: { used: budgetRow.outreach_units || 0, max: 3 }
-    }
+    today: buildBudgetUsageSnapshot(budgetRow)
   }, { headers });
 }
 
