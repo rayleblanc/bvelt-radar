@@ -4103,7 +4103,7 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
 
             const provStatus = env.RESEND_API_KEY ? "✅ Resend (3,000/mes gratis)" : env.BREVO_API_KEY ? "✅ Brevo (300/día gratis)" : "⚠️ Simulado (Falta RESEND_API_KEY)";
             const webhookStatus = env.TELEGRAM_WEBHOOK_SECRET ? "🔒 Protegido con Secret Token" : "⚡ Activo (validación por Chat ID)";
-            const statusMsg = `<b>📊 Bvelt Radar Status</b>\n\n<b>Email Outbound:</b> ${provStatus}\n<b>Bot Telegram:</b> ✅ Conectado (${webhookStatus})\n<b>Chat ID:</b> <code>${chatId}</code>\n<b>Plataforma:</b> <a href="https://bvelt.app">https://bvelt.app</a>\n\n<i>Escribe /digest para ver las 3 mejores oportunidades o /testmail tu@correo.com para probar el envío.</i>`;
+            const statusMsg = `<b>📊 Bvelt Radar Status</b>\n\n<b>Email Outbound:</b> ${provStatus}\n<b>Bot Telegram:</b> ✅ Conectado (${webhookStatus})\n<b>Chat ID:</b> <code>${chatId}</code>\n<b>Plataforma:</b> <a href="https://bvelt.app">https://bvelt.app</a>\n\n<i>Escribe /digest para recibir el estado operativo de las últimas 24 h o /testmail tu@correo.com para probar el envío.</i>`;
 
             await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
               method: "POST",
@@ -4234,17 +4234,20 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
         }).catch(() => {});
 
       } else if (command === "/digest" || command === "digest" || command === "/resumen" || command === "resumen") {
-        const topOpps = await env.RADAR_DB.prepare(
-          "SELECT * FROM prospects WHERE email IS NOT NULL AND status IN ('queued', 'enriched', 'drafted') ORDER BY score DESC LIMIT 3"
-        ).all() as any;
-
-        if (topOpps.results && topOpps.results.length > 0) {
-          await dispatchInteractiveTelegramAlert(topOpps.results, [], [], env);
-        } else {
+        // The daily digest is the canonical 24-hour operational summary.
+        // Do not duplicate a narrower legacy query that only looked at
+        // queued/enriched/drafted prospects with email and hid other approvals.
+        const digest = await sendRadarDigest(env, { force: true });
+        if (!digest.sent) {
+          const detail = digest.telegram?.description || digest.telegram?.error || digest.telegram?.message || "No se pudo confirmar la entrega del resumen a Telegram.";
           await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ chat_id: chatId, text: "🔍 No hay prospectos pendientes en cola en este momento.", parse_mode: "HTML" }),
+            body: JSON.stringify({
+              chat_id: chatId,
+              text: `⚠️ No pude confirmar el envío del resumen. Estado: ${escapeHtml(digest.verdict)}. ${escapeHtml(String(detail).slice(0, 240))}`,
+              parse_mode: "HTML"
+            }),
             signal: AbortSignal.timeout(15000)
           }).catch(() => {});
         }
@@ -4260,7 +4263,7 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
 
       } else if (command === "/start" || command === "start" || command === "/help" || command === "help" || command === "/ayuda" || command === "ayuda" || command === "hola" || command === "hi" || command === "hey") {
         const provStatus = env.RESEND_API_KEY ? "✅ Resend Activo" : env.BREVO_API_KEY ? "✅ Brevo Activo" : "⚠️ Simulado (Configura RESEND_API_KEY)";
-        const helpMsg = `🤖 <b>Bvelt Radar Founder Bot</b>\n\n¡Bot conectado y listo para interactuar!\n\n<b>Comandos disponibles:</b>\n• /status - Ver cuotas y estado de proveedores\n• /digest - Enviar las 3 mejores oportunidades con botones para aprobar\n• /testmail &lt;correo&gt; - Enviar email de prueba inmediato\n• /emailstatus - Comprobar SPF, DKIM, DMARC y Resend\n• /wa-optin ID URL_O_REFERENCIA - Registrar consentimiento documentado\n• /id - Ver tu Telegram Chat ID\n• /help - Mostrar este menú\n\n<b>Email Outbound:</b> ${provStatus}`;
+        const helpMsg = `🤖 <b>Bvelt Radar Founder Bot</b>\n\n¡Bot conectado y listo para interactuar!\n\n<b>Comandos disponibles:</b>\n• /status - Ver cuotas y estado de proveedores\n• /digest - Enviar el resumen operativo de las últimas 24 h\n• /testmail &lt;correo&gt; - Enviar email de prueba inmediato\n• /emailstatus - Comprobar SPF, DKIM, DMARC y Resend\n• /wa-optin ID URL_O_REFERENCIA - Registrar consentimiento documentado\n• /id - Ver tu Telegram Chat ID\n• /help - Mostrar este menú\n\n<b>Email Outbound:</b> ${provStatus}`;
         await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -4271,7 +4274,7 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
       } else {
         // Fallback for ANY OTHER free text message so the bot NEVER stays silent
         const snippet = msgText.length > 60 ? msgText.substring(0, 60) + "..." : msgText;
-        const fallbackMsg = `🤖 <b>Bvelt Radar Founder Bot</b>\n\nRecibí tu mensaje: <i>"${escapeHtml(snippet)}"</i>\n\n<b>Comandos disponibles:</b>\n• /status - Ver estado del sistema\n• /digest - Ver oportunidades pendientes de aprobación\n• /testmail &lt;correo&gt; - Probar envío de email\n• /emailstatus - Diagnóstico de autenticación de correo\n• /help - Ayuda y comandos\n• /id - Ver tu Telegram Chat ID`;
+        const fallbackMsg = `🤖 <b>Bvelt Radar Founder Bot</b>\n\nRecibí tu mensaje: <i>"${escapeHtml(snippet)}"</i>\n\n<b>Comandos disponibles:</b>\n• /status - Ver estado del sistema\n• /digest - Ver el resumen operativo de las últimas 24 h\n• /testmail &lt;correo&gt; - Probar envío de email\n• /emailstatus - Diagnóstico de autenticación de correo\n• /help - Ayuda y comandos\n• /id - Ver tu Telegram Chat ID`;
         await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
