@@ -42,6 +42,7 @@ Apply each file exactly once, in the order below. Several historical files share
 34. `0029_tenant_isolation_refresh.sql`
 35. `0030_tenant_profile_contract.sql`
 36. `0031_source_evidence_provenance.sql`
+37. `0032_schema_migration_ledger.sql`
 
 ## Production migration procedure
 
@@ -53,7 +54,7 @@ Apply each file exactly once, in the order below. Several historical files share
 6. Deploy Worker code that depends on new columns only after the production schema has been verified.
 7. Record the applied migration filename, timestamp, backup table, before/after row counts and deployed Worker SHA in the operational handoff.
 
-There is no `d1_migrations` history table in the current production database. Until a migration ledger is introduced, migration state must be established by schema inspection and recorded explicitly; never assume a file has run because it exists in Git.
+The legacy database had no `d1_migrations` history table. `0032_schema_migration_ledger.sql` introduces `radar_schema_migrations` and records 0030/0031 after live verification. Older migrations (0001–0029) remain unbackfilled because reliable per-file deployment records are unavailable. For all future migrations, the ledger must be updated in the same migration batch; never assume a file has run because it exists in Git.
 
 ## Important migration notes
 
