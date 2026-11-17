@@ -42,7 +42,7 @@ tests.push({
   name: "Workers AI fallback uses the active zero-retention GLM model",
   run: () => {
     assert(WORKERS_AI_FALLBACK_MODEL === "@cf/zai-org/glm-4.7-flash", "Radar must not call the retiring Llama 3.2 3B model");
-    assert(extractWorkersAiText({ choices: [{ message: { content: "{\\"ok\\":true}" } }] }) === "{\\"ok\\":true}", "GLM chat completion content must be extracted");
+    assert(extractWorkersAiText({ choices: [{ message: { content: '{"ok":true}' } }] }) === '{"ok":true}', "GLM chat completion content must be extracted");
     assert(extractWorkersAiText({ choices: [{ message: { content: null, reasoning: "private reasoning" } }] }) === "", "GLM reasoning must never be exposed as generated content");
   }
 });
