@@ -41,7 +41,7 @@
 12. Founder: máximo 3 toques (inicial + 2 seguimientos), al menos 5 días entre toques; detener al responder, rebotar, darse de baja o quejarse. Primera comunicación plain text y sin URL; seguimientos como máximo un enlace.
 13. No inventar métricas de velocidad, llamadas perdidas, conversión, auditorías gratis, garantías ni relación previa. Resend delivered significa aceptación del servidor receptor, no inbox placement.
 14. Mirror de bounces/suppressions en D1; no volver a contactar destinatarios suprimidos. Discovery puede seguir si email está bloqueado por compliance.
-15. No cambiar Gemini/Groq ni nombres de modelos sin instrucción explícita.
+15. No cambiar Gemini/Groq ni nombres de modelos por intuición. Se permiten actualizaciones con petición explícita o evidencia oficial de retirada, incompatibilidad, privacidad, cuota o mejora necesaria; documentar motivo, fallback, clasificación de datos y pruebas.
 16. No añadir servicios pagados/anuncios sin aprobación. Mantener operación compatible con recursos/capa gratuita.
 17. Secrets: jamás en texto plano, código, logs, tool output o chat. `GITHUB_ACTIONS_TOKEN` y credenciales deben ser Worker secrets cifrados, nunca vars plaintext. No leer ni revelar valores.
 18. Migraciones productivas, rotación de secrets y cambios de bindings requieren aprobación específica. No considerar una autorización general de código como permiso para rotar credenciales.
