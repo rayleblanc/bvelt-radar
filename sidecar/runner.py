@@ -66,13 +66,20 @@ def main() -> int:
 
     query = urllib.parse.urlencode({"run_id": run_id, "mode": mode, "tenant_id": tenant_id})
     candidates_url = f"{worker_url}/api/research/candidates?{query}"
-    candidates_response = _api_request(candidates_url, callback_key)
-    candidates = candidates_response.get("records", [])
-    if not isinstance(candidates, list):
-        raise RuntimeError("Radar candidates response has an invalid records field")
+    candidates: list[dict[str, Any]] = []
 
-    print(f"Research run={run_id} mode={mode} tenant={tenant_id} candidates={len(candidates)}")
+    # Candidate retrieval belongs inside the guarded research phase. Previously,
+    # a transient GET failure escaped before the evidence callback and left the
+    # Worker dispatch queued/running indefinitely. Even retrieval/contract errors
+    # must now produce a terminal callback whenever the callback endpoint works.
     try:
+        candidates_response = _api_request(candidates_url, callback_key)
+        received = candidates_response.get("records", [])
+        if not isinstance(received, list):
+            raise RuntimeError("Radar candidates response has an invalid records field")
+        candidates = received
+
+        print(f"Research run={run_id} mode={mode} tenant={tenant_id} candidates={len(candidates)}")
         evidence = scrape_candidates(candidates) if candidates else []
         if not candidates:
             print("No eligible website candidates; closing research run with zero evidence.")
@@ -100,7 +107,7 @@ def main() -> int:
             "soft_deadline_exceeded": deferred > 0,
         }
     except Exception as exc:
-        print(f"Research runner encountered fatal error during extraction: {exc}", file=sys.stderr)
+        print(f"Research runner encountered fatal error: {exc}", file=sys.stderr)
         callback_payload = {
             "run_id": run_id,
             "mode": mode,
@@ -108,14 +115,14 @@ def main() -> int:
             "extractor_version": EXTRACTOR_VERSION,
             "run_status": "failed",
             "status": "failed",
-            "error": str(exc),
+            "error": str(exc)[:500],
             "candidates_received": len(candidates),
             "records": [],
             "elapsed_seconds": round(time.monotonic() - started, 1),
         }
 
-    # Always callback, including an empty or failed result, so Radar can update the dispatch
-    # rather than leaving it permanently in queued/running state.
+    # Always callback, including candidate-fetch, contract, extraction and empty
+    # result outcomes, so Radar can close the dispatch instead of leaving it open.
     callback_url = f"{worker_url}/api/research/evidence"
     try:
         result = _api_request(
