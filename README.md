@@ -122,7 +122,9 @@ Some ideas from earlier strategy notes were rejected rather than blindly added:
 
 ## GitHub Actions credential migration
 
-The research sidecar dispatch now prefers `GITHUB_ACTIONS_TOKEN_SECRET`, a Cloudflare Worker Secret, and retains `GITHUB_ACTIONS_TOKEN` only as a temporary compatibility fallback. Configure the new binding as a Worker Secret with repository Actions write permission, verify the health endpoint reports `github_token_secret_present=true`, then rotate/revoke the old token and remove the legacy plaintext Worker variable. Never place the token in Wrangler vars, source code, logs, or chat.
+The Worker dispatch code reads **only** `GITHUB_ACTIONS_TOKEN_SECRET`, configured as an encrypted Cloudflare Worker Secret with the minimum repository Actions permission required. The legacy `GITHUB_ACTIONS_TOKEN` plaintext variable is deliberately ignored and cannot authorize dispatch. If the dedicated secret is absent, Scrapling dispatch fails closed and the health diagnostics report the sidecar as not ready.
+
+Operational cleanup remains required: provision the dedicated Worker Secret, verify `github_token_secret_present=true`, rotate/revoke the old GitHub token, and remove the legacy plaintext variable from Cloudflare. Do not read, print, log, or place either token in Wrangler vars, source code, logs, or chat. Secret rotation and binding changes require explicit operator approval.
 
 ## AI provider policy (2026-11-17)
 
