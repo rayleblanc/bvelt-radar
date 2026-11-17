@@ -12,7 +12,7 @@
  */
 
 import { buildRadarEvidenceProvenance } from './evidenceProvenance.js';
-import { TENANT_TARGET_MAP, resolveTenantBuyerSegmentsForProfile } from "./tenantBuyerSegments";
+import { TENANT_TARGET_MAP, resolveTenantBuyerSegmentsForProfile } from "./tenantBuyerSegments.js";
 import { validateTenantProfileContract } from './tenantProfileContract.js';
 import { getAlerts, tradeForEvent, eventAppliesToTrade, WeatherAlert } from './weatherSignals';
 import { dispatchEmail, normalizeOutreachBody, BVELT_SITE, EmailDispatchResult, inspectOutboundEmailAuth } from './emailDispatcher';
