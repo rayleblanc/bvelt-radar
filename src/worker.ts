@@ -2798,9 +2798,9 @@ export default {
             credential_present: Boolean(env.BVELT_INGEST_KEY || env.RADAR_SERVICE_KEY)
           },
           scrapling: {
-            ready: Boolean((env.GITHUB_ACTIONS_TOKEN_SECRET || env.GITHUB_ACTIONS_TOKEN) && env.RADAR_SIDECAR_CALLBACK_KEY),
-            github_token_secret_present: Boolean(env.GITHUB_ACTIONS_TOKEN_SECRET),
-            legacy_plain_text_token_present: Boolean(env.GITHUB_ACTIONS_TOKEN),
+            ready: Boolean(String(env.GITHUB_ACTIONS_TOKEN_SECRET || "").trim() && String(env.RADAR_SIDECAR_CALLBACK_KEY || "").trim()),
+            github_token_secret_present: Boolean(String(env.GITHUB_ACTIONS_TOKEN_SECRET || "").trim()),
+            legacy_plain_text_token_present: Boolean(String(env.GITHUB_ACTIONS_TOKEN || "").trim()),
             callback_key_present: Boolean(env.RADAR_SIDECAR_CALLBACK_KEY),
             repository: env.RADAR_RESEARCH_REPOSITORY || "rayleblanc/bvelt-radar"
           },
