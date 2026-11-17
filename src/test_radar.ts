@@ -1,4 +1,5 @@
 declare const process: any;
+import { resolveGithubActionsToken } from './research/githubActions';
 
 import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey, notifyOnce, isVerifiedDeliverableEmail, evaluateFounderOutreachEligibility, buildTechnicalAuditSnapshot, isEmailValidatedForOutreach, isCompletePostalAddress, sendTelegramWithRetry, extractEmailAddress, evaluateResearchEvidenceQuality, classifyReplyText, getTelegramApprovalFeedback, getManualSendPreflightError, hasAIGenerationProvider, WORKERS_AI_FALLBACK_MODEL, extractWorkersAiText, resolveProspectContactability, buildProspectEvidenceContext, buildScheduledRunId, getCurrentDaySenderCount, normalizeWhatsAppPhone, extractPhoneDigits, hasUsableContactChannel, hasEnrichableContactData, buildWhatsAppClickToChatUrl, buildWhatsAppOutreachBody, shouldUseManualWhatsAppFallback, isDiscoveryInfrastructureFailure, hasConfirmedWhatsAppOptIn, isValidWhatsAppConsentEvidenceRef } from './worker';
 import { DEFAULT_FOUNDER_MISSION, MissionConfig } from './worker';
@@ -35,6 +36,14 @@ tests.push({
     assert(isDiscoveryInfrastructureFailure("Geoapify: request aborted due to timeout"), "Timeouts must remain retryable and must not exhaust a market");
     assert(isDiscoveryInfrastructureFailure("BizData: HTTP 400 (skipped)"), "Provider request errors must not be treated as honest zero-result markets");
     assert(!isDiscoveryInfrastructureFailure("Overpass: 0 elements, Geoapify: 0 matches"), "Successful zero-result searches may count toward market cooldown");
+  }
+});
+
+tests.push({
+  name: "GitHub dispatch prefers the Worker Secret over the legacy plaintext token",
+  run: () => {
+    assert(resolveGithubActionsToken({ GITHUB_ACTIONS_TOKEN_SECRET: "secret-token", GITHUB_ACTIONS_TOKEN: "legacy-token" }) === "secret-token", "Worker Secret must take precedence");
+    assert(resolveGithubActionsToken({ GITHUB_ACTIONS_TOKEN: "legacy-token" }) === "legacy-token", "Legacy token remains compatible during migration");
   }
 });
 
