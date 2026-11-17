@@ -16,7 +16,7 @@ GEMINI_PAID_TIER_CONFIRMED = "false"
 # - FOUNDER_SERVICE_KEY (required for founder routes)
 # - RADAR_SERVICE_KEY (service-to-service)
 # - BVELT_TENANT_INGEST_KEY (tenant observation push)
-# - GITHUB_ACTIONS_TOKEN / RADAR_SIDECAR_CALLBACK_KEY (sidecar research)
+# - GITHUB_ACTIONS_TOKEN_SECRET / RADAR_SIDECAR_CALLBACK_KEY (sidecar research)
 
 [build]
 command = "npm run build"
