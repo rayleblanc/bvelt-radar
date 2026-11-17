@@ -10332,8 +10332,22 @@ export async function expandTenantIcp(
     }
   }
 
-  // 2. Prefer Groq for tenant data: inference is not retained by default.
-  const apiKey = env.GEMINI_FOUNDER_API_KEY || env.GEMINI_SECONDARY_API_KEY;
+  // Tenant ICP expansion is billable provider work even on free tiers: reserve one
+  // tenant-scoped AI unit before calling any provider. Cached expansions above cost zero.
+  const tenantId = String(tc.tenant_id || "").trim();
+  if (!tenantId) {
+    console.warn("[expandTenantIcp] Missing tenant_id; refusing unmetered tenant inference.");
+    return null;
+  }
+  const aiUnitReserved = await reserveBudget(env.RADAR_DB, tenantId, "ai_units", 1);
+  if (!aiUnitReserved) {
+    console.info(`[expandTenantIcp] Tenant ${tenantId} reached its daily AI budget; using deterministic buyer segments.`);
+    return null;
+  }
+
+  // Prefer Groq for tenant data. Gemini is only eligible when the owner explicitly
+  // confirms a paid tier, because free-tier prompts may be used to improve Google products.
+  const apiKey = String(env.GEMINI_FOUNDER_API_KEY || "").trim() || String(env.GEMINI_SECONDARY_API_KEY || "").trim();
   const geminiPaidTier = String(env.GEMINI_PAID_TIER_CONFIRMED || "").trim().toLowerCase() === "true";
   const modelsStr = env.GEMINI_MODELS || "gemini-3.8-flash,gemini-3.5-flash-lite";
   const modelsToTry = modelsStr.split(",").map(m => m.trim()).filter(Boolean).slice(0, 2);
@@ -10359,17 +10373,48 @@ Genera hasta 6 segmentos de CLIENTES que compran a este negocio; no devuelvas co
   if (env.GROQ_API_KEY) {
     for (const model of ["openai/gpt-oss-20b", "openai/gpt-oss-120b"]) {
       geminiResult = await tryGroqJson<any>(model, env.GROQ_API_KEY, prompt);
-      if (geminiResult) break;
+      if (Array.isArray(geminiResult?.segments)) break;
+      geminiResult = null;
     }
   }
   if (!geminiResult && geminiPaidTier && apiKey) {
     for (const model of modelsToTry) {
       geminiResult = await tryGemini<any>(model, apiKey, prompt);
-      if (geminiResult) break;
+      if (Array.isArray(geminiResult?.segments)) break;
+      geminiResult = null;
+    }
+  }
+
+  // Cloudflare Workers AI is the no-extra-key, same-edge fallback. It is metered
+  // against the same tenant budget; invalid/empty JSON is never persisted.
+  if (!geminiResult && env.AI && typeof env.AI.run === "function") {
+    try {
+      const response = await env.AI.run(WORKERS_AI_FALLBACK_MODEL, {
+        messages: [
+          {
+            role: "system",
+            content: "Return only valid JSON with this shape: {segments:[{label:string,osm_tags:string[],keywords:string[],why:string}]}. No markdown, no prose, no extra keys. If evidence is insufficient, return {segments:[]}."
+          },
+          { role: "user", content: prompt }
+        ],
+        max_completion_tokens: 768,
+        temperature: 0.2,
+        chat_template_kwargs: { enable_thinking: false, clear_thinking: true },
+        response_format: { type: "json_object" }
+      });
+      const rawText = extractWorkersAiText(response);
+      const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]);
+        if (parsed && Array.isArray(parsed.segments)) geminiResult = parsed;
+      }
+    } catch (fallbackError: any) {
+      console.warn("[expandTenantIcp] Workers AI fallback failed:", String(fallbackError?.message || fallbackError).slice(0, 180));
     }
   }
 
   if (!geminiResult || !Array.isArray(geminiResult.segments)) {
+    await releaseBudget(env.RADAR_DB, tenantId, "ai_units", 1);
     return null;
   }
 
@@ -10401,9 +10446,12 @@ Genera hasta 6 segmentos de CLIENTES que compran a este negocio; no devuelvas co
   }
 
   if (validatedSegments.length === 0) {
+    await releaseBudget(env.RADAR_DB, tenantId, "ai_units", 1);
     return null;
   }
 
+  // Keep the reservation as consumed usage once a valid provider result exists.
+  await commitBudget(env.RADAR_DB, tenantId, "ai_units", 1);
   const expansionResult = { segments: validatedSegments };
   const expandedAt = new Date().toISOString();
   const expansionJson = JSON.stringify(expansionResult);
