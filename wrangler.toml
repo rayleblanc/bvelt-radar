@@ -8,6 +8,8 @@ keep_vars = true
 [vars]
 BVELT_INGEST_URL = "https://bvelt.app/api/radar/observations"
 BVELT_TENANT_INGEST_URL = "https://bvelt.app/api/radar/tenant-observations"
+GEMINI_MODELS = "gemini-3.8-flash,gemini-3.5-flash-lite"
+GEMINI_PAID_TIER_CONFIRMED = "false"
 
 # Secrets are configured in the Cloudflare Dashboard (not required in this file
 # for preview builds). Runtime auth stays fail-closed when a key is missing:
