@@ -1491,7 +1491,7 @@ async function generateRealAICopy(prospect: any): Promise<{ subject: string; bod
         "Authorization": `Bearer ${process.env.GROQ_API_KEY}`
       },
       body: JSON.stringify({
-        model: "llama-3.3-70b-versatile",
+        model: "openai/gpt-oss-20b",
         response_format: { type: "json_object" },
         messages: [{ role: "user", content: prompt }],
         temperature: 0.7
@@ -1504,8 +1504,8 @@ async function generateRealAICopy(prospect: any): Promise<{ subject: string; bod
   }
 
   const geminiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_FOUNDER_API_KEY || process.env.GEMINI_SECONDARY_API_KEY;
-  if (geminiKey) {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`;
+  if (geminiKey && String(process.env.GEMINI_PAID_TIER_CONFIRMED || "").trim().toLowerCase() === "true") {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${geminiKey}`;
     const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
