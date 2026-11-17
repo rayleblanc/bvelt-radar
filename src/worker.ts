@@ -794,21 +794,13 @@ export default {
       // 1b. Public Personalized Edge Demo Page for Cold Outreach Leads
       if (path === "/demo" && method === "GET") {
         const token = url.searchParams.get("p");
-        let companyName = "Tu Negocio";
-        let tradeName = "Servicios";
-        let phone = "";
         let prospectId = null;
-        let evidenceJson = "[]";
 
         if (token) {
           try {
-            const prospect = await env.RADAR_DB.prepare("SELECT id, name, trade, phone, evidence_json FROM prospects WHERE demo_token = ?").bind(token).first() as any;
+            const prospect = await env.RADAR_DB.prepare("SELECT id, name FROM prospects WHERE demo_token = ?").bind(token).first() as any;
             if (prospect) {
-              companyName = prospect.name || "Tu Negocio";
-              tradeName = prospect.trade || "Servicios";
-              phone = prospect.phone || "";
               prospectId = prospect.id;
-              evidenceJson = prospect.evidence_json || "[]";
 
               const timestamp = new Date().toISOString();
               const ua = request.headers.get("User-Agent") || "";
@@ -829,7 +821,7 @@ export default {
 
               if (!otherViews || otherViews.c === 0) {
                 if (env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID) {
-                  const tgMsg = `🔥 <b>${escapeHtml(companyName)}</b> abrió su demo`;
+                  const tgMsg = "🔥 Un prospecto abrió una demo de Bvelt";
                   await notifyFounder(env, tgMsg).catch(() => {});
                 }
               }
@@ -839,7 +831,7 @@ export default {
           }
         }
 
-        return handleEdgeDemoPage(companyName, tradeName, phone);
+        return handleEdgeDemoPage();
       }
 
       // 1c. Demo CTA Click Tracking Endpoint
@@ -13397,17 +13389,14 @@ function escapeHtml(str: string): string {
 /**
  * Edge-Rendered Interactive Demo for Prospects
  */
-function handleEdgeDemoPage(companyName: string, tradeName: string, phone: string): Response {
-  const safeName = escapeHtml(companyName);
-  const safeTrade = escapeHtml(tradeName);
-  const safePhone = escapeHtml(phone || "(Línea de Voz)");
+function handleEdgeDemoPage(): Response {
 
   const html = `<!DOCTYPE html>
 <html lang="es">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Bvelt Demo · ${safeName}</title>
+  <title>Bvelt Demo · Ejemplo ilustrativo</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
     body { background: #020617; color: #f8fafc; min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 24px 16px; }
@@ -13440,13 +13429,13 @@ function handleEdgeDemoPage(companyName: string, tradeName: string, phone: strin
 <body>
   <div class="container">
     <div class="badge">Simulador Interactivo Bvelt — Demostración de Capacidades</div>
-    <h1>¿Qué pasa si un cliente llama a ${safeName} fuera de horario?</h1>
-    <p class="sub">Los clientes que necesitan servicios de <strong>${safeTrade}</strong> llaman al primer número que encuentran. Si nadie contesta en 30 segundos, llaman a tu competidor.</p>
+    <h1>¿Cómo puede Bvelt ayudar a dar seguimiento a una solicitud?</h1>
+    <p class="sub">Este recorrido muestra, de forma conceptual, cómo una solicitud puede pasar de contacto inicial a seguimiento y registro del resultado.</p>
+    <p class="sub" role="note"><strong>Ejemplo simulado:</strong> los eventos, tiempos y conversaciones de esta página son ficticios. No representan actividad, métricas ni resultados de ningún negocio real.</p>
 
     <div class="card">
       <div class="sim-header">
-        <div class="sim-title"><span class="status-dot"></span> Bvelt Call Recovery en Acción</div>
-        <span style="font-size: 11px; color: #64748b;">${safePhone}</span>
+        <div class="sim-title"><span class="status-dot"></span> Flujo de seguimiento ilustrativo</div>
       </div>
 
       <div class="timeline">
@@ -13460,7 +13449,7 @@ function handleEdgeDemoPage(companyName: string, tradeName: string, phone: strin
           <div class="event-time">8:42 PM</div>
           <div class="event-body">
             <div style="font-size: 10px; color: #60a5fa; margin-bottom: 2px;">⚡ SMS instantáneo en 6 segundos</div>
-            <div class="sms-box">"Hola, gracias por llamar a <strong>${safeName}</strong>. Estamos terminando un servicio urgente. ¿En qué podemos ayudarte de inmediato?"</div>
+            <div class="sms-box">"Gracias por contactar. Hemos recibido tu solicitud y el negocio podrá darle seguimiento."</div>
           </div>
         </div>
         <div class="event">
@@ -13472,7 +13461,7 @@ function handleEdgeDemoPage(companyName: string, tradeName: string, phone: strin
         <div class="event">
           <div class="event-time">8:44 PM</div>
           <div class="event-body">
-            <div class="booked-box">✅ Trabajo agendado y notificado al propietario de ${safeName}. Cliente retenido.</div>
+            <div class="booked-box">✓ Resultado de ejemplo: el propietario registra el siguiente paso de la solicitud.</div>
           </div>
         </div>
       </div>
@@ -13480,17 +13469,17 @@ function handleEdgeDemoPage(companyName: string, tradeName: string, phone: strin
 
     <div class="stats-grid">
       <div class="stat-card">
-        <div class="stat-val">&lt; 8 seg</div>
-        <div class="stat-label">Tiempo de respuesta</div>
+        <div class="stat-val">Solicitud</div>
+        <div class="stat-label">Registro del contacto</div>
       </div>
       <div class="stat-card">
-        <div class="stat-val">+$3,400</div>
-        <div class="stat-label">Ingreso mensual recuperado</div>
+        <div class="stat-val">Outcome</div>
+        <div class="stat-label">Resultado registrado</div>
       </div>
     </div>
 
-    <a href="https://bvelt.app" class="cta-btn" target="_blank" rel="noopener">Activar Bvelt para ${safeName} →</a>
-    <div class="footer">Bvelt · Autonomous Call Recovery & SMS Engine para Contratistas Locales</div>
+    <a href="https://bvelt.app" class="cta-btn" target="_blank" rel="noopener">Conocer Bvelt →</a>
+    <div class="footer">Bvelt · Seguimiento comercial con evidencia</div>
   </div>
 </body>
 </html>`;
