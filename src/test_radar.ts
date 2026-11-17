@@ -139,7 +139,10 @@ tests.push({
     assert(normalizeWhatsAppPhone("18135550100") === null, "Require explicit international notation");
     assert(normalizeWhatsAppPhone("0018135550100") === "18135550100", "Accept explicit 00 international prefix");
     assert(normalizeWhatsAppPhone("+27215518549") === "27215518549", "Normalize South African +27 numbers without losing the country code");
+    assert(normalizeWhatsAppPhone("+27 21 551 8549 ext 123") === "27215518549", "Strip phone extensions before building WhatsApp recipients");
+    assert(normalizeWhatsAppPhone("+27 21 551 8549 x123") === "27215518549", "Strip x-style phone extensions before building WhatsApp recipients");
     assert(Boolean(buildWhatsAppClickToChatUrl("+27215518549", "Hello")?.startsWith("https://wa.me/27215518549?text=")), "Build wa.me links with digits only and preserve +27");
+    assert(Boolean(buildWhatsAppClickToChatUrl("+27 21 551 8549 ext 123", "Hello")?.startsWith("https://wa.me/27215518549?text=")), "Never append a phone extension to a WhatsApp URL");
     assert(normalizeWhatsAppPhone("123") === null, "Reject short phone numbers");
     assert(extractPhoneDigits("813-555-0100") === "8135550100", "Keep a usable local phone without inventing its country code");
     assert(hasUsableContactChannel("team@example.com", null), "Email is a usable contact channel");
