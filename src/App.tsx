@@ -2266,9 +2266,9 @@ const submitDecision = async (prospectId: string, action: string) => {
                                 WhatsApp <span className="text-[8px] opacity-70">· no verificado</span>
                               </a>
                             )}
-                            {canOpenDirectChannel && p.phone && toSmsUrl(p.phone, messageBody) && (
+                            {canOpenDirectChannel && p.phone && toSmsUrl(p.phone, emailMessageBody) && (
                               <a
-                                href={toSmsUrl(p.phone, messageBody)!}
+                                href={toSmsUrl(p.phone, emailMessageBody)!}
                                 className="px-2.5 py-1 rounded-lg bg-sky-950/50 border border-sky-800/40 text-sky-300 hover:bg-sky-900/60 flex items-center gap-1 font-bold"
                                 onClick={(e) => {
                                   e.stopPropagation();
