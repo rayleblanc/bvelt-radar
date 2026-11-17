@@ -2136,8 +2136,10 @@ const submitDecision = async (prospectId: string, action: string) => {
                       const signalsList = parseSignals(p);
                       const isExpanded = inspectedProspect?.id === p.id;
                       const websiteHref = getWebsiteUrl(p.website);
-                      const messageBody = attackKits[p.id]?.generated_message?.body || p.draft_body || "";
-                      const messageSubject = attackKits[p.id]?.generated_message?.subject || p.draft_subject || "";
+                      const generatedMessage = attackKits[p.id]?.generated_message;
+                      const emailMessageBody = generatedMessage?.channel === "email" ? generatedMessage.body : (p.draft_body || "");
+                      const emailMessageSubject = generatedMessage?.channel === "email" ? generatedMessage.subject : (p.draft_subject || "");
+                      const whatsappMessageBody = generatedMessage?.channel === "whatsapp" ? generatedMessage.body : "";
                       const emailRecipient = p.email && isValidEmailRecipient(p.email) ? p.email.trim() : null;
                       const contactability = p.contactability;
                       const activeKitForProspect = attackKits[p.id] || p.attack_kit;
@@ -2234,7 +2236,7 @@ const submitDecision = async (prospectId: string, action: string) => {
                           <div className="flex flex-wrap items-center gap-2 pt-1 font-mono text-[11px]">
                             {canOpenDirectChannel && emailRecipient && (
                               <a 
-                                href={`mailto:${emailRecipient}?subject=${encodeURIComponent(messageSubject)}&body=${encodeURIComponent(messageBody)}`}
+                                href={`mailto:${emailRecipient}?subject=${encodeURIComponent(emailMessageSubject)}&body=${encodeURIComponent(emailMessageBody)}`}
                                 target="_blank" 
                                 rel="noreferrer" 
                                 className="px-2.5 py-1 rounded-lg bg-blue-950/50 border border-blue-800/40 text-blue-300 hover:bg-blue-900/60 flex items-center gap-1 font-bold"
@@ -2248,7 +2250,7 @@ const submitDecision = async (prospectId: string, action: string) => {
                                 Correo
                               </a>
                             )}
-                            {canOpenDirectChannel && p.phone && hasDirectWhatsAppRecipient(p.phone) && toWhatsAppUrl(p.phone, messageBody) && (
+                            {canOpenDirectChannel && p.phone && hasDirectWhatsAppRecipient(p.phone) && toWhatsAppUrl(p.phone, whatsappMessageBody) && (
                               <a 
                                 href={toWhatsAppUrl(p.phone, messageBody)!}
                                 target="_blank" 
@@ -2429,7 +2431,7 @@ const submitDecision = async (prospectId: string, action: string) => {
                                         <p className="text-amber-200">{attackKits[p.id].why_this_lead}</p>
                                                                                 <p className="whitespace-pre-wrap"><span className="text-slate-500">Llamada:</span>{'\n'}{attackKits[p.id].call_script}</p>
                                         <p><span className="text-slate-500">Siguiente:</span> {attackKits[p.id].next_action}</p>
-                                        {p.phone && hasDirectWhatsAppRecipient(p.phone) && toWhatsAppUrl(p.phone, attackKits[p.id].generated_message?.body || '') && (
+                                        {p.phone && hasDirectWhatsAppRecipient(p.phone) && toWhatsAppUrl(p.phone, attackKits[p.id].generated_message?.channel === "whatsapp" ? attackKits[p.id].generated_message.body : '') && (
                                           <a
                                             href={toWhatsAppUrl(p.phone, attackKits[p.id].generated_message?.body || '')!}
                                             target="_blank"
