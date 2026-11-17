@@ -84,6 +84,8 @@ export interface RadarJobMessage {
   created_at?: string;
 }
 
+export const WORKERS_AI_FALLBACK_MODEL = "@cf/zai-org/glm-4.7-flash";
+
 export interface Env {
   RADAR_DB: D1Database;
   RADAR_QUEUE?: Queue<RadarJobMessage>;
@@ -5928,7 +5930,7 @@ export async function classifyWithWorkersAI(
   }
 
   try {
-    const response = await env.AI.run("@cf/meta/llama-3.2-3b-instruct", {
+    const response = await env.AI.run(WORKERS_AI_FALLBACK_MODEL, {
       messages: [
         {
           role: "system",
@@ -10761,7 +10763,7 @@ export async function generateAICopy(
     if (env.AI && typeof env.AI.run === "function") {
       console.log(`[Gemini Cascade] Calling Workers AI (Llama) backup...`);
       try {
-        const response = await env.AI.run("@cf/meta/llama-3.2-3b-instruct", {
+        const response = await env.AI.run(WORKERS_AI_FALLBACK_MODEL, {
           messages: [
             { role: "system", content: "Reply ONLY with valid JSON: {\"subject\":string,\"body\":string}. No markdown." },
             { role: "user", content: prompt }
