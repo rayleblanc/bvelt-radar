@@ -1,9 +1,11 @@
 name: Radar Quality Checks
 
 on:
-  pull_request:
-  push:
-    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: radar-quality-manual
+  cancel-in-progress: true
 
 permissions:
   contents: read

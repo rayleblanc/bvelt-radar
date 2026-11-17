@@ -2596,8 +2596,11 @@ export default {
           const { missionConfig } = await getPriorityTargets(dayOfYear, env, mode, targetTenant, undefined, true);
           const generated = await generateAICopy(scopedProspect, scopedProspect.variant_id || scopedProspect.bvelt_angle || "missed_calls", env, missionConfig, channel);
           const timestamp = new Date().toISOString();
-          await env.RADAR_DB.prepare("UPDATE prospects SET draft_subject = ?, draft_body = ?, updated_at = ? WHERE id = ? AND COALESCE(tenant_id,'founder') = ?")
-            .bind(generated.subject || "", generated.body || "", timestamp, prospectId, targetTenant).run();
+          // WhatsApp drafts are channel-specific and must never overwrite the canonical email draft.
+          if (channel === "email") {
+            await env.RADAR_DB.prepare("UPDATE prospects SET draft_subject = ?, draft_body = ?, updated_at = ? WHERE id = ? AND COALESCE(tenant_id,'founder') = ?")
+              .bind(generated.subject || "", generated.body || "", timestamp, prospectId, targetTenant).run();
+          }
           let generationEventLogged = false;
           try {
             await env.RADAR_DB.prepare("INSERT INTO prospect_events (id, prospect_id, event_type, content, created_at) VALUES (?, ?, 'message_generated', ?, ?)")
@@ -10662,9 +10665,9 @@ export async function generateAICopy(
     6. Nunca inventes hechos, porcentajes, velocidad web, llamadas perdidas, ingresos perdidos, volumen de clientes ni problemas. Si la evidencia es débil, di menos o no generes el mensaje.
     7. Primer contacto: sin enlaces, adjuntos, cebos de auditoría, listas de cotizaciones ni explicaciones largas. Tenant nunca incluye enlaces de Bvelt ni inventa webs del remitente.
     8. Sin emojis, exageraciones, exclamaciones, asuntos con "Re:" falso ni transiciones típicas de IA. SIN FIRMA NI PIE (el sistema añade los datos aplicables).
-    9. ${!tenantInfo && founderLine ? `FRASE FUNDADOR (úsala una vez, natural, no inventes otra biografía): "${founderLine}"` : "No inventes historia personal del fundador."}
+    9. ${channel !== "whatsapp" && !tenantInfo && founderLine ? `FRASE FUNDADOR (úsala una vez, natural, no inventes otra biografía): "${founderLine}"` : "No incluyas biografía personal ni frase de fundador en WhatsApp."}
     10. ${isFollowUp ? "Esto es SEGUIMIENTO toque #" + outreachTouch + " sin respuesta. Más corto, otro ángulo, sin culpar. Asunto sin Re: falso." : "Primer correo en frío."}
-    11. Formato JSON: {"subject": "...", "body": "..."}
+    11. ${channel === "whatsapp" ? "WhatsApp body only; subject must be an empty string." : "Formato JSON: {\"subject\": \"...\", \"body\": \"...\"}"}
   ` : `
     ${channel === "whatsapp" ? "CHANNEL OVERRIDE: First-touch WhatsApp, not email. Aim for 20-40 words without forcing length. No subject, signature, legal footer, links, or emoji. No sales-script opening. Write like one busy professional contacting another: one concrete verified reason, plain language, and at most one easy question. If evidence is weak, be transparent and brief; do not pretend to have researched them. Never claim they use WhatsApp, miss calls, or lose revenue." : ""}
     You write one-to-one business messages, not marketing campaigns. Sound like a thoughtful operator, not a copywriter or AI assistant.
@@ -10689,9 +10692,9 @@ export async function generateAICopy(
     6. Never invent facts, percentages, site-speed measurements, missed calls, lost revenue, customer volume, or problems. If evidence is weak, say less or do not draft.
     7. First touch: no links, attachments, audit bait, quote inventories, or long product explanations. Tenant messages must never include Bvelt links or invent a sender website.
     8. No emoji, hype, exclamation marks, fake Re: subjects, or generic AI transitions. NO SIGNATURE OR FOOTER (system adds applicable sender details).
-    9. ${!tenantInfo && founderLine ? `FOUNDER LINE (use once, natural English, do not invent a different bio): "${founderLine}"` : "Do not invent a personal founder story."}
+    9. ${channel !== "whatsapp" && !tenantInfo && founderLine ? `FOUNDER LINE (use once, natural English, do not invent a different bio): "${founderLine}"` : "Do not include founder biography or founder line in WhatsApp."}
     10. ${isFollowUp ? "This is FOLLOW-UP touch #" + outreachTouch + " after no reply. Different angle from a first cold email. Shorter. Do not guilt-trip. Subject must NOT start with Re: unless truly a thread. Do not add a link unless it belongs to the configured sender." : "This is the FIRST outreach email."}
-    11. JSON format: {"subject": "...", "body": "..."}
+    11. ${channel === "whatsapp" ? "WhatsApp body only; subject must be an empty string." : "JSON format: {\"subject\": \"...\", \"body\": \"...\"}"}
   `;
 
   // AI CASCADE: Groq first; paid-tier Gemini only after Groq fails.
