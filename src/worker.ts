@@ -11065,7 +11065,12 @@ export function hasEnrichableContactData(
 }
 
 export function normalizeWhatsAppPhone(value: string | null | undefined): string | null {
-  const raw = String(value || "").trim();
+  // Strip a human-readable extension before extracting digits. An extension is
+  // not part of the WhatsApp subscriber number and must never enter the wa.me path.
+  const raw = String(value || "")
+    .trim()
+    .replace(/(?:ext\.?|extension|x|#)\s*\d+\s*$/i, "")
+    .trim();
   if (!raw) return null;
   // Require explicit international notation (+CC or 00CC); never infer a country code.
   const international = raw.startsWith("+") ? raw : raw.startsWith("00") ? "+" + raw.slice(2) : "";
