@@ -5949,8 +5949,8 @@ export async function classifyWithWorkersAI(
           content: `Nombre: ${name}\nWeb: ${website || "n/a"}\nOficio buscado: ${trade}`
         }
       ],
-      max_completion_tokens: 256,
-      reasoning_effort: "low",
+      max_completion_tokens: 128,
+      chat_template_kwargs: { enable_thinking: false, clear_thinking: true },
       response_format: { type: "json_object" }
     });
 
@@ -10769,7 +10769,7 @@ export async function generateAICopy(
             { role: "user", content: prompt }
           ],
           max_completion_tokens: 512,
-          reasoning_effort: "low",
+          chat_template_kwargs: { enable_thinking: false, clear_thinking: true },
           response_format: { type: "json_object" }
         });
         const rawText = extractWorkersAiText(response);
