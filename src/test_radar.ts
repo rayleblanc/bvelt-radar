@@ -40,10 +40,11 @@ tests.push({
 });
 
 tests.push({
-  name: "GitHub dispatch prefers the Worker Secret over the legacy plaintext token",
+  name: "GitHub dispatch fails closed unless the dedicated Worker Secret is configured",
   run: () => {
-    assert(resolveGithubActionsToken({ GITHUB_ACTIONS_TOKEN_SECRET: "secret-token", GITHUB_ACTIONS_TOKEN: "legacy-token" }) === "secret-token", "Worker Secret must take precedence");
-    assert(resolveGithubActionsToken({ GITHUB_ACTIONS_TOKEN: "legacy-token" }) === "legacy-token", "Legacy token remains compatible during migration");
+    assert(resolveGithubActionsToken({ GITHUB_ACTIONS_TOKEN_SECRET: " secret-token ", GITHUB_ACTIONS_TOKEN: "legacy-token" }) === "secret-token", "Dedicated Worker Secret must be trimmed and used");
+    assert(resolveGithubActionsToken({ GITHUB_ACTIONS_TOKEN: "legacy-token" }) === "", "Legacy plaintext binding must never authorize GitHub Actions");
+    assert(resolveGithubActionsToken({}) === "", "Missing Worker Secret must fail closed");
   }
 });
 
@@ -2100,7 +2101,7 @@ tests.push({
       RADAR_DB: mockDb,
       RADAR_SERVICE_KEY: "admin_service_key_999",
       RADAR_SIDECAR_CALLBACK_KEY: "valid_sidecar_key_123",
-      GITHUB_ACTIONS_TOKEN: "mock_gh_token",
+      GITHUB_ACTIONS_TOKEN_SECRET: "mock_gh_token",
       RADAR_RESEARCH_REPOSITORY: "rayleblanc/bvelt-radar"
     };
 

@@ -6,7 +6,7 @@
 
 export interface ResearchDispatchEnv {
   GITHUB_ACTIONS_TOKEN_SECRET?: string;
-  /** Legacy dashboard variable. Replace with GITHUB_ACTIONS_TOKEN_SECRET Worker Secret. */
+  /** Legacy plaintext binding is deliberately ignored; remove it from Cloudflare after secret rotation. */
   GITHUB_ACTIONS_TOKEN?: string;
   RADAR_RESEARCH_REPOSITORY?: string;
 }
@@ -27,7 +27,7 @@ const DEFAULT_REPOSITORY = "rayleblanc/bvelt-radar";
 const WORKFLOW_FILE = "radar-research.yml";
 
 export function resolveGithubActionsToken(env: ResearchDispatchEnv): string {
-  return String(env.GITHUB_ACTIONS_TOKEN_SECRET || env.GITHUB_ACTIONS_TOKEN || "").trim();
+  return String(env.GITHUB_ACTIONS_TOKEN_SECRET || "").trim();
 }
 
 export async function dispatchScraplingResearch(
