@@ -10401,7 +10401,7 @@ Genera hasta 6 segmentos de CLIENTES que compran a este negocio; no devuelvas co
         response_format: { type: "json_object" }
       });
       const rawText = extractWorkersAiText(response);
-      const jsonMatch = rawText.match(/\\{[\\s\\S]*\\}/);
+      const jsonMatch = rawText.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
         const parsed = JSON.parse(jsonMatch[0]);
         if (parsed && Array.isArray(parsed.segments)) geminiResult = parsed;
