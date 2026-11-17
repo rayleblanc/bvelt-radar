@@ -10373,13 +10373,15 @@ Genera hasta 6 segmentos de CLIENTES que compran a este negocio; no devuelvas co
   if (env.GROQ_API_KEY) {
     for (const model of ["openai/gpt-oss-20b", "openai/gpt-oss-120b"]) {
       geminiResult = await tryGroqJson<any>(model, env.GROQ_API_KEY, prompt);
-      if (geminiResult) break;
+      if (Array.isArray(geminiResult?.segments)) break;
+      geminiResult = null;
     }
   }
   if (!geminiResult && geminiPaidTier && apiKey) {
     for (const model of modelsToTry) {
       geminiResult = await tryGemini<any>(model, apiKey, prompt);
-      if (geminiResult) break;
+      if (Array.isArray(geminiResult?.segments)) break;
+      geminiResult = null;
     }
   }
 
