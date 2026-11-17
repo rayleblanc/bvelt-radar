@@ -41,10 +41,11 @@ tests.push({
 tests.push({
   name: "AI quota reservation recognizes Gemini, Groq and Workers AI as real providers",
   run: () => {
-    assert(hasAIGenerationProvider({ GEMINI_FOUNDER_API_KEY: "gemini-key" }), "Gemini credentials must enable real AI generation");
+    assert(!hasAIGenerationProvider({ GEMINI_FOUNDER_API_KEY: "gemini-key" }), "Unpaid Gemini credentials must not enable processing of tenant data");
+    assert(hasAIGenerationProvider({ GEMINI_FOUNDER_API_KEY: "gemini-key", GEMINI_PAID_TIER_CONFIRMED: "true" }), "Paid-tier confirmation must enable Gemini generation");
     assert(hasAIGenerationProvider({ GROQ_API_KEY: "groq-key" }), "Groq credentials must enable real AI generation");
     assert(hasAIGenerationProvider({ GEMINI_FOUNDER_API_KEY: " ", GROQ_API_KEY: "groq-key" }), "Blank Gemini credentials must not mask a valid Groq provider");
-    assert(hasAIGenerationProvider({ GEMINI_FOUNDER_API_KEY: " ", GEMINI_SECONDARY_API_KEY: "secondary-key" }), "Blank founder key must not mask a valid secondary Gemini key");
+    assert(!hasAIGenerationProvider({ GEMINI_FOUNDER_API_KEY: " ", GEMINI_SECONDARY_API_KEY: "secondary-key" }), "Secondary Gemini key alone must remain disabled on unpaid quota");
     assert(hasAIGenerationProvider({ AI: { run: async () => ({ response: "{}" }) } }), "Workers AI binding alone must enable generation and quota reservation");
     assert(!hasAIGenerationProvider({}), "No provider must be identified as a deterministic fallback");
   }
