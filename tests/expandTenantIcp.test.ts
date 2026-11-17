@@ -71,7 +71,7 @@ describe("expandTenantIcp provider fallback and tenant budget", () => {
         }
       }
     };
-    const result = await expandTenantIcp(env, tenant);
+    const result = await expandTenantIcp(env, { ...tenant });
     assert.equal(calledModel, WORKERS_AI_FALLBACK_MODEL);
     assert.equal(result?.segments[0]?.label, "Property managers");
     assert.ok(db.statements.some(x => x.sql.includes("UPDATE daily_budgets") && x.sql.includes("ai_units = ai_units +")));
