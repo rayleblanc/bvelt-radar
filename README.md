@@ -120,6 +120,10 @@ Some ideas from earlier strategy notes were rejected rather than blindly added:
 3. **Workers AI fallback** — enabled after Groq and paid-tier Gemini, using the active GLM-4.7 Flash model; the daily free Neurons allocation is enforced by Cloudflare.
 4. **Vectorize as a mandatory dependency** — not forced into deployment because it would require provisioning an external Vectorize index. Current deterministic D1 dedup remains the fail-safe.
 
+## GitHub Actions credential migration
+
+The research sidecar dispatch now prefers `GITHUB_ACTIONS_TOKEN_SECRET`, a Cloudflare Worker Secret, and retains `GITHUB_ACTIONS_TOKEN` only as a temporary compatibility fallback. Configure the new binding as a Worker Secret with repository Actions write permission, verify the health endpoint reports `github_token_secret_present=true`, then rotate/revoke the old token and remove the legacy plaintext Worker variable. Never place the token in Wrangler vars, source code, logs, or chat.
+
 ## AI provider policy (2026-11-17)
 
 Radar uses a privacy-aware provider cascade for tenant business data:
