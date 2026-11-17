@@ -94,6 +94,7 @@ export interface Env {
   GROQ_API_KEY?: string;
   GEMINI_FOUNDER_API_KEY?: string;
   GEMINI_SECONDARY_API_KEY?: string;
+  GEMINI_PAID_TIER_CONFIRMED?: string;
   HUNTER_API_KEY?: string;
   ABSTRACT_API_KEY?: string;
   TRUST_STACK_URL?: string;
@@ -4366,9 +4367,9 @@ export function getManualSendPreflightError(prospect: any): string | null {
 
 export function hasAIGenerationProvider(env: any): boolean {
   const hasKey = (value: unknown) => typeof value === "string" && value.trim().length > 0;
+  const geminiPaidTier = String(env?.GEMINI_PAID_TIER_CONFIRMED || "").trim().toLowerCase() === "true";
   return Boolean(
-    hasKey(env?.GEMINI_FOUNDER_API_KEY) ||
-    hasKey(env?.GEMINI_SECONDARY_API_KEY) ||
+    (geminiPaidTier && (hasKey(env?.GEMINI_FOUNDER_API_KEY) || hasKey(env?.GEMINI_SECONDARY_API_KEY))) ||
     hasKey(env?.GROQ_API_KEY) ||
     (env?.AI && typeof env.AI.run === "function")
   );
@@ -10258,8 +10259,40 @@ async function tryGemini<T = { subject: string; body: string }>(model: string, a
   return null;
 }
 
+/** Call Groq JSON mode for tenant-scoped structured generation. */
+async function tryGroqJson<T = any>(model: string, apiKey: string, prompt: string): Promise<T | null> {
+  try {
+    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiKey}`
+      },
+      body: JSON.stringify({
+        model,
+        response_format: { type: "json_object" },
+        messages: [{ role: "user", content: prompt }],
+        temperature: 0.2
+      }),
+      signal: AbortSignal.timeout(5500)
+    });
+    if (!response.ok) {
+      console.warn(`[Groq Cascade] Model [${model}] returned status [${response.status}]`);
+      return null;
+    }
+    const data: any = await response.json();
+    const raw = data.choices?.[0]?.message?.content;
+    if (!raw) return null;
+    const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+    return parsed && typeof parsed === "object" ? parsed as T : null;
+  } catch (e: any) {
+    console.warn(`[Groq Cascade] Model [${model}] request failed: ${String(e?.message || e).slice(0, 180)}`);
+    return null;
+  }
+}
+
 /**
- * Expand Tenant ICP using Gemini or cached/stored expansion JSON
+ * Expand Tenant ICP using Groq, paid Gemini, or cached/stored expansion JSON
  */
 export async function expandTenantIcp(
   env: Env, 
@@ -10279,15 +10312,11 @@ export async function expandTenantIcp(
     }
   }
 
-  // 2. Call Gemini with tryGemini
+  // 2. Prefer Groq for tenant data: inference is not retained by default.
   const apiKey = env.GEMINI_FOUNDER_API_KEY || env.GEMINI_SECONDARY_API_KEY;
-  if (!apiKey) {
-    return null;
-  }
-
-  const modelsStr = env.GEMINI_MODELS || "gemini-3.5-flash-lite";
-  const modelList = modelsStr.split(",").map(m => m.trim()).filter(Boolean);
-  const modelsToTry = modelList.slice(0, 2);
+  const geminiPaidTier = String(env.GEMINI_PAID_TIER_CONFIRMED || "").trim().toLowerCase() === "true";
+  const modelsStr = env.GEMINI_MODELS || "gemini-3.8-flash,gemini-3.5-flash-lite";
+  const modelsToTry = modelsStr.split(",").map(m => m.trim()).filter(Boolean).slice(0, 2);
 
   const readList = (value: any): string[] => {
     try {
@@ -10307,9 +10336,17 @@ export async function expandTenantIcp(
 Genera hasta 6 segmentos de CLIENTES que compran a este negocio; no devuelvas competidores ni empresas del mismo oficio. No limites el resultado a un mapa cerrado de industrias: usa el perfil completo y deduce compradores B2B o consumidores según el modelo de negocio. Si el ICP no permite una inferencia fiable, devuelve segments vacío. Devuelve SOLO JSON {segments:[{label,osm_tags,keywords,why}]}, ordenado por probabilidad de compra recurrente. osm_tags: 1 a 3 etiquetas OSM válidas como office=estate_agent o amenity=restaurant. Sin texto extra.`;
 
   let geminiResult: any = null;
-  for (const model of modelsToTry) {
-    geminiResult = await tryGemini<any>(model, apiKey, prompt);
-    if (geminiResult) break;
+  if (env.GROQ_API_KEY) {
+    for (const model of ["openai/gpt-oss-20b", "openai/gpt-oss-120b"]) {
+      geminiResult = await tryGroqJson<any>(model, env.GROQ_API_KEY, prompt);
+      if (geminiResult) break;
+    }
+  }
+  if (!geminiResult && geminiPaidTier && apiKey) {
+    for (const model of modelsToTry) {
+      geminiResult = await tryGemini<any>(model, apiKey, prompt);
+      if (geminiResult) break;
+    }
   }
 
   if (!geminiResult || !Array.isArray(geminiResult.segments)) {
@@ -10654,7 +10691,7 @@ export async function generateAICopy(
   `;
 
   // 1. CASCADA GEMINI INTELIGENTE (Prioritizing models from GEMINI_MODELS, max 2 total)
-  const modelsStr = env.GEMINI_MODELS || "gemini-3.5-flash-lite";
+  const modelsStr = env.GEMINI_MODELS || "gemini-3.8-flash,gemini-3.5-flash-lite";
   const modelList = modelsStr.split(",").map(m => m.trim()).filter(Boolean);
   const modelsToTry = modelList.slice(0, 2);
 
@@ -10668,7 +10705,7 @@ export async function generateAICopy(
   }
 
   if (aiUnitReserved) {
-    if (apiKey) {
+    if (apiKey && String(env.GEMINI_PAID_TIER_CONFIRMED || "").trim().toLowerCase() === "true") {
       for (const model of modelsToTry) {
         const res = await tryGemini(model, apiKey, prompt);
         if (res) {
