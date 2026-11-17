@@ -1,27 +1,63 @@
 # Bvelt Radar D1 Migrations
 
-Run migrations sequentially in the Cloudflare D1 console one statement at a time.
+These SQL files are the schema source of truth for the Radar D1 database.
 
-## Execution Order
-1. 0001_initial_schema.sql
-2. 0002_learning_and_outcomes.sql
-3. 0003_bvelt_angle_and_signals.sql
-4. 0004_identity_and_cooldown.sql
-5. 0005_queue_jobs_observability.sql
-6. 0006_trust_decisions_governor.sql
-7. 0007_sender_governor_and_email_verifications.sql
-8. 0008_prospect_event_replies.sql
-9. 0009_tenant_configurations.sql
-10. 0010_queue_job_control.sql
-11. 0011_auto_outreach_and_wins.sql
-12. 0012_demo_views.sql
-13. 0013_seed_businesses.sql
-14. 0014_weather_signals.sql
-15. 0015_outreach_reconciliation.sql
-16. 0016_budget_governor.sql
-17. 0017_evidence_scoring.sql
-18. 0018_daily_missions.sql
+## Execution order
 
-## Note on ALTER TABLE ADD COLUMN
-SQLite has no `IF NOT EXISTS` clause for `ALTER TABLE ADD COLUMN`. 
-If you encounter a duplicate column name error when running an `ALTER TABLE ADD COLUMN` statement in the D1 console because the column was already applied previously, skip and continue.
+Apply each file exactly once, in the order below. Several historical files share a numeric prefix; the full filename, not the prefix alone, identifies a migration.
+
+1. `0001_initial_schema.sql`
+2. `0002_learning_and_outcomes.sql`
+3. `0003_bvelt_angle_and_signals.sql`
+4. `0004_identity_and_cooldown.sql`
+5. `0005_queue_jobs_observability.sql`
+6. `0006_trust_decisions_governor.sql`
+7. `0007_sender_governor_and_email_verifications.sql`
+8. `0008_prospect_event_replies.sql`
+9. `0009_tenant_configurations.sql`
+10. `0010_queue_job_control.sql`
+11. `0011_auto_outreach_and_wins.sql`
+12. `0012_demo_views.sql`
+13. `0013_seed_businesses.sql`
+14. `0014_weather_signals.sql`
+15. `0015_outreach_reconciliation.sql`
+16. `0016_budget_governor.sql`
+17. `0017_evidence_scoring.sql`
+18. `0018_daily_missions.sql`
+19. `0019_add_postal_code.sql`
+20. `0019_research_signals.sql`
+21. `0020_multi_tenant_missions.sql`
+22. `0020_tenant_scoping.sql`
+23. `0021_strategic_scoring.sql`
+24. `0022_opportunity_intelligence.sql`
+25. `0023_email_dispatch_and_open_audits.sql`
+26. `0023_learning_integrity.sql`
+27. `0024_tenant_icp.sql`
+28. `0024_tenant_observation_history.sql`
+29. `0025_geo_coverage.sql`
+30. `0025_reconcile_opportunity_scope.sql`
+31. `0026_outcomes.sql`
+32. `0027_identity_scoped.sql`
+33. `0028_research_evidence.sql`
+34. `0029_tenant_isolation_refresh.sql`
+35. `0030_tenant_profile_contract.sql`
+36. `0031_source_evidence_provenance.sql`
+
+## Production migration procedure
+
+1. Inspect the live schema with `PRAGMA table_info(...)` and inspect table/index definitions in `sqlite_master`. Do not infer migration state from Worker code or CI.
+2. Before a table rebuild, create a timestamped backup copy and verify its row count against the source.
+3. Check for duplicate values against every new unique key before creating the index.
+4. Apply migrations in dependency order. Use the full filename to track duplicate numeric prefixes.
+5. Read back the schema, row counts, indexes and representative records after each migration.
+6. Deploy Worker code that depends on new columns only after the production schema has been verified.
+7. Record the applied migration filename, timestamp, backup table, before/after row counts and deployed Worker SHA in the operational handoff.
+
+There is no `d1_migrations` history table in the current production database. Until a migration ledger is introduced, migration state must be established by schema inspection and recorded explicitly; never assume a file has run because it exists in Git.
+
+## Important migration notes
+
+- `0030_tenant_profile_contract.sql` adds the versioned Bvelt → Radar Tenant profile contract. Legacy rows retain `contract_version = 0` and `verification_state = 'UNKNOWN'`; they must not be silently treated as verified.
+- `0031_source_evidence_provenance.sql` rebuilds `source_evidence`, preserves existing rows and classifies legacy website-scrape records as `DECLARED`. Back up the table and verify the new unique key before running it.
+- SQLite does not support `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`. If a column already exists, inspect the live schema and reconcile the migration state; do not blindly skip errors or rerun a partially completed table rebuild.
+- Never run destructive migrations or reset production data to make tests pass.
