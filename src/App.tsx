@@ -2431,9 +2431,9 @@ const submitDecision = async (prospectId: string, action: string) => {
                                         <p className="text-amber-200">{attackKits[p.id].why_this_lead}</p>
                                                                                 <p className="whitespace-pre-wrap"><span className="text-slate-500">Llamada:</span>{'\n'}{attackKits[p.id].call_script}</p>
                                         <p><span className="text-slate-500">Siguiente:</span> {attackKits[p.id].next_action}</p>
-                                        {p.phone && hasDirectWhatsAppRecipient(p.phone) && toWhatsAppUrl(p.phone, attackKits[p.id].generated_message?.channel === "whatsapp" ? attackKits[p.id].generated_message.body : '') && (
+                                        {attackKits[p.id].generated_message?.channel === "whatsapp" && p.phone && hasDirectWhatsAppRecipient(p.phone) && toWhatsAppUrl(p.phone, attackKits[p.id].generated_message.body) && (
                                           <a
-                                            href={toWhatsAppUrl(p.phone, attackKits[p.id].generated_message?.body || '')!}
+                                            href={toWhatsAppUrl(p.phone, attackKits[p.id].generated_message.body)!}
                                             target="_blank"
                                             rel="noreferrer"
                                             className="inline-block px-2 py-1 rounded bg-emerald-950/50 border border-emerald-800 text-emerald-300 font-bold"
