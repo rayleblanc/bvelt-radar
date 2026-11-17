@@ -5,6 +5,8 @@
  */
 
 export interface ResearchDispatchEnv {
+  GITHUB_ACTIONS_TOKEN_SECRET?: string;
+  /** Legacy dashboard variable. Replace with GITHUB_ACTIONS_TOKEN_SECRET Worker Secret. */
   GITHUB_ACTIONS_TOKEN?: string;
   RADAR_RESEARCH_REPOSITORY?: string;
 }
@@ -24,11 +26,15 @@ export interface ResearchDispatchResult {
 const DEFAULT_REPOSITORY = "rayleblanc/bvelt-radar";
 const WORKFLOW_FILE = "radar-research.yml";
 
+export function resolveGithubActionsToken(env: ResearchDispatchEnv): string {
+  return String(env.GITHUB_ACTIONS_TOKEN_SECRET || env.GITHUB_ACTIONS_TOKEN || "").trim();
+}
+
 export async function dispatchScraplingResearch(
   env: ResearchDispatchEnv,
   input: ResearchDispatchInput
 ): Promise<ResearchDispatchResult> {
-  const token = String(env.GITHUB_ACTIONS_TOKEN || "").trim();
+  const token = resolveGithubActionsToken(env);
   if (!token) return { queued: false, reason: "GITHUB_ACTIONS_TOKEN_NOT_CONFIGURED" };
 
   const repository = String(env.RADAR_RESEARCH_REPOSITORY || DEFAULT_REPOSITORY).trim();
