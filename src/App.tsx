@@ -2252,7 +2252,7 @@ const submitDecision = async (prospectId: string, action: string) => {
                             )}
                             {canOpenDirectChannel && p.phone && hasDirectWhatsAppRecipient(p.phone) && toWhatsAppUrl(p.phone, whatsappMessageBody) && (
                               <a 
-                                href={toWhatsAppUrl(p.phone, messageBody)!}
+                                href={toWhatsAppUrl(p.phone, whatsappMessageBody)!}
                                 target="_blank" 
                                 rel="noreferrer" 
                                 className="px-2.5 py-1 rounded-lg bg-emerald-950/50 border border-emerald-800/40 text-emerald-300 hover:bg-emerald-900/60 flex items-center gap-1 font-bold"
