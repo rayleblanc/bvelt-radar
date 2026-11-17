@@ -86,6 +86,14 @@ export interface RadarJobMessage {
 
 export const WORKERS_AI_FALLBACK_MODEL = "@cf/zai-org/glm-4.7-flash";
 
+export function extractWorkersAiText(result: any): string {
+  if (typeof result === "string") return result.trim();
+  if (typeof result?.response === "string") return result.response.trim();
+  if (typeof result?.result === "string") return result.result.trim();
+  const content = result?.choices?.[0]?.message?.content ?? result?.result?.choices?.[0]?.message?.content;
+  return typeof content === "string" ? content.trim() : "";
+}
+
 export interface Env {
   RADAR_DB: D1Database;
   RADAR_QUEUE?: Queue<RadarJobMessage>;
@@ -5941,20 +5949,12 @@ export async function classifyWithWorkersAI(
           content: `Nombre: ${name}\nWeb: ${website || "n/a"}\nOficio buscado: ${trade}`
         }
       ],
-      max_tokens: 80
+      max_completion_tokens: 256,
+      reasoning_effort: "low",
+      response_format: { type: "json_object" }
     });
 
-    let rawText = "";
-    if (typeof response === "string") {
-      rawText = response;
-    } else if (response && typeof response.response === "string") {
-      rawText = response.response;
-    } else if (response && typeof response.result === "string") {
-      rawText = response.result;
-    } else {
-      rawText = JSON.stringify(response);
-    }
-
+    const rawText = extractWorkersAiText(response);
     const jsonMatch = rawText.match(/\{[\s\S]*\}/);
     if (!jsonMatch) {
       return { ok: true, reason: "no_json_match" };
@@ -10761,19 +10761,18 @@ export async function generateAICopy(
 
     // 3. CLOUDFLARE WORKERS AI (free Neurons) — guerrilla backup, no external key
     if (env.AI && typeof env.AI.run === "function") {
-      console.log(`[Gemini Cascade] Calling Workers AI (Llama) backup...`);
+      console.log(`[Gemini Cascade] Calling Workers AI GLM-4.7 Flash backup...`);
       try {
         const response = await env.AI.run(WORKERS_AI_FALLBACK_MODEL, {
           messages: [
             { role: "system", content: "Reply ONLY with valid JSON: {\"subject\":string,\"body\":string}. No markdown." },
             { role: "user", content: prompt }
           ],
-          max_tokens: 400
+          max_completion_tokens: 512,
+          reasoning_effort: "low",
+          response_format: { type: "json_object" }
         });
-        let rawText = "";
-        if (typeof response === "string") rawText = response;
-        else if (response && typeof (response as any).response === "string") rawText = (response as any).response;
-        else rawText = JSON.stringify(response);
+        const rawText = extractWorkersAiText(response);
         const jsonMatch = rawText.match(/\{[\s\S]*\}/);
         if (jsonMatch) {
           const content = JSON.parse(jsonMatch[0]);
