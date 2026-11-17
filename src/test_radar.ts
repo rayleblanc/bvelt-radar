@@ -1469,7 +1469,7 @@ tests.push({
 tests.push({
   name: "authoritative Budget Governor enforces daily ceilings and concurrency",
   run: async () => {
-    const { getBudgetLimit, reserveBudget, releaseBudget, getCircuitBreakerStatus, tripCircuitBreaker, trackProviderFailure } = await import('./worker');
+    const { getBudgetLimit, buildBudgetUsageSnapshot, reserveBudget, releaseBudget, getCircuitBreakerStatus, tripCircuitBreaker, trackProviderFailure } = await import('./worker');
     
     // 1. Verify budget limits
     assert(getBudgetLimit('discovery_units') === 45, "Discovery daily budget must be 45");
@@ -1478,6 +1478,11 @@ tests.push({
     assert(getBudgetLimit('hunter_units') === 8, "Hunter daily budget must be 8");
     assert(getBudgetLimit('outreach_units') === 3, "Outreach daily budget must be 3");
     assert(getBudgetLimit('finalize_units') === 10, "Finalize daily budget must be 10");
+    const reported = buildBudgetUsageSnapshot({ discovery_units: 3, enrichment_units: 4, ai_units: 2, hunter_units: 1, outreach_units: 1 });
+    assert(reported.discovery.max === getBudgetLimit('discovery_units'), "Health discovery max must match the enforced budget");
+    assert(reported.enrichment.max === 20 && reported.enrichment.max === getBudgetLimit('enrichment_units'), "Health enrichment max must match the enforced 20-unit budget");
+    assert(reported.AI.max === getBudgetLimit('ai_units') && reported.Hunter.max === getBudgetLimit('hunter_units') && reported.outreach.max === getBudgetLimit('outreach_units'), "All health budget maxima must match the enforced limits");
+    assert(reported.enrichment.used === 4, "Health budget usage must preserve the persisted usage value");
 
     // 2. Set up our Mock Database
     const records = new Map<string, any>();
