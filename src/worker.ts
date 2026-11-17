@@ -10828,7 +10828,7 @@ export async function generateAICopy(
     const body = isSpanish
       ? `Hola equipo de ${prospect.name || "su empresa"}, somos ${tenantInfo.tenant_name}. Ofrecemos ${services}${area}. ¿Este tipo de servicio podría ser útil para su equipo? Si tiene sentido, puedo compartir información concreta sobre lo que ofrecemos.`
       : `Hi ${prospect.name || "team"}, we're ${tenantInfo.tenant_name}. We provide ${services}${area}. Could this type of service be relevant to your team? If useful, I can share specific information about what we offer.`;
-    return { subject: channel === "whatsapp" ? "" : subject, body, source: "template" };
+    return { subject, body, source: "template" };
   }
   if (channel === "whatsapp") {
     const body = isSpanish
