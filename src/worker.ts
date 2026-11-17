@@ -10692,7 +10692,7 @@ export async function generateAICopy(
     11. JSON format: {"subject": "...", "body": "..."}
   `;
 
-  // 1. CASCADA GEMINI INTELIGENTE (Prioritizing models from GEMINI_MODELS, max 2 total)
+  // AI CASCADE: Groq first; paid-tier Gemini only after Groq fails.
   const modelsStr = env.GEMINI_MODELS || "gemini-3.8-flash,gemini-3.5-flash-lite";
   const modelList = modelsStr.split(",").map(m => m.trim()).filter(Boolean);
   const modelsToTry = modelList.slice(0, 2);
@@ -10707,21 +10707,11 @@ export async function generateAICopy(
   }
 
   if (aiUnitReserved) {
-    if (apiKey && String(env.GEMINI_PAID_TIER_CONFIRMED || "").trim().toLowerCase() === "true") {
-      for (const model of modelsToTry) {
-        const res = await tryGemini(model, apiKey, prompt);
-        if (res) {
-          await commitBudget(env.RADAR_DB, tenantId, 'ai_units', 1);
-          return { subject: String(res.subject), body: String(res.body), source: "gemini" };
-        }
-      }
-    }
-
-    // 2. GROQ FALLBACK — free-tier safe (llama-3.3 decommissioned on free)
+    // 1. GROQ PRIMARY — GPT-OSS models available on the free developer tier.
     if (env.GROQ_API_KEY) {
       const groqModels = ["openai/gpt-oss-20b", "openai/gpt-oss-120b"];
       for (const groqModel of groqModels) {
-        console.log(`[Gemini Cascade] Calling Groq backup model: ${groqModel}`);
+        console.log(`[AI Cascade] Calling Groq primary model: ${groqModel}`);
         try {
           const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
             method: "POST",
@@ -10743,25 +10733,35 @@ export async function generateAICopy(
             if (raw) {
               const content = typeof raw === "string" ? JSON.parse(raw) : raw;
               if (content.subject && content.body) {
-                console.log(`[Gemini Cascade] Success using Groq ${groqModel}`);
+                console.log(`[AI Cascade] Success using Groq ${groqModel}`);
                 await commitBudget(env.RADAR_DB, tenantId, 'ai_units', 1);
                 return { subject: content.subject, body: content.body, source: "groq" };
               }
             }
           } else {
             const errTxt = await response.text().catch(() => "");
-            console.warn(`[Gemini Cascade] Groq ${groqModel} status ${response.status}: ${errTxt.slice(0, 180)}`);
+            console.warn(`[AI Cascade] Groq ${groqModel} returned status ${response.status}`);
             if (response.status === 404 || response.status === 400) continue;
           }
         } catch (e: any) {
-          console.warn(`[Gemini Cascade] Groq ${groqModel} failed:`, e.message);
+          console.warn(`[AI Cascade] Groq ${groqModel} failed:`, String(e?.message || e).slice(0, 160));
         }
       }
     }
 
-    // 3. CLOUDFLARE WORKERS AI (free Neurons) — guerrilla backup, no external key
+    if (apiKey && String(env.GEMINI_PAID_TIER_CONFIRMED || "").trim().toLowerCase() === "true") {
+      for (const model of modelsToTry) {
+        const res = await tryGemini(model, apiKey, prompt);
+        if (res) {
+          await commitBudget(env.RADAR_DB, tenantId, 'ai_units', 1);
+          return { subject: String(res.subject), body: String(res.body), source: "gemini" };
+        }
+      }
+    }
+
+    // 3. CLOUDFLARE WORKERS AI (free Neurons) — no external key
     if (env.AI && typeof env.AI.run === "function") {
-      console.log(`[Gemini Cascade] Calling Workers AI GLM-4.7 Flash backup...`);
+      console.log(`[AI Cascade] Calling Workers AI GLM-4.7 Flash backup...`);
       try {
         const response = await env.AI.run(WORKERS_AI_FALLBACK_MODEL, {
           messages: [
@@ -10777,13 +10777,13 @@ export async function generateAICopy(
         if (jsonMatch) {
           const content = JSON.parse(jsonMatch[0]);
           if (content.subject && content.body) {
-            console.log(`[Gemini Cascade] Success using Workers AI backup`);
+            console.log(`[AI Cascade] Success using Workers AI backup`);
             await commitBudget(env.RADAR_DB, tenantId, 'ai_units', 1);
             return { subject: String(content.subject), body: String(content.body), source: "workers_ai" };
           }
         }
       } catch (e: any) {
-        console.warn("[Gemini Cascade] Workers AI backup failed:", e.message);
+        console.warn("[AI Cascade] Workers AI backup failed:", String(e?.message || e).slice(0, 160));
       }
     }
 
@@ -10792,7 +10792,7 @@ export async function generateAICopy(
   }
 
   // 4. Deterministic fallback is explicitly labelled; Tenant must never fall back to a Bvelt sales pitch.
-  console.log(`[Gemini Cascade] All AI pipelines failed or budget exceeded. Reverting to deterministic backup template.`);
+  console.log(`[AI Cascade] All AI providers failed or budget exceeded. Reverting to deterministic backup template.`);
   if (tenantInfo) {
     const services = tenantServices || String(tenantInfo.industry || "configured services");
     const area = tenantAreas ? ` in ${tenantAreas}` : "";
