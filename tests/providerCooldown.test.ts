@@ -8,7 +8,7 @@ import {
   providerCooldownKey,
   type ProviderCooldownDatabase
 } from "../src/providerCooldown";
-import { generateAICopy } from "../src/worker";
+import { generateAICopy, WORKERS_AI_FALLBACK_MODEL } from "../src/worker";
 
 type StoredRow = { value: string; expires_at: number };
 
@@ -158,4 +158,145 @@ describe("provider/model cooldown policy", () => {
       globalThis.fetch = originalFetch;
     }
   });
+
+  it("suppresses repeated Groq calls after provider 5xx responses", async () => {
+    const rows = new Map<string, StoredRow>();
+    const db = createDb(rows);
+    const originalFetch = globalThis.fetch;
+    let groqCalls = 0;
+    let workersAiCalls = 0;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      if (!String(input).includes("api.groq.com")) throw new Error("unexpected test fetch target");
+      groqCalls += 1;
+      return new Response("upstream unavailable", { status: 503 });
+    }) as typeof fetch;
+
+    const env: any = {
+      RADAR_DB: db,
+      GROQ_API_KEY: "unit-test-key",
+      AI: {
+        async run() {
+          workersAiCalls += 1;
+          return { response: JSON.stringify({ subject: "A question", body: "Would it be useful to compare notes?" }) };
+        }
+      }
+    };
+    const prospect = { id: "cooldown-503", tenant_id: "founder", mode: "founder", name: "Example Plumbing", trade: "Plumbing", city: "Austin" };
+
+    try {
+      const first = await generateAICopy(prospect, "missed_calls", env);
+      const second = await generateAICopy(prospect, "missed_calls", env);
+      assert.equal(first.source, "workers_ai");
+      assert.equal(second.source, "workers_ai");
+      assert.equal(groqCalls, 2, "both models are attempted only on the first request");
+      assert.equal(workersAiCalls, 2);
+      assert.equal(JSON.parse(rows.get(providerCooldownKey("groq", "openai/gpt-oss-20b"))!.value).failureClass, "server_error");
+      assert.equal(JSON.parse(rows.get(providerCooldownKey("groq", "openai/gpt-oss-120b"))!.value).failureClass, "server_error");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("records timeouts and suppresses repeated provider attempts", async () => {
+    const rows = new Map<string, StoredRow>();
+    const db = createDb(rows);
+    const originalFetch = globalThis.fetch;
+    let groqCalls = 0;
+    let workersAiCalls = 0;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      if (!String(input).includes("api.groq.com")) throw new Error("unexpected test fetch target");
+      groqCalls += 1;
+      throw Object.assign(new Error("The operation timed out"), { name: "TimeoutError" });
+    }) as typeof fetch;
+
+    const env: any = {
+      RADAR_DB: db,
+      GROQ_API_KEY: "unit-test-key",
+      AI: {
+        async run() {
+          workersAiCalls += 1;
+          return { response: JSON.stringify({ subject: "A question", body: "Would it be useful to compare notes?" }) };
+        }
+      }
+    };
+    const prospect = { id: "cooldown-timeout", tenant_id: "founder", mode: "founder", name: "Example Plumbing", trade: "Plumbing", city: "Austin" };
+
+    try {
+      const first = await generateAICopy(prospect, "missed_calls", env);
+      const second = await generateAICopy(prospect, "missed_calls", env);
+      assert.equal(first.source, "workers_ai");
+      assert.equal(second.source, "workers_ai");
+      assert.equal(groqCalls, 2);
+      assert.equal(workersAiCalls, 2);
+      assert.equal(JSON.parse(rows.get(providerCooldownKey("groq", "openai/gpt-oss-20b"))!.value).failureClass, "timeout");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("treats an empty successful HTTP payload as invalid and enters cooldown", async () => {
+    const rows = new Map<string, StoredRow>();
+    const db = createDb(rows);
+    const originalFetch = globalThis.fetch;
+    let groqCalls = 0;
+    let workersAiCalls = 0;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      if (!String(input).includes("api.groq.com")) throw new Error("unexpected test fetch target");
+      groqCalls += 1;
+      return new Response(JSON.stringify({ choices: [{ message: { content: "" } }] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    }) as typeof fetch;
+
+    const env: any = {
+      RADAR_DB: db,
+      GROQ_API_KEY: "unit-test-key",
+      AI: {
+        async run() {
+          workersAiCalls += 1;
+          return { response: JSON.stringify({ subject: "A question", body: "Would it be useful to compare notes?" }) };
+        }
+      }
+    };
+    const prospect = { id: "cooldown-empty", tenant_id: "founder", mode: "founder", name: "Example Plumbing", trade: "Plumbing", city: "Austin" };
+
+    try {
+      const first = await generateAICopy(prospect, "missed_calls", env);
+      const second = await generateAICopy(prospect, "missed_calls", env);
+      assert.equal(first.source, "workers_ai");
+      assert.equal(second.source, "workers_ai");
+      assert.equal(groqCalls, 2);
+      assert.equal(workersAiCalls, 2);
+      assert.equal(JSON.parse(rows.get(providerCooldownKey("groq", "openai/gpt-oss-20b"))!.value).failureClass, "invalid_response");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("backs off Workers AI after its quota returns 429 and uses deterministic copy", async () => {
+    const rows = new Map<string, StoredRow>();
+    const db = createDb(rows);
+    let workersAiCalls = 0;
+    const env: any = {
+      RADAR_DB: db,
+      AI: {
+        async run() {
+          workersAiCalls += 1;
+          throw Object.assign(new Error("Workers AI daily quota exhausted"), { status: 429 });
+        }
+      }
+    };
+    const prospect = { id: "cooldown-ai-quota", tenant_id: "founder", mode: "founder", name: "Example Plumbing", trade: "Plumbing", city: "Austin" };
+
+    const first = await generateAICopy(prospect, "missed_calls", env);
+    const second = await generateAICopy(prospect, "missed_calls", env);
+    const stored = rows.get(providerCooldownKey("workers_ai", WORKERS_AI_FALLBACK_MODEL));
+
+    assert.equal(first.source, "template");
+    assert.equal(second.source, "template");
+    assert.equal(workersAiCalls, 1, "Workers AI is called once and skipped while its cooldown is active");
+    assert.equal(JSON.parse(stored!.value).failureClass, "rate_limited");
+  });
+
 });
