@@ -684,8 +684,8 @@ const submitDecision = async (prospectId: string, action: string) => {
       // Success: update local opportunities and prospects state immediately so closed/dispatched items leave open list
       setProspects(prev => prev.map(p => p.id === prospectId ? {
         ...p,
-        status: (action === 'sent' || action === 'approve' || action === 'email_manual_sent') ? 'sent' : action === 'wa_sent' ? 'contacted' : (action === 'discard' ? 'discarded' : action === 'replied' ? 'replied' : p.status),
-        outcome: action === 'wa_sent' ? 'whatsapp_manual_sent' : action === 'email_manual_sent' ? 'email_manual_sent' : p.outcome
+        status: (action === 'sent' || action === 'approve') ? 'sent' : action === 'wa_sent' ? 'contacted' : (action === 'discard' ? 'discarded' : action === 'replied' ? 'replied' : p.status),
+        outcome: action === 'wa_sent' ? 'whatsapp_manual_sent' : p.outcome
       } : p));
 
       fetchTelemetry();
@@ -1624,20 +1624,17 @@ const submitDecision = async (prospectId: string, action: string) => {
                           )}
                           <div className="flex flex-wrap items-center gap-2 pt-1 font-mono text-[11px]">
                             {canOpenDirectChannel && emailRecipient && isVerifiedEmailRecipient(p) && (
-                              <a 
-                                href={`mailto:${emailRecipient}?subject=${encodeURIComponent(emailMessageSubject)}&body=${encodeURIComponent(emailMessageBody)}`}
-                                target="_blank" 
-                                rel="noreferrer" 
+                              <button
+                                type="button"
                                 className="px-2.5 py-1 rounded-lg bg-blue-950/50 border border-blue-800/40 text-blue-300 hover:bg-blue-900/60 flex items-center gap-1 font-bold"
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  setShowOutcomeControls(prev => ({ ...prev, [p.id]: true }));
-                                   void recordProspectMessageEvent(p.id, 'message_channel_opened', 'email');
+                                  if (window.confirm(`¿Enviar ahora el correo preparado a ${emailRecipient} mediante el proveedor configurado?`)) void submitDecision(p.id, 'approve');
                                 }}
                               >
                                 <Mail className="w-3.5 h-3.5 text-blue-400" />
-                                Correo
-                              </a>
+                                Enviar correo
+                              </button>
                             )}
                             {canOpenWhatsApp && p.phone && hasDirectWhatsAppRecipient(p.phone) && toWhatsAppUrl(p.phone, whatsappMessageBody) && (
                               <a 
@@ -1717,15 +1714,7 @@ const submitDecision = async (prospectId: string, action: string) => {
                           {(showOutcomeControls[p.id] || isExpanded) && (
                             <div className="pt-2 border-t border-slate-900/80 space-y-2" onClick={(e) => e.stopPropagation()}>
                               <span className="text-[10px] font-mono text-slate-400 font-bold uppercase block">Registrar Resultado:</span>
-                              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                                {emailRecipient && isVerifiedEmailRecipient(p) && (
-                                  <button
-                                    onClick={() => { if (window.confirm('¿Enviaste manualmente este correo desde tu aplicación de email?')) void submitDecision(p.id, 'email_manual_sent'); }}
-                                    className="py-2 px-2.5 text-xs font-bold font-mono rounded-lg bg-blue-900/30 border border-blue-700/40 text-blue-300 hover:bg-blue-800/50 transition-colors"
-                                  >
-                                    Confirmar envío manual
-                                  </button>
-                                )}
+                              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
                                 <button
                                   onClick={() => submitDecision(p.id, 'replied')}
                                   className="py-2 px-2.5 text-xs font-bold font-mono rounded-lg bg-amber-900/30 border border-amber-700/40 text-amber-300 hover:bg-amber-800/50 transition-colors"
