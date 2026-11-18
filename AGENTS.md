@@ -62,3 +62,14 @@
 5. Separar cambios de Founder/Tenant y probar aislamiento, idempotencia, errores de fuente y recuperación.
 6. Tras checks verdes y diff revisado, usar la autorización permanente de deploy Radar; comprobar versión 100%, bindings, cron y runtime.
 7. Reportar archivos, SHA, PR/merge, logs, pruebas, deploy/smoke, riesgos y bloqueos reales.
+
+
+## Execution checkpoint — 2026-11-18 (branch-only; no PR/merge/deploy)
+
+- Active branch: `work/manual-first-outreach-20261118`.
+- Last compare against `main`: 8 commits ahead / 4 behind; merge base `ef06458790cd446ec3f0549d3cda826e187f816e`; main tip at comparison `d61c9638b2d4f1c154849aac804be42ec2805b19`. No bulk rebase/merge; review the remaining four main commits by file.
+- Ported from main the additive provider/model cooldown implementation into existing `radar_cache` D1 table under `provider_cooldown:v1:`. No migration or new paid service is introduced. Groq, Gemini and Workers AI share cooldown across isolates; 429/Retry-After, 5xx, timeout, model-not-found, auth, invalid response and network failures are classified. Current model names and provider sequence remain unchanged.
+- The cooldown test file is added to `test:radar`; the custom Founder test suite was corrected so its legacy auto-send examples now assert the hard manual gate rather than the old auto-send behavior.
+- `FOUNDER_MANUAL_APPROVAL_REQUIRED=true` remains in worker source and `isFounderAutoOutreachAllowed` returns false even when the legacy auto-send variable is true. Telegram human approval remains the only Founder send path.
+- These changes are on the branch only. No npm build, lint, custom Radar test, provider cooldown test, Sidecar test, GitHub Actions run or runtime smoke was executed in this session. Do not call CI green or the provider cooldown production-active until verified by actual runs/deploy.
+- Do not carry stale historical secret-status notes forward as a current blocker. User confirmed the GitHub Actions token issue is resolved; never read or disclose any secret values.
