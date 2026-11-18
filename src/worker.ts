@@ -86,6 +86,26 @@ export interface RadarJobMessage {
 
 export const WORKERS_AI_FALLBACK_MODEL = "@cf/zai-org/glm-4.7-flash";
 
+/**
+ * Founder acquisition remains human-approved until paid demand, compliance,
+ * suppression and delivery observability gates are explicitly closed.
+ * A legacy FOUNDER_AUTO_OUTREACH=true binding cannot bypass this policy.
+ */
+export const FOUNDER_MANUAL_APPROVAL_REQUIRED = true;
+
+export function isFounderAutoOutreachAllowed(
+  configured: boolean,
+  mode: string,
+  outreachPaused: boolean,
+  qualified: boolean
+): boolean {
+  return !FOUNDER_MANUAL_APPROVAL_REQUIRED &&
+    mode === "founder" &&
+    !outreachPaused &&
+    configured &&
+    qualified;
+}
+
 export function normalizeGeneratedMessage(
   value: any,
   channel: "email" | "whatsapp"
@@ -7651,11 +7671,12 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
   const isStrongAuto = scoreVal >= autoMinScore && Boolean(prospect.email);
   const autoFlag = String(env.FOUNDER_AUTO_OUTREACH !== undefined && env.FOUNDER_AUTO_OUTREACH !== "" ? env.FOUNDER_AUTO_OUTREACH : "true").toLowerCase();
   const outreachPaused = ["true", "1", "yes"].includes(String(env.RADAR_OUTREACH_PAUSE || "").trim().toLowerCase());
-  const isAutoOutreachEnabled =
-    job.mode === "founder" &&
-    !outreachPaused &&
-    (autoFlag === "true" || autoFlag === "1" || autoFlag === "yes") &&
-    (isElite || isStrongAuto);
+  const isAutoOutreachEnabled = isFounderAutoOutreachAllowed(
+    autoFlag === "true" || autoFlag === "1" || autoFlag === "yes",
+    job.mode,
+    outreachPaused,
+    isElite || isStrongAuto
+  );
 
   const todayDate = new Date().toISOString().split('T')[0];
   const idempotencyKey = `idempotency:${prospect.id}:${(prospect.email || '').toLowerCase().trim()}:${todayDate}`;
@@ -11279,7 +11300,12 @@ export async function collectRadarDigest(env: Env): Promise<RadarDigest> {
   const paused = env.RADAR_GLOBAL_PAUSE === "true" || env.RADAR_GLOBAL_PAUSE === "1";
   const outPaused = env.RADAR_OUTREACH_PAUSE === "true" || env.RADAR_OUTREACH_PAUSE === "1";
   const autoFlag = String(env.FOUNDER_AUTO_OUTREACH !== undefined && env.FOUNDER_AUTO_OUTREACH !== "" ? env.FOUNDER_AUTO_OUTREACH : "true").toLowerCase();
-  const autoOn = autoFlag === "true" || autoFlag === "1" || autoFlag === "yes";
+  const autoOn = isFounderAutoOutreachAllowed(
+    autoFlag === "true" || autoFlag === "1" || autoFlag === "yes",
+    "founder",
+    outPaused,
+    true
+  );
 
   const blockers: string[] = [];
   if (!has(env.TELEGRAM_BOT_TOKEN) || !has(env.TELEGRAM_CHAT_ID)) blockers.push("Falta TELEGRAM_BOT_TOKEN o TELEGRAM_CHAT_ID");
@@ -11319,6 +11345,7 @@ export async function collectRadarDigest(env: Env): Promise<RadarDigest> {
   lines.push(`<b>Corridas:</b> ${runs} · <b>Jobs discovery:</b> ${nJobs} (${nZero} con 0 resultados) · <b>Jobs fallidos:</b> ${nFailed}`);
   lines.push(`<b>Prospectos nuevos:</b> ${nCreated} · <b>con email:</b> ${nEmail}`);
   lines.push(`<b>Enviados/programados:</b> ${nSent} · <b>esperando tu aprobación:</b> ${nWaiting}`);
+  lines.push("<b>Founder outreach:</b> aprobación humana obligatoria; no hay autoenvío.");
   lines.push(`<b>Presupuesto hoy:</b> discovery restante ${remDisc} · outreach restante ${remOut}${gov ? ` · envíos hoy ${gov.sends_today ?? 0}` : ""}`);
   if (blockedRows.length > 0) {
     lines.push("");
@@ -11349,6 +11376,7 @@ export async function collectRadarDigest(env: Env): Promise<RadarDigest> {
     data: {
       runs, discovery_jobs: nJobs, zero_result_jobs: nZero, failed_jobs: nFailed,
       new_prospects: nCreated, with_email: nEmail, sent: nSent, waiting_approval: nWaiting,
+      outreach_mode: "manual_approval_required",
       blocked_by: blockedRows, blockers, remaining: { discovery: remDisc, outreach: remOut },
       circuit_breaker: cb, last_job_error: lastFail?.error || null
     }
