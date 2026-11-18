@@ -207,16 +207,11 @@ tests.push({
 });
 
 tests.push({
-  name: "RADAR_OUTREACH_PAUSE forces manual approval instead of automatic sends",
+  name: "Founder outreach is human-approved regardless of pause state",
   run: () => {
-    const shouldAutoSend = (paused: string, score: number) => {
-      const isPaused = ["true", "1", "yes"].includes(String(paused || "").trim().toLowerCase());
-      const isEligible = score >= 80 || score >= 70;
-      return !isPaused && isEligible;
-    };
-    assert(shouldAutoSend("false", 90), "Auto outreach may remain enabled when explicitly unpaused");
-    assert(!shouldAutoSend("true", 90), "Explicit pause must prevent autonomous sends");
-    assert(!shouldAutoSend("1", 90), "Numeric pause must prevent autonomous sends");
+    assert(!isFounderAutoOutreachAllowed(true, "founder", false, true), "Unpaused Founder auto flag must not bypass approval");
+    assert(!isFounderAutoOutreachAllowed(true, "founder", true, true), "Paused Founder outreach remains blocked");
+    assert(!isFounderAutoOutreachAllowed(true, "founder", false, false), "Unqualified prospects remain blocked");
   }
 });
 
@@ -1062,13 +1057,9 @@ tests.push({
   name: "Tenant mode cannot use founder auto-outreach bypass and suppressed prospects are blocked",
   run: async () => {
     // Tenant mode check
-    const isTenantAutoAllowed = (mode: string, envAuto: string) => {
-      return mode === 'founder' && envAuto === 'true';
-    };
-
-    assert(isTenantAutoAllowed('tenant', 'true') === false, "Tenant mode MUST NOT use founder auto-outreach bypass");
-    assert(isTenantAutoAllowed('founder', 'true') === true, "Founder mode WITH FOUNDER_AUTO_OUTREACH=true is allowed");
-    assert(isTenantAutoAllowed('founder', 'false') === false, "Founder mode WITH FOUNDER_AUTO_OUTREACH=false requires manual approval");
+    assert(!isFounderAutoOutreachAllowed(true, "tenant", false, true), "Tenant mode MUST NOT use Founder outreach");
+    assert(!isFounderAutoOutreachAllowed(true, "founder", false, true), "Legacy FOUNDER_AUTO_OUTREACH=true must still require manual approval");
+    assert(!isFounderAutoOutreachAllowed(false, "founder", false, true), "Disabled configuration must remain blocked");
 
     // Suppressed check
     const mockSuppressionList = new Set(["suppressed@contractor.com", "suppresseddomain.com"]);
@@ -1082,16 +1073,18 @@ tests.push({
   }
 });
 
-// Test A: Founder + auto=true + prospect valido -> can reach auto-send
+// Legacy auto-send flags remain blocked by the hard manual-approval gate.
 tests.push({
-  name: "TEST A: Founder + auto=true + prospect valido -> auto-send allowed without manual approval",
+  name: "Founder + auto=true + qualified prospect still requires Telegram human approval",
   run: () => {
-    const mode = "founder";
-    const envAuto = "true";
     const prospect = { id: "p1", score: 85, email: "prospect1@example.com" };
-
-    const isAutoSendAllowed = mode === "founder" && envAuto === "true" && prospect.score >= 45 && !!prospect.email;
-    assert(isAutoSendAllowed === true, "Founder mode with auto=true and valid prospect must allow auto-send");
+    const isAutoSendAllowed = isFounderAutoOutreachAllowed(
+      true,
+      "founder",
+      false,
+      prospect.score >= 45 && !!prospect.email
+    );
+    assert(isAutoSendAllowed === false, "Founder outreach must remain human-approved even for qualified prospects");
   }
 });
 
