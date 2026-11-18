@@ -181,3 +181,10 @@ The connected production D1 database already contains the newer tables and colum
 ### Validation
 
 GitHub Actions runs `npm ci`, `npm run build`, `npm run test:radar` and the Sidecar test suite. Cloudflare Workers Builds uses `npm run build` followed by `npm run deploy`.
+
+
+## Founder outreach — manual approval gate
+
+Founder prospecting is currently a manual-first acquisition experiment. The Worker enforces `FOUNDER_MANUAL_APPROVAL_REQUIRED=true` in code, so a legacy `FOUNDER_AUTO_OUTREACH=true` binding cannot auto-send email. Eligible prospects are routed to the interactive Telegram approval queue. The 24-hour digest reports this mode explicitly.
+
+Do not remove this hard gate until paid demand, legal/channel review, suppression and opt-out handling, and delivery observability have been demonstrated and the owner explicitly approves the change. This policy does not change Tenant Mode or the AI provider cascade.
