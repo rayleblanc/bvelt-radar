@@ -874,11 +874,12 @@ const submitDecision = async (prospectId: string, action: string) => {
     if (cooldown > Date.now()) return 'BLOCKED';
     if (['replied','human_review','positive','question','booked','won','converted'].includes(s) || ['positive','replied','booked','won','converted'].includes(outcome)) return 'REPLIED';
     if (['sent','delivered','opened','clicked','contacted'].includes(s) || ['sent','delivered','whatsapp_manual_sent'].includes(outcome)) return 'SENT';
-    if (s === 'approved' || (s === 'notified' && outcome === 'whatsapp_manual_ready')) return 'READY';
+    if (s === 'approved' && p.contactability?.send_authorized && p.contactability.contact_available) return 'READY';
     return 'NEW';
   };
   const getStatusBadge = (p: Prospect) => {
     const s = String(p.status || '').toLowerCase();
+    if (s === 'notified' && String(p.outcome || '').toLowerCase() === 'whatsapp_manual_ready') return { label: 'WA DRAFT · CONSENT REQUIRED', color: 'bg-amber-950/60 text-amber-200 border-amber-800/60' };
     if (s === 'bounced' || s === 'bounce') return { label: 'BOUNCED', color: 'bg-rose-950/80 text-rose-300 border-rose-800' };
     if (s === 'out_of_office' || s === 'ooo') return { label: 'OUT OF OFFICE', color: 'bg-amber-950/80 text-amber-300 border-amber-800' };
     if (s === 'not_now') return { label: 'NOT NOW', color: 'bg-amber-950/50 text-amber-400 border-amber-800/40' };
