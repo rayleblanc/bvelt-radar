@@ -11,6 +11,7 @@ BVELT_TENANT_INGEST_URL = "https://bvelt.app/api/radar/tenant-observations"
 GEMINI_MODELS = "gemini-3.8-flash,gemini-3.5-flash-lite"
 GEMINI_PAID_TIER_CONFIRMED = "false"
 FOUNDER_AUTO_OUTREACH = "false" # Founder prospecting remains manual until explicitly re-enabled after compliance review
+GITHUB_ACTIONS_TOKEN = "" # Legacy plaintext binding intentionally blanked; use encrypted GITHUB_ACTIONS_TOKEN_SECRET only
 
 # Secrets are configured in the Cloudflare Dashboard (not required in this file
 # for preview builds). Runtime auth stays fail-closed when a key is missing:
@@ -60,6 +61,7 @@ crons = ["0 12,17,22 * * *"]
 
 [observability]
 enabled = true
+redact_query_string = true
 
 # Workers AI: Clef-flash classify + Llama copy fallback (10k Neurons/day free)
 [ai]
