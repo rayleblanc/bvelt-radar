@@ -11,7 +11,7 @@
 - Radar observa y descubre empresas, buyers, señales y oportunidades originales.
 - Founder Mode encuentra compradores potenciales para Bvelt.
 - Core Founder discovery, D1 persistence, queue processing, AI drafting and manual contact must not depend on GitHub Actions. Actions/Scrapling is optional enrichment only; its failure is a visible degraded state, never a reason to suppress core discovery.
-- The Founder PWA is an owner-only workbench: Contactar is the default view; primary navigation is Contactar / Oportunidades / Más. Preserve Mission and Tenant configuration functionality under secondary navigation.
+- The Founder PWA is an owner-only contact workbench. Current primary destinations are **Contactar** and **Configuración Tenant** only. Missions, opportunity scoring, research, budgets, queues and learning remain backend capabilities; do not restore separate Missions or Opportunities dashboards unless a concrete founder action requires them. This 18-11 P7.1 contract supersedes earlier navigation descriptions in this file.
 - Every contact flow distinguishes channel opened, account verified, opt-in evidenced, message sent and reply received. WhatsApp deep links are manual; never mark a send from a link click. Server-side confirmation requires the existing verifiable opt-in evidence and cooldown gates.
 - Tenant Mode encuentra oportunidades para cada negocio autenticado a partir del perfil/ICP/territorio canónico de Bvelt.
 - Prospect research C23 usa realm=PROSPECT; no es evidencia Tenant ni entra en BEM Tenant outcomes/metrics/learning.
