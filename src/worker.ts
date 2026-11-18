@@ -3641,6 +3641,13 @@ export async function maybeDispatchSidecarResearch(
     return false;
   }
 
+  // Scrapling is optional enrichment. Without the encrypted dispatch credential,
+  // skip before reserving D1 dispatch state; core discovery/queue completion remains healthy.
+  if (!env.GITHUB_ACTIONS_TOKEN_SECRET?.trim()) {
+    console.info("[maybeDispatchSidecarResearch] Optional sidecar unavailable: GITHUB_ACTIONS_TOKEN_SECRET not configured; core Radar run remains complete.");
+    return false;
+  }
+
   try {
     // 1. Verify all discovery jobs for this run are finished
     const pendingRes = (await env.RADAR_DB.prepare(`
