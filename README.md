@@ -1,8 +1,10 @@
 # 📡 bvelt-radar v2
 
+**Plan maestro único:** [Bvelt Ecosystem Master Plan](https://github.com/rayleblanc/LocalFlowPro/blob/main/docs/MASTER_PLAN_BVELT_ECOSYSTEM_2026-12-10.md). Las reglas específicas de Radar están en AGENTS.md; este README es referencia operativa, no un plan paralelo.
+
 **bvelt-radar** es un Cloudflare Worker autónomo para prospección B2B y descubrimiento de negocios de servicios en los mercados y nichos configurados para **Bvelt**.
 
-> ⚠️ **Nota Importante:** La versión v1 **NO envía emails automáticamente**. El sistema busca, califica con algoritmo multi-factor, redacta el copy con psicología de contratista y te lo entrega por Telegram con botones interactivos. Tú decides, copias y envías.
+> **Outbound contact is gated:** Radar may discover, qualify and prepare prospect decisions, but real email delivery is not assumed to be enabled. It requires verified sender/domain configuration, compliance and suppression controls. Scrapling dispatch requires the encrypted Worker Secret GITHUB_ACTIONS_TOKEN_SECRET; the legacy plaintext binding is not accepted.
 
 ---
 
@@ -19,10 +21,7 @@
 
 ## 🗄️ Esquema de Base de Datos D1
 
-* **`migrations/0001_initial_schema.sql`**: Tablas base `prospects`, `runs`, `seeds_optional`, `suppression`, `tenant_config`.
-* **`migrations/0002_learning_and_outcomes.sql`**: Columnas `outcome`, `variant_id`, `score_breakdown`, índices de aprendizaje y tabla `learning_stats`.
-
----
+El árbol actual de migraciones llega a 0032. Hay números de secuencia duplicados (0019, 0020, 0023, 0024 y 0025) por razones históricas. No renombres ni reescribas migraciones ya aplicadas. La base de producción fue observada sin una tabla d1_migrations reconciliada; compara el esquema real y la documentación migrations/README antes de cualquier operación. Consulta la sección P11 del plan maestro canónico.
 
 ## ⚙️ Despliegue en Cloudflare (5 Pasos)
 
@@ -32,11 +31,9 @@ npx wrangler d1 create bvelt-radar-db
 ```
 Copia el `database_id` en `wrangler.toml`.
 
-### 2. Aplicar Migraciones SQL
-```bash
-npx wrangler d1 migrations apply bvelt-radar-db --local   # Desarrollo
-npx wrangler d1 migrations apply bvelt-radar-db --remote  # Producción
-```
+### 2. Verificar y aplicar migraciones con seguridad
+
+No ejecutes `wrangler d1 migrations apply` en producción de forma ciega. Primero compara el esquema real de D1 con las migraciones, resuelve el baseline/ledger y revisa los números duplicados. No alteres archivos históricos. Sigue migrations/README y la sección P11 del plan maestro canónico. Las pruebas locales deben utilizar una base efímera o un baseline explícitamente reconciliado.
 
 ### 3. Configurar Secretos y Variables de Configuración
 
