@@ -4497,7 +4497,7 @@ export function resolveProspectContactability(prospect: any): {
   const decisionState = String(prospect?.decision_state || "").toLowerCase();
   const commercialProspect = !["disqualified", "discarded", "suppressed", "blocked", "off_icp", "rejected"].includes(status) && !["disqualified", "off_icp", "no_go", "do_not_contact", "suppressed", "blocked"].includes(decisionState);
   const contactAvailable = emailAvailable || phoneAvailable;
-  const sendConfirmed = ["sent", "delivered", "opened", "clicked"].includes(status) || ["sent", "delivered", "whatsapp_manual_sent"].includes(String(prospect?.outcome || "").toLowerCase());
+  const sendConfirmed = ["sent", "delivered", "opened", "clicked"].includes(status) || ["sent", "delivered", "whatsapp_manual_sent", "email_manual_sent"].includes(String(prospect?.outcome || "").toLowerCase());
   const sendAuthorized = commercialProspect && contactAvailable && status === "approved";
   return {
     commercial_prospect: commercialProspect,
@@ -4687,6 +4687,38 @@ async function handleDecision(
   }
 
   const timestamp = new Date().toISOString();
+
+  // A mailto handoff is not a send. Record an explicit owner confirmation separately
+  // so confirming a manual email never triggers a second Resend/Brevo dispatch.
+  if (action === "email_manual_sent") {
+    const preflightError = getManualSendPreflightError(prospect);
+    if (preflightError) return Response.json({ success: false, blocked: true, reason: preflightError, id }, { status: 409, headers });
+    if (!isEmailValidatedForOutreach(prospect.signals_json || "{}")) {
+      return Response.json({ success: false, blocked: true, reason: "email_not_provider_verified", id }, { status: 409, headers });
+    }
+    const already = await db.prepare(
+      "SELECT id FROM prospect_events WHERE prospect_id = ? AND event_type = 'email_manual_sent' LIMIT 1"
+    ).bind(id).first();
+    if (already) return Response.json({ success: true, id, status: "sent", reason: "already_recorded" }, { headers });
+    const suppression = await checkSuppressedComposite(db, prospect.email, prospect.website, prospect.phone, prospect.name, prospect.city, prospect.tenant_id || "founder");
+    if (suppression) return Response.json({ success: false, blocked: true, reason: "suppressed: " + suppression.reason, id }, { status: 409, headers });
+    const now = timestamp;
+    const cooldownUntil = new Date(Date.now() + 21 * 86400000).toISOString();
+    await db.prepare(`
+      UPDATE prospects
+      SET status = 'sent', outcome = 'email_manual_sent', last_contact_at = ?,
+          cooldown_until = ?, dispatch_provider = 'manual_owner',
+          dispatch_status = 'owner_confirmed', dispatch_error = NULL, updated_at = ?
+      WHERE id = ?
+    `).bind(now, cooldownUntil, now, id).run();
+    await db.prepare("INSERT INTO prospect_events (id, prospect_id, event_type, content, created_at) VALUES (?, ?, 'email_manual_sent', ?, ?)")
+      .bind("msg_" + crypto.randomUUID(), id, JSON.stringify({ channel: "email", confirmation: "founder_manual" }), now).run();
+    await db.prepare("INSERT INTO prospect_events (id, prospect_id, event_type, content, created_at) VALUES (?, ?, 'message_send_confirmed', ?, ?)")
+      .bind("msg_" + crypto.randomUUID(), id, JSON.stringify({ channel: "email", confirmation: "founder_manual" }), now).run();
+    await db.prepare("INSERT OR REPLACE INTO suppression (key, reason, created_at) VALUES (?, ?, ?)")
+      .bind(String(prospect.email).trim().toLowerCase(), `Contacted manually on ${now} (cooldown until ${cooldownUntil})`, now).run();
+    return Response.json({ success: true, id, status: "sent", dispatch: { status: "owner_confirmed", provider: "manual_owner" } }, { headers });
+  }
 
   if (action === "sent" || action === "approve") {
     const preflightError = getManualSendPreflightError(prospect);
