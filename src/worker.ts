@@ -4704,17 +4704,25 @@ async function handleDecision(
     if (suppression) return Response.json({ success: false, blocked: true, reason: "suppressed: " + suppression.reason, id }, { status: 409, headers });
     const now = timestamp;
     const cooldownUntil = new Date(Date.now() + 21 * 86400000).toISOString();
-    await db.prepare(`
+    const update = await db.prepare(`
       UPDATE prospects
       SET status = 'sent', outcome = 'email_manual_sent', last_contact_at = ?,
           cooldown_until = ?, dispatch_provider = 'manual_owner',
           dispatch_status = 'owner_confirmed', dispatch_error = NULL, updated_at = ?
-      WHERE id = ?
-    `).bind(now, cooldownUntil, now, id).run();
+      WHERE id = ? AND status = 'approved' AND outcome IS NULL
+        AND (cooldown_until IS NULL OR cooldown_until <= ?)
+    `).bind(now, cooldownUntil, now, id, now).run();
+    if (!(Number(update?.meta?.changes || 0) > 0)) {
+      const current = await db.prepare("SELECT status, outcome FROM prospects WHERE id = ?").bind(id).first() as any;
+      if (String(current?.outcome || "") === "email_manual_sent") {
+        return Response.json({ success: true, id, status: "sent", reason: "already_recorded" }, { headers });
+      }
+      return Response.json({ success: false, blocked: true, reason: "prospect_not_pending_email", id }, { status: 409, headers });
+    }
     await db.prepare("INSERT INTO prospect_events (id, prospect_id, event_type, content, created_at) VALUES (?, ?, 'email_manual_sent', ?, ?)")
-      .bind("msg_" + crypto.randomUUID(), id, JSON.stringify({ channel: "email", confirmation: "founder_manual" }), now).run();
+      .bind(`manual_email_${id}`, id, JSON.stringify({ channel: "email", confirmation: "founder_manual" }), now).run();
     await db.prepare("INSERT INTO prospect_events (id, prospect_id, event_type, content, created_at) VALUES (?, ?, 'message_send_confirmed', ?, ?)")
-      .bind("msg_" + crypto.randomUUID(), id, JSON.stringify({ channel: "email", confirmation: "founder_manual" }), now).run();
+      .bind(`manual_email_confirmed_${id}`, id, JSON.stringify({ channel: "email", confirmation: "founder_manual" }), now).run();
     await db.prepare("INSERT OR REPLACE INTO suppression (key, reason, created_at) VALUES (?, ?, ?)")
       .bind(String(prospect.email).trim().toLowerCase(), `Contacted manually on ${now} (cooldown until ${cooldownUntil})`, now).run();
     return Response.json({ success: true, id, status: "sent", dispatch: { status: "owner_confirmed", provider: "manual_owner" } }, { headers });
