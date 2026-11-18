@@ -1717,12 +1717,14 @@ const submitDecision = async (prospectId: string, action: string) => {
                             <div className="pt-2 border-t border-slate-900/80 space-y-2" onClick={(e) => e.stopPropagation()}>
                               <span className="text-[10px] font-mono text-slate-400 font-bold uppercase block">Registrar Resultado:</span>
                               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                                <button
-                                  onClick={() => { if (window.confirm('¿Enviaste manualmente este correo desde tu aplicación de email?')) void submitDecision(p.id, 'email_manual_sent'); }}
-                                  className="py-2 px-2.5 text-xs font-bold font-mono rounded-lg bg-blue-900/30 border border-blue-700/40 text-blue-300 hover:bg-blue-800/50 transition-colors"
-                                >
-                                  Confirmar envío manual
-                                </button>
+                                {emailRecipient && isVerifiedEmailRecipient(p) && (
+                                  <button
+                                    onClick={() => { if (window.confirm('¿Enviaste manualmente este correo desde tu aplicación de email?')) void submitDecision(p.id, 'email_manual_sent'); }}
+                                    className="py-2 px-2.5 text-xs font-bold font-mono rounded-lg bg-blue-900/30 border border-blue-700/40 text-blue-300 hover:bg-blue-800/50 transition-colors"
+                                  >
+                                    Confirmar envío manual
+                                  </button>
+                                )}
                                 <button
                                   onClick={() => submitDecision(p.id, 'replied')}
                                   className="py-2 px-2.5 text-xs font-bold font-mono rounded-lg bg-amber-900/30 border border-amber-700/40 text-amber-300 hover:bg-amber-800/50 transition-colors"
