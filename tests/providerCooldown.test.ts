@@ -113,17 +113,32 @@ describe("provider/model cooldown policy", () => {
     assert.equal(await storeB.getCooldown(dbB, "gemini", "gemini-paid-test", now + 31_000), null);
   });
 
-  it("does not retry Groq models in the next call while their shared 429 cooldown is active", async () => {
+  it("cools down Groq and Gemini after 429, 5xx, timeout and empty responses", async () => {
     const sharedRows = new Map<string, StoredRow>();
     const db = createDb(sharedRows);
     const originalFetch = globalThis.fetch;
     let groqCalls = 0;
+    let geminiCalls = 0;
     let workersAiCalls = 0;
 
     globalThis.fetch = (async (input: RequestInfo | URL) => {
-      if (String(input).includes("api.groq.com")) {
+      const url = String(input);
+      if (url.includes("api.groq.com")) {
         groqCalls += 1;
-        return new Response("rate limited", { status: 429, headers: { "Retry-After": "120" } });
+        if (url.includes("gpt-oss-20b")) {
+          return new Response("rate limited", { status: 429, headers: { "Retry-After": "120" } });
+        }
+        return new Response("upstream unavailable", { status: 503 });
+      }
+      if (url.includes("generativelanguage.googleapis.com")) {
+        geminiCalls += 1;
+        if (url.includes("gemini-3.8-flash")) {
+          throw Object.assign(new Error("The operation timed out"), { name: "TimeoutError" });
+        }
+        return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "" }] } }] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
       }
       throw new Error("unexpected test fetch target");
     }) as typeof fetch;
@@ -131,6 +146,9 @@ describe("provider/model cooldown policy", () => {
     const env: any = {
       RADAR_DB: db,
       GROQ_API_KEY: "unit-test-key",
+      GEMINI_FOUNDER_API_KEY: "unit-test-gemini-key",
+      GEMINI_PAID_TIER_CONFIRMED: "true",
+      GEMINI_MODELS: "gemini-3.8-flash,gemini-3.5-flash-lite",
       AI: {
         async run() {
           workersAiCalls += 1;
@@ -139,7 +157,7 @@ describe("provider/model cooldown policy", () => {
       }
     };
     const prospect = {
-      id: "cooldown-test-prospect",
+      id: "cooldown-mixed-failures",
       tenant_id: "founder",
       mode: "founder",
       name: "Example Plumbing",
@@ -152,123 +170,20 @@ describe("provider/model cooldown policy", () => {
       const second = await generateAICopy(prospect, "missed_calls", env, undefined, "email");
       assert.equal(first.source, "workers_ai");
       assert.equal(second.source, "workers_ai");
-      assert.equal(groqCalls, 2);
-      assert.equal(workersAiCalls, 2);
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
+      assert.equal(groqCalls, 2, "Groq 20B and 120B are each attempted once");
+      assert.equal(geminiCalls, 2, "paid Gemini models are each attempted once");
+      assert.equal(workersAiCalls, 2, "the healthy fallback remains available for both calls");
 
-  it("suppresses repeated Groq calls after provider 5xx responses", async () => {
-    const rows = new Map<string, StoredRow>();
-    const db = createDb(rows);
-    const originalFetch = globalThis.fetch;
-    let groqCalls = 0;
-    let workersAiCalls = 0;
-    globalThis.fetch = (async (input: RequestInfo | URL) => {
-      if (!String(input).includes("api.groq.com")) throw new Error("unexpected test fetch target");
-      groqCalls += 1;
-      return new Response("upstream unavailable", { status: 503 });
-    }) as typeof fetch;
-
-    const env: any = {
-      RADAR_DB: db,
-      GROQ_API_KEY: "unit-test-key",
-      AI: {
-        async run() {
-          workersAiCalls += 1;
-          return { response: JSON.stringify({ subject: "A question", body: "Would it be useful to compare notes?" }) };
-        }
-      }
-    };
-    const prospect = { id: "cooldown-503", tenant_id: "founder", mode: "founder", name: "Example Plumbing", trade: "Plumbing", city: "Austin" };
-
-    try {
-      const first = await generateAICopy(prospect, "missed_calls", env);
-      const second = await generateAICopy(prospect, "missed_calls", env);
-      assert.equal(first.source, "workers_ai");
-      assert.equal(second.source, "workers_ai");
-      assert.equal(groqCalls, 2, "both models are attempted only on the first request");
-      assert.equal(workersAiCalls, 2);
-      assert.equal(JSON.parse(rows.get(providerCooldownKey("groq", "openai/gpt-oss-20b"))!.value).failureClass, "server_error");
-      assert.equal(JSON.parse(rows.get(providerCooldownKey("groq", "openai/gpt-oss-120b"))!.value).failureClass, "server_error");
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
-  it("records timeouts and suppresses repeated provider attempts", async () => {
-    const rows = new Map<string, StoredRow>();
-    const db = createDb(rows);
-    const originalFetch = globalThis.fetch;
-    let groqCalls = 0;
-    let workersAiCalls = 0;
-    globalThis.fetch = (async (input: RequestInfo | URL) => {
-      if (!String(input).includes("api.groq.com")) throw new Error("unexpected test fetch target");
-      groqCalls += 1;
-      throw Object.assign(new Error("The operation timed out"), { name: "TimeoutError" });
-    }) as typeof fetch;
-
-    const env: any = {
-      RADAR_DB: db,
-      GROQ_API_KEY: "unit-test-key",
-      AI: {
-        async run() {
-          workersAiCalls += 1;
-          return { response: JSON.stringify({ subject: "A question", body: "Would it be useful to compare notes?" }) };
-        }
-      }
-    };
-    const prospect = { id: "cooldown-timeout", tenant_id: "founder", mode: "founder", name: "Example Plumbing", trade: "Plumbing", city: "Austin" };
-
-    try {
-      const first = await generateAICopy(prospect, "missed_calls", env);
-      const second = await generateAICopy(prospect, "missed_calls", env);
-      assert.equal(first.source, "workers_ai");
-      assert.equal(second.source, "workers_ai");
-      assert.equal(groqCalls, 2);
-      assert.equal(workersAiCalls, 2);
-      assert.equal(JSON.parse(rows.get(providerCooldownKey("groq", "openai/gpt-oss-20b"))!.value).failureClass, "timeout");
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
-  it("treats an empty successful HTTP payload as invalid and enters cooldown", async () => {
-    const rows = new Map<string, StoredRow>();
-    const db = createDb(rows);
-    const originalFetch = globalThis.fetch;
-    let groqCalls = 0;
-    let workersAiCalls = 0;
-    globalThis.fetch = (async (input: RequestInfo | URL) => {
-      if (!String(input).includes("api.groq.com")) throw new Error("unexpected test fetch target");
-      groqCalls += 1;
-      return new Response(JSON.stringify({ choices: [{ message: { content: "" } }] }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" }
-      });
-    }) as typeof fetch;
-
-    const env: any = {
-      RADAR_DB: db,
-      GROQ_API_KEY: "unit-test-key",
-      AI: {
-        async run() {
-          workersAiCalls += 1;
-          return { response: JSON.stringify({ subject: "A question", body: "Would it be useful to compare notes?" }) };
-        }
-      }
-    };
-    const prospect = { id: "cooldown-empty", tenant_id: "founder", mode: "founder", name: "Example Plumbing", trade: "Plumbing", city: "Austin" };
-
-    try {
-      const first = await generateAICopy(prospect, "missed_calls", env);
-      const second = await generateAICopy(prospect, "missed_calls", env);
-      assert.equal(first.source, "workers_ai");
-      assert.equal(second.source, "workers_ai");
-      assert.equal(groqCalls, 2);
-      assert.equal(workersAiCalls, 2);
-      assert.equal(JSON.parse(rows.get(providerCooldownKey("groq", "openai/gpt-oss-20b"))!.value).failureClass, "invalid_response");
+      const groq429 = JSON.parse(sharedRows.get(providerCooldownKey("groq", "openai/gpt-oss-20b"))!.value);
+      const groq503 = JSON.parse(sharedRows.get(providerCooldownKey("groq", "openai/gpt-oss-120b"))!.value);
+      const geminiTimeout = JSON.parse(sharedRows.get(providerCooldownKey("gemini", "gemini-3.8-flash"))!.value);
+      const geminiEmpty = JSON.parse(sharedRows.get(providerCooldownKey("gemini", "gemini-3.5-flash-lite"))!.value);
+      assert.equal(groq429.failureClass, "rate_limited");
+      assert.equal(groq429.status, 429);
+      assert.equal(groq429.retryAfterMs, 120_000);
+      assert.equal(groq503.failureClass, "server_error");
+      assert.equal(geminiTimeout.failureClass, "timeout");
+      assert.equal(geminiEmpty.failureClass, "invalid_response");
     } finally {
       globalThis.fetch = originalFetch;
     }
