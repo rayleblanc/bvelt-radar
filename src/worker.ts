@@ -23,6 +23,13 @@ import { dispatchScraplingResearch } from './research/githubActions';
 import { recordScopedLearningEvent, readScopedLearningStats } from './learningIntegrity';
 import { fetchPermitContractors as fetchMunicipalPermitContractors } from './permitSources';
 import marketUniverse from "../sidecar/config/market-universe.json";
+import {
+  classifyProviderError,
+  classifyProviderHttpStatus,
+  getProviderCooldown,
+  recordProviderCooldownFailure,
+  type ProviderCooldownDatabase
+} from "./providerCooldown";
 
 // Global type declarations for Cloudflare Worker compilation
 declare global {
@@ -10257,61 +10264,99 @@ export async function fetchLocalBusinesses(city: string, trade: string, env: Env
 /**
  * Helper to call Gemini models with 5.5 second timeout and return parsed JSON
  */
-async function tryGemini<T = { subject: string; body: string }>(model: string, apiKey: string, prompt: string): Promise<T | null> {
+async function tryGemini<T = { subject: string; body: string }>(
+  model: string,
+  apiKey: string,
+  prompt: string,
+  db?: ProviderCooldownDatabase
+): Promise<T | null> {
+  if (db) {
+    const cooldown = await getProviderCooldown(db, "gemini", model);
+    if (cooldown) {
+      console.info(`[AI Cooldown] Skipping Gemini ${model}; retry in ${Math.max(0, cooldown.cooldownUntil - Date.now())}ms.`);
+      return null;
+    }
+  }
+
   console.log(`[Gemini Cascade] Calling model: [${model}]`);
-  
+  const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+  let response: Response;
   try {
-    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
-    const res = await fetch(geminiUrl, {
+    response = await fetch(geminiUrl, {
       method: "POST",
-      headers: { 
+      headers: {
         "Content-Type": "application/json",
         "x-goog-api-key": apiKey
       },
       body: JSON.stringify({
         contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: {
-          responseMimeType: "application/json",
-          temperature: 0.6
-        }
+        generationConfig: { responseMimeType: "application/json", temperature: 0.6 }
       }),
       signal: AbortSignal.timeout(5500)
     });
-
-    if (res.ok) {
-      const data: any = await res.json();
-      const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text;
-      if (rawText) {
-        const parsed = JSON.parse(rawText.trim());
-        if (parsed) {
-          if ((parsed as any).subject && (parsed as any).body) {
-            console.log(`[Gemini Cascade] Success using model: [${model}]`);
-            return parsed as T;
-          } else if ((parsed as any).segments) {
-            console.log(`[Gemini Cascade] Success parsed segments using model: [${model}]`);
-            return parsed as T;
-          }
-          return parsed as T;
-        }
-      }
-    } else {
-      console.warn(`[Gemini Cascade] Model [${model}] returned status: [${res.status}]`);
+  } catch (error) {
+    if (db) {
+      await recordProviderCooldownFailure(db, "gemini", model, {
+        failureClass: classifyProviderError(error)
+      });
     }
-  } catch (e: any) {
-    console.warn(`[Gemini Cascade] Model [${model}] request failed:`, e.message || e);
+    console.warn(`[Gemini Cascade] Model [${model}] request failed.`);
+    return null;
   }
-  return null;
+
+  if (!response.ok) {
+    if (db) {
+      await recordProviderCooldownFailure(db, "gemini", model, {
+        failureClass: classifyProviderHttpStatus(response.status),
+        status: response.status,
+        retryAfter: response.headers.get("Retry-After")
+      });
+    }
+    console.warn(`[Gemini Cascade] Model [${model}] returned status: [${response.status}].`);
+    return null;
+  }
+
+  let data: any;
+  try {
+    data = await response.json();
+  } catch {
+    if (db) await recordProviderCooldownFailure(db, "gemini", model, { failureClass: "invalid_response", status: response.status });
+    return null;
+  }
+  const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (typeof rawText !== "string" || !rawText.trim()) {
+    if (db) await recordProviderCooldownFailure(db, "gemini", model, { failureClass: "invalid_response", status: response.status });
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(rawText.trim());
+    return parsed == null ? null : parsed as T;
+  } catch {
+    if (db) await recordProviderCooldownFailure(db, "gemini", model, { failureClass: "invalid_response", status: response.status });
+    return null;
+  }
 }
 
 /** Call Groq JSON mode for tenant-scoped structured generation. */
-async function tryGroqJson<T = any>(model: string, apiKey: string, prompt: string): Promise<T | null> {
+async function tryGroqJson<T = any>(
+  model: string,
+  apiKey: string,
+  prompt: string,
+  db?: ProviderCooldownDatabase
+): Promise<T | null> {
+  if (db) {
+    const cooldown = await getProviderCooldown(db, "groq", model);
+    if (cooldown) {
+      console.info(`[AI Cooldown] Skipping Groq ${model}; retry in ${Math.max(0, cooldown.cooldownUntil - Date.now())}ms.`);
+      return null;
+    }
+  }
+
+  let response: Response;
   try {
-    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${apiKey}`
-      },
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
       body: JSON.stringify({
         model,
         response_format: { type: "json_object" },
@@ -10320,17 +10365,45 @@ async function tryGroqJson<T = any>(model: string, apiKey: string, prompt: strin
       }),
       signal: AbortSignal.timeout(5500)
     });
-    if (!response.ok) {
-      console.warn(`[Groq Cascade] Model [${model}] returned status [${response.status}]`);
-      return null;
+  } catch (error) {
+    if (db) {
+      await recordProviderCooldownFailure(db, "groq", model, {
+        failureClass: classifyProviderError(error)
+      });
     }
-    const data: any = await response.json();
-    const raw = data.choices?.[0]?.message?.content;
-    if (!raw) return null;
+    console.warn(`[Groq Cascade] Model [${model}] request failed.`);
+    return null;
+  }
+
+  if (!response.ok) {
+    if (db) {
+      await recordProviderCooldownFailure(db, "groq", model, {
+        failureClass: classifyProviderHttpStatus(response.status),
+        status: response.status,
+        retryAfter: response.headers.get("Retry-After")
+      });
+    }
+    console.warn(`[Groq Cascade] Model [${model}] returned status [${response.status}].`);
+    return null;
+  }
+
+  let data: any;
+  try {
+    data = await response.json();
+  } catch {
+    if (db) await recordProviderCooldownFailure(db, "groq", model, { failureClass: "invalid_response", status: response.status });
+    return null;
+  }
+  const raw = data?.choices?.[0]?.message?.content;
+  if (!raw) {
+    if (db) await recordProviderCooldownFailure(db, "groq", model, { failureClass: "invalid_response", status: response.status });
+    return null;
+  }
+  try {
     const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
     return parsed && typeof parsed === "object" ? parsed as T : null;
-  } catch (e: any) {
-    console.warn(`[Groq Cascade] Model [${model}] request failed: ${String(e?.message || e).slice(0, 180)}`);
+  } catch {
+    if (db) await recordProviderCooldownFailure(db, "groq", model, { failureClass: "invalid_response", status: response.status });
     return null;
   }
 }
@@ -10396,15 +10469,27 @@ Genera hasta 6 segmentos de CLIENTES que compran a este negocio; no devuelvas co
   let geminiResult: any = null;
   if (env.GROQ_API_KEY) {
     for (const model of ["openai/gpt-oss-20b", "openai/gpt-oss-120b"]) {
-      geminiResult = await tryGroqJson<any>(model, env.GROQ_API_KEY, prompt);
-      if (Array.isArray(geminiResult?.segments)) break;
+      const candidate = await tryGroqJson<any>(model, env.GROQ_API_KEY, prompt, env.RADAR_DB);
+      if (Array.isArray(candidate?.segments)) {
+        geminiResult = candidate;
+        break;
+      }
+      if (candidate) {
+        await recordProviderCooldownFailure(env.RADAR_DB, "groq", model, { failureClass: "invalid_response" });
+      }
       geminiResult = null;
     }
   }
   if (!geminiResult && geminiPaidTier && apiKey) {
     for (const model of modelsToTry) {
-      geminiResult = await tryGemini<any>(model, apiKey, prompt);
-      if (Array.isArray(geminiResult?.segments)) break;
+      const candidate = await tryGemini<any>(model, apiKey, prompt, env.RADAR_DB);
+      if (Array.isArray(candidate?.segments)) {
+        geminiResult = candidate;
+        break;
+      }
+      if (candidate) {
+        await recordProviderCooldownFailure(env.RADAR_DB, "gemini", model, { failureClass: "invalid_response" });
+      }
       geminiResult = null;
     }
   }
@@ -10412,28 +10497,42 @@ Genera hasta 6 segmentos de CLIENTES que compran a este negocio; no devuelvas co
   // Cloudflare Workers AI is the no-extra-key, same-edge fallback. It is metered
   // against the same tenant budget; invalid/empty JSON is never persisted.
   if (!geminiResult && env.AI && typeof env.AI.run === "function") {
-    try {
-      const response = await env.AI.run(WORKERS_AI_FALLBACK_MODEL, {
-        messages: [
-          {
-            role: "system",
-            content: "Return only valid JSON with this shape: {segments:[{label:string,osm_tags:string[],keywords:string[],why:string}]}. No markdown, no prose, no extra keys. If evidence is insufficient, return {segments:[]}."
-          },
-          { role: "user", content: prompt }
-        ],
-        max_completion_tokens: 768,
-        temperature: 0.2,
-        chat_template_kwargs: { enable_thinking: false, clear_thinking: true },
-        response_format: { type: "json_object" }
-      });
-      const rawText = extractWorkersAiText(response);
-      const jsonMatch = rawText.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        if (parsed && Array.isArray(parsed.segments)) geminiResult = parsed;
+    const cooldown = await getProviderCooldown(env.RADAR_DB, "workers_ai", WORKERS_AI_FALLBACK_MODEL);
+    if (cooldown) {
+      console.info(`[AI Cooldown] Skipping Workers AI ICP expansion; retry in ${Math.max(0, cooldown.cooldownUntil - Date.now())}ms.`);
+    } else {
+      try {
+        const response = await env.AI.run(WORKERS_AI_FALLBACK_MODEL, {
+          messages: [
+            {
+              role: "system",
+              content: "Return only valid JSON with this shape: {segments:[{label:string,osm_tags:string[],keywords:string[],why:string}]}. No markdown, no prose, no extra keys. If evidence is insufficient, return {segments:[]}. "
+            },
+            { role: "user", content: prompt }
+          ],
+          max_completion_tokens: 768,
+          temperature: 0.2,
+          chat_template_kwargs: { enable_thinking: false, clear_thinking: true },
+          response_format: { type: "json_object" }
+        });
+        const rawText = extractWorkersAiText(response);
+        const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          const parsed = JSON.parse(jsonMatch[0]);
+          if (parsed && Array.isArray(parsed.segments)) {
+            geminiResult = parsed;
+          } else {
+            await recordProviderCooldownFailure(env.RADAR_DB, "workers_ai", WORKERS_AI_FALLBACK_MODEL, { failureClass: "invalid_response" });
+          }
+        } else {
+          await recordProviderCooldownFailure(env.RADAR_DB, "workers_ai", WORKERS_AI_FALLBACK_MODEL, { failureClass: "invalid_response" });
+        }
+      } catch (fallbackError) {
+        await recordProviderCooldownFailure(env.RADAR_DB, "workers_ai", WORKERS_AI_FALLBACK_MODEL, {
+          failureClass: classifyProviderError(fallbackError)
+        });
+        console.warn("[expandTenantIcp] Workers AI fallback failed.");
       }
-    } catch (fallbackError: any) {
-      console.warn("[expandTenantIcp] Workers AI fallback failed:", String(fallbackError?.message || fallbackError).slice(0, 180));
     }
   }
 
@@ -10801,48 +10900,23 @@ export async function generateAICopy(
     if (env.GROQ_API_KEY) {
       const groqModels = ["openai/gpt-oss-20b", "openai/gpt-oss-120b"];
       for (const groqModel of groqModels) {
-        console.log(`[AI Cascade] Calling Groq primary model: ${groqModel}`);
-        try {
-          const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "Authorization": `Bearer ${env.GROQ_API_KEY}`
-            },
-            body: JSON.stringify({
-              model: groqModel,
-              response_format: { type: "json_object" },
-              messages: [{ role: "user", content: prompt }],
-              temperature: 0.6
-            }),
-            signal: AbortSignal.timeout(5500)
-          });
-          if (response.ok) {
-            const data: any = await response.json();
-            const raw = data.choices?.[0]?.message?.content;
-            if (raw) {
-              const content = typeof raw === "string" ? JSON.parse(raw) : raw;
-              const normalized = normalizeGeneratedMessage(content, channel);
-              if (normalized) {
-                console.log(`[AI Cascade] Success using Groq ${groqModel}`);
-                await commitBudget(env.RADAR_DB, tenantId, 'ai_units', 1);
-                return { ...normalized, source: "groq" };
-              }
-            }
-          } else {
-            const errTxt = await response.text().catch(() => "");
-            console.warn(`[AI Cascade] Groq ${groqModel} returned status ${response.status}`);
-            if (response.status === 404 || response.status === 400) continue;
+        console.log(`[AI Cascade] Checking Groq primary model: ${groqModel}`);
+        const result = await tryGroqJson<any>(groqModel, env.GROQ_API_KEY, prompt, env.RADAR_DB);
+        if (result) {
+          const normalized = normalizeGeneratedMessage(result, channel);
+          if (normalized) {
+            console.log(`[AI Cascade] Success using Groq ${groqModel}`);
+            await commitBudget(env.RADAR_DB, tenantId, 'ai_units', 1);
+            return { ...normalized, source: "groq" };
           }
-        } catch (e: any) {
-          console.warn(`[AI Cascade] Groq ${groqModel} failed:`, String(e?.message || e).slice(0, 160));
+          await recordProviderCooldownFailure(env.RADAR_DB, "groq", groqModel, { failureClass: "invalid_response" });
         }
       }
     }
 
     if (apiKey && String(env.GEMINI_PAID_TIER_CONFIRMED || "").trim().toLowerCase() === "true") {
       for (const model of modelsToTry) {
-        const res = await tryGemini(model, apiKey, prompt);
+        const res = await tryGemini(model, apiKey, prompt, env.RADAR_DB);
         const normalized = normalizeGeneratedMessage(res, channel);
         if (normalized) {
           await commitBudget(env.RADAR_DB, tenantId, 'ai_units', 1);
@@ -10853,8 +10927,12 @@ export async function generateAICopy(
 
     // 3. CLOUDFLARE WORKERS AI (free Neurons) — no external key
     if (env.AI && typeof env.AI.run === "function") {
-      console.log(`[AI Cascade] Calling Workers AI GLM-4.7 Flash backup...`);
-      try {
+      const cooldown = await getProviderCooldown(env.RADAR_DB, "workers_ai", WORKERS_AI_FALLBACK_MODEL);
+      if (cooldown) {
+        console.info(`[AI Cooldown] Skipping Workers AI copy; retry in ${Math.max(0, cooldown.cooldownUntil - Date.now())}ms.`);
+      } else {
+        console.log(`[AI Cascade] Calling Workers AI GLM-4.7 Flash backup...`);
+        try {
         const response = await env.AI.run(WORKERS_AI_FALLBACK_MODEL, {
           messages: [
             { role: "system", content: "Reply ONLY with valid JSON: {\"subject\":string,\"body\":string}. No markdown." },
@@ -10874,9 +10952,16 @@ export async function generateAICopy(
             await commitBudget(env.RADAR_DB, tenantId, 'ai_units', 1);
             return { ...normalized, source: "workers_ai" };
           }
+          await recordProviderCooldownFailure(env.RADAR_DB, "workers_ai", WORKERS_AI_FALLBACK_MODEL, { failureClass: "invalid_response" });
+        } else {
+          await recordProviderCooldownFailure(env.RADAR_DB, "workers_ai", WORKERS_AI_FALLBACK_MODEL, { failureClass: "invalid_response" });
         }
-      } catch (e: any) {
-        console.warn("[AI Cascade] Workers AI backup failed:", String(e?.message || e).slice(0, 160));
+      } catch (error) {
+        await recordProviderCooldownFailure(env.RADAR_DB, "workers_ai", WORKERS_AI_FALLBACK_MODEL, {
+          failureClass: classifyProviderError(error)
+        });
+        console.warn("[AI Cascade] Workers AI backup failed.");
+      }
       }
     }
 
