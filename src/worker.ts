@@ -2549,6 +2549,7 @@ export default {
           const res = await env.RADAR_DB.prepare(`
             SELECT 
               COUNT(*) as total,
+              (SELECT COUNT(*) FROM prospects allp WHERE COALESCE(NULLIF(TRIM(allp.tenant_id), ''), 'founder') = ?) as total_found,
               SUM(CASE WHEN status IN ('scouted','qualified','scored','enriched') THEN 1 ELSE 0 END) as pipeline,
               SUM(CASE WHEN status IN ('sent','delivered','opened','clicked','contacted','replied','booked','converted','won','lost') OR outcome IN ('sent','delivered','opened','clicked','whatsapp_manual_sent','positive','replied','booked','won','lost','converted') OR tenant_outcome IN ('contacted','replied','booked','won','lost') THEN 1 ELSE 0 END) as outreach,
               SUM(CASE WHEN status IN ('sent','delivered','opened','clicked','contacted','replied','booked','converted','won','lost')
@@ -2563,12 +2564,14 @@ export default {
                          OR outcome IN ('sent','delivered','opened','clicked','whatsapp_manual_sent','positive','replied','booked','won','lost','converted')
                          OR tenant_outcome IN ('contacted','replied','booked','won','lost') THEN 1 ELSE 0 END) as contacted,
               SUM(COALESCE(won_value_usd, 0)) as won_value_usd_total,
-              SUM(COALESCE(expected_value, opportunity_score, score, 0)) as pipeline_ev_raw,
+              SUM(CASE WHEN expected_value IS NOT NULL AND expected_value > 0 THEN expected_value ELSE 0 END) as pipeline_ev_raw,
+              SUM(CASE WHEN status = 'approved' AND email IS NOT NULL AND TRIM(email) <> '' AND CASE WHEN json_valid(signals_json) THEN json_extract(signals_json, '$.is_email_validated') = 1 ELSE 0 END AND suppression_reason IS NULL AND (cooldown_until IS NULL OR cooldown_until <= ?) AND (outcome IS NULL OR outcome = '') AND NOT EXISTS (SELECT 1 FROM suppression s WHERE lower(s.key) = lower(prospects.email)) THEN 1 ELSE 0 END) as pending_email,
+              SUM(CASE WHEN status = 'notified' AND outcome = 'whatsapp_manual_ready' AND phone IS NOT NULL AND TRIM(phone) <> '' THEN 1 ELSE 0 END) as whatsapp_drafts,
               AVG(COALESCE(score, opportunity_score, 0)) as avg_score
             FROM prospects
             WHERE COALESCE(tenant_id, 'founder') = ?
               AND status NOT IN ('discarded','suppressed','blocked')
-          `).bind(tenantId).first() as any;
+          `).bind(new Date().toISOString(), tenantId, tenantId).first() as any;
 
           const total = Number(res?.total || 0);
           const outreach = Number(res?.outreach || 0);
@@ -2584,6 +2587,9 @@ export default {
           return Response.json({
             tenant_id: tenantId,
             total,
+            total_found: Number(res?.total_found || 0),
+            pending_email: Number(res?.pending_email || 0),
+            whatsapp_drafts: Number(res?.whatsapp_drafts || 0),
             pipeline: Number(res?.pipeline || 0),
             outreach,
             conversion_denominator: conversionDenominator,
@@ -2600,7 +2606,7 @@ export default {
           }, { headers: corsHeaders });
         } catch (e: any) {
           return Response.json({
-            tenant_id: tenantId, total: 0, pipeline: 0, outreach: 0,
+            tenant_id: tenantId, total: 0, total_found: 0, pending_email: 0, whatsapp_drafts: 0, pipeline: 0, outreach: 0,
             conversion_denominator: 0, contacted: 0, replied: 0, booked: 0,
             won: 0, lost: 0, won_value_usd_total: 0, pipeline_ev_usd: 0,
             avg_score: 0, reply_rate_pct: 0, win_rate_pct: 0
@@ -4324,31 +4330,62 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
 async function handleStats(env: Env, headers: Record<string, string>): Promise<Response> {
   const db = env.RADAR_DB;
 
+  const founderScope = "COALESCE(NULLIF(TRIM(tenant_id), ''), 'founder') = 'founder'";
   const prospectStats = await db.prepare(`
-    SELECT status, COUNT(*) as count 
-    FROM prospects 
+    SELECT status, COUNT(*) as count
+    FROM prospects
+    WHERE ${founderScope}
     GROUP BY status
   `).all();
 
   const outcomeStats = await db.prepare(`
-    SELECT outcome, COUNT(*) as count 
-    FROM prospects 
-    WHERE outcome IS NOT NULL 
+    SELECT outcome, COUNT(*) as count
+    FROM prospects
+    WHERE outcome IS NOT NULL AND ${founderScope}
     GROUP BY outcome
   `).all();
 
   const totalRuns = await db.prepare(`
-    SELECT COUNT(*) as count, SUM(discovered) as total_discovered, SUM(finalized) as total_finalized 
+    SELECT COUNT(*) as count, SUM(discovered) as total_discovered, SUM(finalized) as total_finalized
     FROM runs
+    WHERE COALESCE(NULLIF(TRIM(tenant_id), ''), 'founder') = 'founder'
   `).first();
 
   const latestRuns = await db.prepare(`
-    SELECT * FROM runs ORDER BY created_at DESC LIMIT 5
+    SELECT * FROM runs
+    WHERE COALESCE(NULLIF(TRIM(tenant_id), ''), 'founder') = 'founder'
+    ORDER BY created_at DESC LIMIT 5
   `).all();
 
   const suppressionCount = await db.prepare(`
     SELECT COUNT(*) as count FROM suppression
   `).first();
+
+  const asOf = new Date().toISOString();
+  const workbench = await db.prepare(`
+    SELECT
+      COUNT(*) AS total_found,
+      SUM(CASE WHEN status = 'approved'
+        AND email IS NOT NULL AND TRIM(email) <> ''
+        AND CASE WHEN json_valid(signals_json) THEN json_extract(signals_json, '$.is_email_validated') = 1 ELSE 0 END
+        AND suppression_reason IS NULL
+        AND (cooldown_until IS NULL OR cooldown_until <= ?)
+        AND (outcome IS NULL OR outcome = '')
+        AND NOT EXISTS (SELECT 1 FROM suppression s WHERE lower(s.key) = lower(prospects.email))
+        THEN 1 ELSE 0 END) AS pending_email,
+      SUM(CASE WHEN status = 'notified' AND outcome = 'whatsapp_manual_ready'
+        AND phone IS NOT NULL AND TRIM(phone) <> ''
+        THEN 1 ELSE 0 END) AS whatsapp_drafts,
+      SUM(CASE WHEN status IN ('sent','delivered','opened','clicked','contacted','replied','booked','won','converted')
+        OR outcome IN ('sent','delivered','whatsapp_manual_sent','positive','replied','booked','won','converted')
+        THEN 1 ELSE 0 END) AS contacted,
+      SUM(CASE WHEN status IN ('replied','human_review','positive','question','booked')
+        OR outcome IN ('positive','replied','booked')
+        THEN 1 ELSE 0 END) AS replied,
+      SUM(CASE WHEN status IN ('won','converted') OR outcome IN ('won','converted') THEN 1 ELSE 0 END) AS won
+    FROM prospects
+    WHERE ${founderScope}
+  `).bind(asOf).first() as any;
 
   // Learning conversion rates (Top winning combinations)
   const learningStats = await getLearningStats(db, "founder", "founder");
@@ -4379,6 +4416,15 @@ async function handleStats(env: Env, headers: Record<string, string>): Promise<R
     runs_summary: totalRuns,
     recent_runs: latestRuns.results,
     suppression_list_size: suppressionCount?.count || 0,
+    workbench: {
+      total_found: Number(workbench?.total_found || 0),
+      pending_email: Number(workbench?.pending_email || 0),
+      whatsapp_drafts: Number(workbench?.whatsapp_drafts || 0),
+      contacted: Number(workbench?.contacted || 0),
+      replied: Number(workbench?.replied || 0),
+      won: Number(workbench?.won || 0),
+      as_of: asOf
+    },
     learning_weights: learningStats,
     limits: LIMITS,
     global_pause: globalPause,

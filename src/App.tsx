@@ -94,65 +94,7 @@ interface Prospect {
   };
 }
 
-export interface Opportunity {
-  id: string;
-  prospect_id: string;
-  tenant_id: string;
-  title: string;
-  strategic_score: number;
-  fit_score: number;
-  intent_score: number;
-  pain_score: number;
-  ability_to_pay_score: number;
-  contactability_score: number;
-  timing_score: number;
-  evidence_score: number;
-  signal_freshness_score: number;
-  expected_value: number;
-  decision_state: string;
-  why_now_json: string;
-  priority_tier: string;
-  prospect_name?: string;
-  prospect_city?: string;
-  prospect_trade?: string;
-  prospect_website?: string | null;
-  prospect_phone?: string | null;
-  prospect_email?: string | null;
-  prospect_status?: string;
-  draft_subject?: string;
-  draft_body?: string;
-  created_at: string;
-}
-
-export interface DailyMission {
-  tenant_id: string;
-  day: string;
-  goal: string;
-  markets: string;
-  icp: string;
-  budget: string;
-  target_qualified: number;
-  target_outreach: number;
-  qualified_count: number;
-  outreach_count: number;
-  status: string;
-}
-
-export interface Mission {
-  id: string;
-  tenant_id: string;
-  name: string;
-  goal: string;
-  status: string;
-  markets_json: string;
-  icp_json: string;
-  budget_json: string;
-  target_qualified: number;
-  target_outreach: number;
-  created_at: string;
-}
-
-export interface TenantConfig {
+interface TenantConfig {
   tenant_id: string;
   tenant_name: string;
   industry: string;
@@ -323,9 +265,10 @@ interface StatsSummary {
   prospects_by_status: Array<{ status: string; count: number }>;
   runs_summary: { count: number; total_discovered: number; total_finalized: number };
   suppression_list_size: number;
+  workbench?: { total_found: number; pending_email: number; whatsapp_drafts: number; contacted: number; replied: number; won: number; as_of: string };
 }
 
-export type StatusCategory = 'ALL' | 'SCOUTED' | 'QUALIFIED' | 'APPROVED' | 'QUEUED' | 'SENT' | 'REPLIED' | 'SUPPRESSED' | 'BLOCKED';
+export type StatusCategory = 'ALL' | 'NEW' | 'READY' | 'SENT' | 'REPLIED' | 'BLOCKED';
 
 export function renderScoreBreakdownChips(breakdownRaw: string) {
   if (!breakdownRaw) return null;
@@ -381,20 +324,15 @@ export default function App() {
   const [health, setHealth] = useState<Health | null>(null);
   const [stats, setStats] = useState<StatsSummary | null>(null);
   const [prospects, setProspects] = useState<Prospect[]>([]);
-  const [opportunities, setOpportunities] = useState<Opportunity[]>([]);
-  const [dailyMissions, setDailyMissions] = useState<DailyMission[]>([]);
-  const [missions, setMissions] = useState<Mission[]>([]);
   const [tenants, setTenants] = useState<TenantConfig[]>([]);
   const [activeFilter, setActiveFilter] = useState<StatusCategory>('ALL');
-  const [opportunityPriorityFilter, setOpportunityPriorityFilter] = useState<string>('ALL');
   const [loading, setLoading] = useState(true);
   const [errorState, setErrorState] = useState<string | null>(null);
 
   // Mode and Tab Navigation
-  const [mainTab, setMainTab] = useState<'opportunities' | 'prospects' | 'missions' | 'tenant'>('prospects');
+  const [mainTab, setMainTab] = useState<'prospects' | 'tenant'>('prospects');
   const [currentMode, setCurrentMode] = useState<'founder' | 'tenant'>('founder');
   const [selectedTenantId, setSelectedTenantId] = useState<string>('founder');
-  const [inspectedOpportunity, setInspectedOpportunity] = useState<Opportunity | null>(null);
 
   // Run execution states
   const [isScrubbing, setIsScrubbing] = useState(false);
@@ -427,59 +365,6 @@ export default function App() {
   const [isPwaInstalled, setIsPwaInstalled] = useState(false);
   const [isIOS, setIsIOS] = useState(false);
   const [showIOSGuide, setShowIOSGuide] = useState(false);
-
-  // Cumulative Expected Value (EV) trend for the last 6 months
-  const evTrendData = useMemo(() => {
-    const months: { label: string; yearMonth: string; ev: number; cumulativeEv: number }[] = [];
-    const now = new Date();
-    
-    for (let i = 5; i >= 0; i--) {
-      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-      const yearMonth = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-      const label = d.toLocaleDateString('es-ES', { month: 'short' }).replace('.', '');
-      months.push({
-        label: label.charAt(0).toUpperCase() + label.slice(1),
-        yearMonth,
-        ev: 0,
-        cumulativeEv: 0,
-      });
-    }
-
-    const items = (opportunities.length > 0
-      ? opportunities.map(o => ({
-          createdAt: String(o.created_at || ""),
-          ev: Number(o.expected_value ?? 0)
-        }))
-      : prospects.map(p => ({
-          createdAt: String(p.created_at || ""),
-          ev: Number(p.expected_value ?? 0)
-        })))
-      .filter(item => Number.isFinite(Date.parse(item.createdAt)) && Number.isFinite(item.ev) && item.ev >= 0);
-
-    let runningCumulative = 0;
-    const oldestSixMonthKey = months[0]?.yearMonth || '';
-
-    items.forEach(item => {
-      const itemYM = item.createdAt.slice(0, 7);
-      if (itemYM < oldestSixMonthKey) {
-        runningCumulative += item.ev;
-      }
-    });
-
-    months.forEach(m => {
-      const monthEv = items
-        .filter(item => item.createdAt.slice(0, 7) === m.yearMonth)
-        .reduce((sum, item) => sum + item.ev, 0);
-      
-      m.ev = monthEv;
-      runningCumulative += monthEv;
-      m.cumulativeEv = runningCumulative;
-    });
-
-    return months;
-  }, [opportunities, prospects]);
-
-  const hasObservedEvData = evTrendData.some(month => month.ev > 0);
 
   // Load all telemetry endpoints with HttpOnly session cookie credentials
   const fetchTelemetry = async () => {
@@ -523,14 +408,13 @@ export default function App() {
         }
       } catch (e) {}
 
-      // In Tenant mode: /prospects and /opportunities must ALWAYS send tenant_id=selectedTenantId.
-      // If no real tenant is selected (still 'founder'), show empty — never mix founder data into tenant view.
+      // Tenant mode always scopes prospect reads to the selected tenant; never mix Founder data.
       const isTenantMode = currentMode === 'tenant';
       const hasTenantSelected = isTenantMode && !!selectedTenantId && selectedTenantId !== 'founder';
 
       if (isTenantMode && !hasTenantSelected) {
         setProspects([]);
-        setOpportunities([]);
+        setRoiStats(null);
         setLoading(false);
         return;
       }
@@ -586,37 +470,6 @@ export default function App() {
         setProspects(sorted);
         setIsAuthenticated(true);
 
-        // Fetch Opportunity Intelligence data (founder sin tenant_id; tenant siempre con tenant_id)
-        // Si /opportunities devuelve HTML (Assets/SPA), forzar fallback a /api/opportunities
-        try {
-          const tryOpp = async (url: string) => {
-            const res = await fetch(url, { credentials: 'include' }).catch(() => null);
-            if (!res || !res.ok) return null;
-            const ct = (res.headers.get('content-type') || '').toLowerCase();
-            if (ct.includes('text/html')) return null;
-            const data = await res.json().catch(() => null);
-            if (Array.isArray(data)) return data;
-            if (data && Array.isArray((data as any).opportunities)) return (data as any).opportunities;
-            return null;
-          };
-          let oppList =
-            (await tryOpp(`${apiUrl}/opportunities${queryParam}`)) ||
-            (await tryOpp(`${apiUrl}/api/opportunities${queryParam}`));
-          setOpportunities(oppList || []);
-        } catch (e) {
-          console.warn("[fetchTelemetry] opportunities:", e);
-        }
-
-        // Fetch Missions data
-        try {
-          const misUrl = `${apiUrl}/missions${queryParam}`;
-          const misRes = await fetch(misUrl, { credentials: 'include' });
-          if (misRes && misRes.ok) {
-            const misData = await misRes.json();
-            if (Array.isArray(misData.missions)) setMissions(misData.missions);
-            if (Array.isArray(misData.daily_missions)) setDailyMissions(misData.daily_missions);
-          }
-        } catch (e) {}
       } else if (prospectsRes?.status === 401) {
         setIsAuthenticated(false);
         setLoading(false);
@@ -829,10 +682,9 @@ const submitDecision = async (prospectId: string, action: string) => {
       }
 
       // Success: update local opportunities and prospects state immediately so closed/dispatched items leave open list
-      setOpportunities(prev => prev.filter(o => o.prospect_id !== prospectId));
       setProspects(prev => prev.map(p => p.id === prospectId ? {
         ...p,
-        status: action === 'sent' ? 'sent' : action === 'wa_sent' ? 'contacted' : (action === 'discard' ? 'discarded' : p.status),
+        status: (action === 'sent' || action === 'approve') ? 'sent' : action === 'wa_sent' ? 'contacted' : (action === 'discard' ? 'discarded' : action === 'replied' ? 'replied' : p.status),
         outcome: action === 'wa_sent' ? 'whatsapp_manual_sent' : p.outcome
       } : p));
 
@@ -1013,108 +865,38 @@ const submitDecision = async (prospectId: string, action: string) => {
     }
   };
 
-  // Status Category Categorizer & Badge Styles (8 Required States)
+  // Work queue reflects persisted states. Opening a composer is not a confirmed send.
   const getCategory = (p: Prospect): StatusCategory => {
-    const s = (p.status || '').toLowerCase();
-    const score = typeof p.score === 'number' ? p.score : 0;
-    const contactable = !!(p.email || p.phone);
-    
-    const cdTime = p.cooldown_until ? new Date(p.cooldown_until).getTime() : 0;
-    const isDataBugCooldown = cdTime > Date.now() + 60 * 24 * 60 * 60 * 1000;
-    // Cooldown is NOT blocked — separate anti-spam state
-    if (p.cooldown_until && cdTime > Date.now() && !isDataBugCooldown) {
-      return 'BLOCKED'; // badge shows COOLDOWN
-    }
-    if (p.suppression_reason || s === 'suppressed' || s === 'unsubscribed') {
-      return 'SUPPRESSED';
-    }
-    if (s === 'blocked' || s === 'discarded') {
-      return 'BLOCKED';
-    }
-    if (s === 'disqualified' && score < 40) {
-      return 'BLOCKED';
-    }
-    if (s === 'hold') {
-      return 'QUEUED'; // waiting founder decision
-    }
-    if (s === 'replied' || s === 'human_review' || s === 'positive' || s === 'question') {
-      return 'REPLIED';
-    }
-    if (s === 'sent' || s === 'delivered' || s === 'contacted') {
-      return 'SENT';
-    }
-    if (s === 'queued' || s === 'notified' || s === 'pending') {
-      return 'QUEUED';
-    }
-    if (s === 'approved' || s === 'drafted') {
-      return 'APPROVED';
-    }
-    // Phone-only is valid (esp. tenant bootstrap + founder SMS-gap leads)
-    if ((s === 'qualified' || s === 'scored' || s === 'enriched' || s === 'discovered') && score >= 40 && contactable) {
-      return 'QUALIFIED';
-    }
-    if (score < 40 && !contactable) {
-      return 'BLOCKED';
-    }
-    return 'SCOUTED';
+    const s = String(p.status || '').toLowerCase();
+    const outcome = String(p.outcome || '').toLowerCase();
+    const cooldown = p.cooldown_until ? Date.parse(p.cooldown_until) : 0;
+    if (p.suppression_reason || ['suppressed','unsubscribed','blocked','discarded','disqualified','rejected','bounced','held','hold'].includes(s)) return 'BLOCKED';
+    if (cooldown > Date.now()) return 'BLOCKED';
+    if (['replied','human_review','positive','question','booked','won','converted'].includes(s) || ['positive','replied','booked','won','converted'].includes(outcome)) return 'REPLIED';
+    if (['sent','delivered','opened','clicked','contacted'].includes(s) || ['sent','delivered','whatsapp_manual_sent'].includes(outcome)) return 'SENT';
+    if (s === 'approved' && p.contactability?.send_authorized && p.contactability.contact_available) return 'READY';
+    return 'NEW';
   };
-
   const getStatusBadge = (p: Prospect) => {
-    const s = (p.status || '').toLowerCase();
-    
-    if (s === 'bounced' || s === 'bounce') {
-      return { label: 'BOUNCED', color: 'bg-rose-950/80 text-rose-300 border-rose-800' };
-    }
-    if (s === 'out_of_office' || s === 'ooo') {
-      return { label: 'OUT OF OFFICE', color: 'bg-amber-950/80 text-amber-300 border-amber-800' };
-    }
-    if (s === 'not_now') {
-      return { label: 'NOT NOW', color: 'bg-amber-950/50 text-amber-400 border-amber-800/40' };
-    }
-    if (s === 'human_review') {
-      return { label: 'HUMAN REVIEW', color: 'bg-orange-950/80 text-orange-300 border-orange-800' };
-    }
-    if (s === 'positive') {
-      return { label: 'POSITIVE REPLY', color: 'bg-emerald-950/80 text-emerald-300 border-emerald-800' };
-    }
-    if (s === 'question') {
-      return { label: 'QUESTION', color: 'bg-sky-950/80 text-sky-300 border-sky-800' };
-    }
-    if (s === 'converted') {
-      return { label: 'CONVERTED', color: 'bg-emerald-900 text-emerald-200 border-emerald-600' };
-    }
-    if (s === 'disqualified' || s === 'rejected') {
-      return { label: 'DISQUALIFIED', color: 'bg-zinc-900 text-zinc-500 border-zinc-800' };
-    }
-    
+    const s = String(p.status || '').toLowerCase();
+    if (s === 'notified' && String(p.outcome || '').toLowerCase() === 'whatsapp_manual_ready') return { label: 'WA DRAFT · CONSENT REQUIRED', color: 'bg-amber-950/60 text-amber-200 border-amber-800/60' };
+    if (s === 'bounced' || s === 'bounce') return { label: 'BOUNCED', color: 'bg-rose-950/80 text-rose-300 border-rose-800' };
+    if (s === 'out_of_office' || s === 'ooo') return { label: 'OUT OF OFFICE', color: 'bg-amber-950/80 text-amber-300 border-amber-800' };
+    if (s === 'not_now') return { label: 'NOT NOW', color: 'bg-amber-950/50 text-amber-400 border-amber-800/40' };
+    if (s === 'human_review') return { label: 'HUMAN REVIEW', color: 'bg-orange-950/80 text-orange-300 border-orange-800' };
+    if (s === 'positive') return { label: 'POSITIVE REPLY', color: 'bg-emerald-950/80 text-emerald-300 border-emerald-800' };
+    if (s === 'question') return { label: 'QUESTION', color: 'bg-sky-950/80 text-sky-300 border-sky-800' };
+    if (s === 'converted' || s === 'won') return { label: 'CONVERTED', color: 'bg-emerald-900 text-emerald-200 border-emerald-600' };
     const category = getCategory(p);
-    switch (category) {
-      case 'SUPPRESSED':
-        return { label: s === 'unsubscribed' ? 'UNSUBSCRIBED' : 'SUPPRESSED', color: 'bg-rose-950/50 text-rose-400 border-rose-800/40' };
-      case 'BLOCKED':
-        return { label: p.cooldown_until ? 'COOLDOWN' : 'BLOCKED', color: 'bg-zinc-800/80 text-zinc-400 border-zinc-700/40' };
-      // hold already mapped to QUEUED above
-      case 'REPLIED':
-        return { label: 'REPLIED', color: 'bg-orange-950/50 text-orange-400 border-orange-800/40' };
-      case 'SENT':
-        return { label: s === 'contacted' ? 'CONTACTED' : 'SENT', color: 'bg-emerald-950/50 text-emerald-400 border-emerald-800/40' };
-      case 'QUEUED':
-        return { label: 'QUEUED', color: 'bg-blue-950/50 text-blue-400 border-blue-800/40' };
-      case 'APPROVED':
-        return { label: 'APPROVED', color: 'bg-indigo-950/50 text-indigo-400 border-indigo-800/40' };
-      case 'QUALIFIED':
-        return { label: 'QUALIFIED', color: 'bg-cyan-950/50 text-cyan-400 border-cyan-800/40' };
-      case 'SCOUTED':
-      default:
-        return { label: (p.status || 'SCOUTED').toUpperCase(), color: 'bg-slate-900 text-slate-400 border-slate-800' };
-    }
+    if (category === 'BLOCKED') return { label: p.cooldown_until && Date.parse(p.cooldown_until) > Date.now() ? 'COOLDOWN' : 'BLOCKED', color: 'bg-zinc-800/80 text-zinc-400 border-zinc-700/40' };
+    if (category === 'REPLIED') return { label: 'REPLIED', color: 'bg-orange-950/50 text-orange-400 border-orange-800/40' };
+    if (category === 'SENT') return { label: 'SENT', color: 'bg-emerald-950/50 text-emerald-400 border-emerald-800/40' };
+    if (category === 'READY') return { label: 'READY TO CONTACT', color: 'bg-indigo-950/50 text-indigo-300 border-indigo-800/40' };
+    return { label: (p.status || 'NEW').toUpperCase(), color: 'bg-slate-900 text-slate-400 border-slate-800' };
   };
 
   // Filter prospects list based on active pill filter
-  const filteredProspects = prospects.filter(p => {
-    if (activeFilter === 'ALL') return true;
-    return getCategory(p) === activeFilter;
-  });
+  const filteredProspects = prospects.filter(p => activeFilter === 'ALL' || getCategory(p) === activeFilter);
 
   // Parse evidence/signals from JSON
   const parseSignals = (prospect: Prospect): string[] => {
@@ -1165,37 +947,6 @@ const submitDecision = async (prospectId: string, action: string) => {
       case 'quote_followup': return 'Quote/Estimate';
       case 'lead_reactivation': return 'Lead Reactivation';
       default: return 'Missed Calls';
-    }
-  };
-
-  const parseWhyNow = (opp: Opportunity) => {
-    try {
-      if (opp.why_now_json) {
-        return JSON.parse(opp.why_now_json);
-      }
-    } catch (e) {}
-    return {
-      what_is_happening: "Demanda activa de servicios",
-      why_now: "Ventana de oportunidad estacional inmediata",
-      why_it_matters: "Fuga de ingresos por llamadas no atendidas",
-      recommended_action: "Activar secuencia de prospección",
-      potential_economic_outcome: "$3,400/mes proyectados",
-      distinctions: {
-        observed_facts: ["Sitio web operativo", "Línea telefónica disponible"],
-        inferences: ["Técnicos ocupados en servicios durante llamadas"],
-        estimates: ["Recuperación potencial de 3-5 trabajos mensuales"]
-      }
-    };
-  };
-
-  const getPriorityBadge = (tier: string) => {
-    switch ((tier || '').toLowerCase()) {
-      case 'high':
-        return { label: 'ALTA PRIORIDAD', color: 'bg-rose-950/80 text-rose-300 border-rose-800' };
-      case 'medium':
-        return { label: 'MEDIA PRIORIDAD', color: 'bg-amber-950/80 text-amber-300 border-amber-800' };
-      default:
-        return { label: 'BAJA PRIORIDAD', color: 'bg-slate-900 text-slate-400 border-slate-800' };
     }
   };
 
@@ -1699,435 +1450,36 @@ const submitDecision = async (prospectId: string, action: string) => {
                 );
               })()}
 
-              {/* Primary workbench navigation: contact first; operational settings stay grouped. */}
-              <div className="grid grid-cols-3 gap-1 bg-slate-900/40 p-1 rounded-xl border border-slate-900 font-mono text-[11px] font-bold">
-                <button
-                  onClick={() => setMainTab('prospects')}
-                  className={`py-2 rounded-lg flex items-center justify-center gap-1 transition-all ${mainTab === 'prospects' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white'}`}
-                >
-                  <MessageSquare className="w-3.5 h-3.5" />
-                  <span className="truncate">Contactar</span>
-                </button>
-                <button
-                  onClick={() => setMainTab('opportunities')}
-                  className={`py-2 rounded-lg flex items-center justify-center gap-1 transition-all ${mainTab === 'opportunities' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white'}`}
-                >
-                  <Zap className="w-3.5 h-3.5" />
-                  <span className="truncate">Oportunidades</span>
-                </button>
-                <button
-                  onClick={() => setMainTab('missions')}
-                  className={`py-2 rounded-lg flex items-center justify-center gap-1 transition-all ${mainTab === 'missions' || mainTab === 'tenant' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white'}`}
-                >
-                  <Settings className="w-3.5 h-3.5" />
-                  <span className="truncate">Más</span>
-                </button>
+              {/* Two destinations only: work contacts or configure a Tenant. */}
+              <div className="grid grid-cols-2 gap-1 bg-slate-900/40 p-1 rounded-xl border border-slate-900 font-mono text-[11px] font-bold">
+                <button onClick={() => setMainTab('prospects')} className={`py-2 rounded-lg flex items-center justify-center gap-1 transition-all ${mainTab === 'prospects' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white'}`}><MessageSquare className="w-3.5 h-3.5" /><span>Contactar</span></button>
+                <button onClick={() => setMainTab('tenant')} className={`py-2 rounded-lg flex items-center justify-center gap-1 transition-all ${mainTab === 'tenant' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white'}`}><Settings className="w-3.5 h-3.5" /><span>Configuración</span></button>
               </div>
-              {(mainTab === 'missions' || mainTab === 'tenant') && (
-                <div className="flex gap-2 pt-2 font-mono text-[10px]">
-                  <button type="button" onClick={() => setMainTab('missions')}
-                    className={`px-3 py-2 rounded-lg border ${mainTab === 'missions' ? 'bg-slate-800 border-slate-600 text-white' : 'border-slate-800 text-slate-400'}`}>Misiones</button>
-                  <button type="button" onClick={() => setMainTab('tenant')}
-                    className={`px-3 py-2 rounded-lg border ${mainTab === 'tenant' ? 'bg-slate-800 border-slate-600 text-white' : 'border-slate-800 text-slate-400'}`}>Configuración Tenant</button>
-                </div>
-              )}
             </div>
 
-            {/* TAB 1: OPPORTUNITIES INTELLIGENCE (RADAR FUSION MAX) */}
-            {mainTab === 'opportunities' && (
-              <div className="space-y-4">
-                {/* Metric Scoreboard */}
-                <div className="grid grid-cols-3 gap-2.5 font-mono text-slate-200">
-                  <div className="bg-slate-900/40 p-3 rounded-2xl border border-slate-900">
-                    <span className="text-[9px] text-slate-500 block uppercase font-sans font-bold">Oportunidades</span>
-                    <span className="text-lg font-bold tracking-tight text-slate-100 tabular-nums">
-                      {opportunities.length}
-                    </span>
-                  </div>
-                  <div className="bg-slate-900/40 p-3 rounded-2xl border border-slate-900">
-                    <span className="text-[9px] text-slate-500 block uppercase font-sans font-bold">Alta Prioridad</span>
-                    <span className="text-lg font-bold tracking-tight text-rose-400 tabular-nums">
-                      {opportunities.filter(o => o.priority_tier === 'high' || (o.strategic_score || 0) >= 80).length}
-                    </span>
-                  </div>
-                  <div className="bg-slate-900/40 p-3 rounded-2xl border border-slate-900">
-                    <span className="text-[9px] text-slate-500 block uppercase font-sans font-bold">Pipeline EV</span>
-                    <span className="text-lg font-bold tracking-tight text-emerald-400 tabular-nums">
-                      ${(roiStats?.pipeline_ev_usd ?? opportunities.reduce((acc, o) => acc + (o.expected_value || 0), 0)).toLocaleString()}
-                    </span>
-                  </div>
-                </div>
-
-                {/* ROI funnel — product metric for founder + tenant */}
-                {currentMode === 'tenant' && selectedTenantId && selectedTenantId !== 'founder' && (
-                  <button
-                    type="button"
-                    onClick={() => window.open(`${apiUrl}/api/tenants/leads.csv?tenant_id=${encodeURIComponent(selectedTenantId)}`, '_blank')}
-                    className="w-full py-2 rounded-xl bg-slate-900 border border-slate-700 text-[11px] font-bold text-slate-300 font-mono"
-                  >
-                    Exportar CSV (tenant)
-                  </button>
-                )}
-
-                {roiStats && (
-                  <div className="bg-slate-900/50 border border-slate-800 rounded-2xl p-3 grid grid-cols-4 gap-2 text-center font-mono">
-                    <div>
-                      <div className="text-[9px] text-slate-500 uppercase">Leads</div>
-                      <div className="text-sm font-bold text-white">{roiStats.total ?? 0}</div>
-                    </div>
-                    <div>
-                      <div className="text-[9px] text-slate-500 uppercase">Outreach</div>
-                      <div className="text-sm font-bold text-blue-300">{roiStats.outreach ?? 0}</div>
-                    </div>
-                    <div>
-                      <div className="text-[9px] text-slate-500 uppercase">Reply %</div>
-                      <div className="text-sm font-bold text-amber-300">{roiStats.reply_rate_pct ?? 0}%</div>
-                    </div>
-                    <div>
-                      <div className="text-[9px] text-slate-500 uppercase">Win %</div>
-                      <div className="text-sm font-bold text-emerald-300">{roiStats.win_rate_pct ?? 0}%</div>
-                    </div>
-                  </div>
-                )}
-
-                {/* HISTORICAL CONVERSION FUNNEL CHART (RECHARTS) */}
-                <div className="bg-slate-900/40 border border-slate-800 rounded-2xl p-4 space-y-3 font-mono">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-bold text-slate-300 uppercase">Tasa de Conversión Histórica (Funnel)</span>
-                    <span className="text-[10px] text-slate-500 font-sans">Prospects → Contacted → Replied → Won</span>
-                  </div>
-                  <div className="w-full h-48 pt-2">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <BarChart data={[
-                        { name: 'Prospects', count: roiStats?.total ?? prospects.length, fill: '#3b82f6' },
-                        { name: 'Contacted', count: roiStats?.outreach ?? prospects.filter(p => p.status === 'sent' || p.status === 'delivered' || p.status === 'opened' || p.status === 'clicked' || p.status === 'replied' || p.status === 'won').length, fill: '#6366f1' },
-                        { name: 'Replied', count: prospects.filter(p => p.status === 'replied' || p.status === 'positive' || p.status === 'question' || p.status === 'won').length, fill: '#f59e0b' },
-                        { name: 'Won', count: prospects.filter(p => p.status === 'won' || p.outcome === 'won').length, fill: '#10b981' }
-                      ]} margin={{ top: 5, right: 10, left: -20, bottom: 0 }}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
-                        <XAxis dataKey="name" stroke="#64748b" fontSize={10} tickLine={false} />
-                        <YAxis stroke="#64748b" fontSize={10} tickLine={false} />
-                        <Tooltip 
-                          contentStyle={{ backgroundColor: '#0f172a', borderColor: '#334155', borderRadius: '0.75rem', fontSize: '11px', fontFamily: 'monospace' }}
-                          itemStyle={{ color: '#e2e8f0' }}
-                          cursor={{ fill: 'rgba(51, 65, 85, 0.2)' }}
-                        />
-                        <Bar dataKey="count" radius={[6, 6, 0, 0]} />
-                      </BarChart>
-                    </ResponsiveContainer>
-                  </div>
-                </div>
-
-                {/* EXPECTED VALUE (EV) MONTHLY CUMULATIVE TREND CHART (RECHARTS) */}
-                <div className="bg-slate-900/40 border border-slate-800 rounded-2xl p-4 space-y-3 font-mono">
-                  <div className="flex items-center justify-between flex-wrap gap-1">
-                    <div className="flex items-center gap-2">
-                      <TrendingUp className="w-4 h-4 text-emerald-400 shrink-0" />
-                      <span className="text-xs font-bold text-slate-300 uppercase">Tendencia Expected Value (EV) Acumulado</span>
-                    </div>
-                    <span className="text-[10px] text-emerald-400 font-semibold font-sans">
-                      Últimos 6 meses · Total: ${hasObservedEvData ? evTrendData[evTrendData.length - 1]?.cumulativeEv?.toLocaleString() : 'N/D'}
-                    </span>
-                  </div>
-                  <div className="w-full h-48 pt-2">
-                    {hasObservedEvData ? <ResponsiveContainer width="100%" height="100%">
-                      <AreaChart data={evTrendData} margin={{ top: 10, right: 10, left: -10, bottom: 0 }}>
-                        <defs>
-                          <linearGradient id="evGradient" x1="0" y1="0" x2="0" y2="1">
-                            <stop offset="5%" stopColor="#10b981" stopOpacity={0.4} />
-                            <stop offset="95%" stopColor="#10b981" stopOpacity={0.0} />
-                          </linearGradient>
-                        </defs>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
-                        <XAxis dataKey="label" stroke="#64748b" fontSize={10} tickLine={false} />
-                        <YAxis 
-                          stroke="#64748b" 
-                          fontSize={10} 
-                          tickLine={false} 
-                          tickFormatter={(val) => `$${val >= 1000 ? `${(val / 1000).toFixed(0)}k` : val}`} 
-                        />
-                        <Tooltip 
-                          contentStyle={{ backgroundColor: '#0f172a', borderColor: '#334155', borderRadius: '0.75rem', fontSize: '11px', fontFamily: 'monospace' }}
-                          itemStyle={{ color: '#34d399' }}
-                          formatter={(value: any) => [`$${Number(value || 0).toLocaleString()} USD`, 'EV Acumulado']}
-                          labelFormatter={(label) => `Mes: ${label}`}
-                        />
-                        <Area 
-                          type="monotone" 
-                          dataKey="cumulativeEv" 
-                          stroke="#10b981" 
-                          strokeWidth={2.5} 
-                          fillOpacity={1} 
-                          fill="url(#evGradient)" 
-                          dot={{ r: 4, fill: '#10b981', stroke: '#0f172a', strokeWidth: 2 }}
-                          activeDot={{ r: 6, fill: '#34d399' }}
-                        />
-                      </AreaChart>
-                    </ResponsiveContainer> : (
-                      <div className="h-full flex items-center justify-center text-xs text-slate-500 font-sans">
-                        Sin evidencia de valor comercial observado para este período.
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                {/* Priority filter pills */}
-                <div className="flex items-center gap-1.5 overflow-x-auto pb-1 no-scrollbar text-[10px] font-mono font-bold">
-                  {(['ALL', 'high', 'medium', 'low']).map(pTier => (
-                    <button
-                      key={pTier}
-                      onClick={() => setOpportunityPriorityFilter(pTier)}
-                      className={`px-3 py-1 rounded-lg border whitespace-nowrap transition-all uppercase ${
-                        opportunityPriorityFilter === pTier
-                          ? 'bg-blue-600 border-blue-500 text-white'
-                          : 'bg-slate-900/60 border-slate-800 text-slate-400 hover:text-white'
-                      }`}
-                    >
-                      {pTier === 'ALL' ? 'TODAS' : pTier === 'high' ? 'ALTA' : pTier === 'medium' ? 'MEDIA' : 'BAJA'}
-                    </button>
-                  ))}
-                </div>
-
-                {opportunities.filter(o => opportunityPriorityFilter === 'ALL' || o.priority_tier === opportunityPriorityFilter).length === 0 ? (
-                  <div className="text-center py-10 bg-slate-900/10 rounded-2xl border border-slate-900 p-5 space-y-3">
-                    <Sparkles className="w-6 h-6 text-slate-600 mx-auto mb-2" />
-                    <p className="text-xs text-slate-500 leading-normal">
-                      {currentMode === 'tenant'
-                        ? 'Aún no hay oportunidades para este tenant. Configura ciudades y pulsa CORRER RADAR AHORA.'
-                        : 'No hay oportunidades identificadas. Puedes regenerarlas desde los prospectos ya puntuados o ejecutar el Radar.'}
-                    </p>
-                    {prospects.length > 0 && (
-                      <button
-                        onClick={async () => {
-                          try {
-                            const base =
-                              currentMode === "tenant" && selectedTenantId && selectedTenantId !== "founder"
-                                ? `?tenant_id=${encodeURIComponent(selectedTenantId)}&`
-                                : "?";
-                            let offset = 0;
-                            let total = 0;
-                            let skipped = 0;
-                            let rounds = 0;
-                            let lastMsg = "";
-                            // Max 5 × 15 = 75 opps / click (Free D1 safe)
-                            while (rounds < 5) {
-                              const res = await fetch(
-                                `${apiUrl}/api/opportunities/backfill${base}limit=15&offset=${offset}`,
-                                { method: "POST", credentials: "include" }
-                              );
-                              const data = await res.json().catch(() => ({}));
-                              if (!res.ok) {
-                                alert("Error: " + (data.error || res.status) + (data.hint ? "\n" + data.hint : ""));
-                                break;
-                              }
-                              total += data.opportunities_created || 0;
-                              skipped += data.skipped_existing || 0;
-                              lastMsg = data.message || "";
-                              rounds++;
-                              if (!data.has_more) break;
-                              offset = data.next_offset ?? offset + 15;
-                            }
-                            alert(
-                              `✓ ${total} nuevas en ${rounds} lote(s)` +
-                              (skipped ? ` (${skipped} ya existían)` : "") +
-                              `.\n${lastMsg}`
-                            );
-                            await fetchTelemetry();
-                          } catch (e: any) {
-                            alert("Error de red: " + e.message);
-                          }
-                        }}
-                        className="mx-auto px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold transition-all"
-                      >
-                        Regenerar Oportunidades desde Prospectos
-                      </button>
-                    )}
-                  </div>
-                ) : (
-                  <div className="space-y-3">
-                    {opportunities
-                      .filter(o => opportunityPriorityFilter === 'ALL' || o.priority_tier === opportunityPriorityFilter)
-                      .map(opp => {
-                        const whyNow = parseWhyNow(opp);
-                        const pBadge = getPriorityBadge(opp.priority_tier);
-                        const isExpanded = inspectedOpportunity?.id === opp.id;
-
-                        return (
-                          <div
-                            key={opp.id}
-                            onClick={() => setInspectedOpportunity(isExpanded ? null : opp)}
-                            className="bg-slate-900/40 border border-slate-900 rounded-2xl p-4 space-y-3 transition-colors active:bg-slate-900/60"
-                          >
-                            <div className="flex items-start justify-between gap-2">
-                              <div className="space-y-1">
-                                <div className="flex items-center gap-2">
-                                  <h4 className="text-xs font-bold text-slate-100">{opp.title || opp.prospect_name}</h4>
-                                  <span className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-bold border ${pBadge.color}`}>
-                                    {pBadge.label}
-                                  </span>
-                                </div>
-                                {currentMode === 'tenant' ? (
-                                  <div className="space-y-1">
-                                    <div className="flex flex-wrap items-center gap-1.5 text-[10px] text-slate-400 font-mono">
-                                      <span className="text-slate-200 font-semibold">{parseCityAndState(opp.prospect_city || '').city}</span>
-                                      <span>·</span>
-                                      <span className="text-slate-200 font-semibold">{parseCityAndState(opp.prospect_city || '').state}</span>
-                                      <span>·</span>
-                                      <span className="px-1.5 py-0.5 rounded bg-indigo-950/60 text-indigo-300 border border-indigo-800/40 font-semibold uppercase">
-                                        {opp.prospect_trade || (tenants.find(t => t.tenant_id === selectedTenantId)?.niche) || 'General'}
-                                      </span>
-                                    </div>
-                                    <div className="flex flex-wrap items-center gap-1 pt-0.5">
-                                      {whyNow.signals && Array.isArray(whyNow.signals) && whyNow.signals.length > 0 ? (
-                                        whyNow.signals.map((sig: string, sIdx: number) => (
-                                          <span key={sIdx} className="px-1.5 py-0.5 rounded bg-amber-950/30 text-[9px] text-amber-300 font-mono border border-amber-600/30 font-bold">
-                                            ⚡ {sig}
-                                          </span>
-                                        ))
-                                      ) : (
-                                        <span className="px-1.5 py-0.5 rounded bg-blue-950/30 text-[9px] text-blue-300 font-mono border border-blue-800/30">
-                                          ⚡ Oportunidad Estratégica
-                                        </span>
-                                      )}
-                                    </div>
-                                  </div>
-                                ) : (
-                                  <div className="flex items-center gap-2 text-[10px] text-slate-500 font-mono">
-                                    <span className="uppercase text-blue-400 font-semibold">{opp.prospect_trade || 'General'}</span>
-                                    <span>·</span>
-                                    <span>{opp.prospect_city}</span>
-                                    <span>·</span>
-                                    <span className="px-1.5 py-0.2 rounded bg-slate-800 text-slate-300 uppercase">{opp.decision_state || 'identificada'}</span>
-                                  </div>
-                                )}
-                              </div>
-                              <div className="text-right shrink-0">
-                                <div className="text-xs font-mono font-bold text-emerald-400">
-                                  {opp.strategic_score}/100
-                                </div>
-                                <div className="text-[10px] font-mono font-semibold text-sky-400">
-                                  +${opp.expected_value || 3400} EV
-                                </div>
-                              </div>
-                            </div>
-
-                            {/* Strategic Scoring Breakdown Badges */}
-                            <div className="grid grid-cols-4 gap-1 text-[9px] font-mono bg-slate-950 p-2 rounded-xl border border-slate-900/80 text-center">
-                              <div><span className="text-slate-500 block">Fit</span><strong className="text-slate-200">{opp.fit_score || 0}</strong></div>
-                              <div><span className="text-slate-500 block">Pain</span><strong className="text-rose-400">{opp.pain_score || 0}</strong></div>
-                              <div><span className="text-slate-500 block">Timing</span><strong className="text-amber-400">{opp.timing_score || 0}</strong></div>
-                              <div><span className="text-slate-500 block">Evidencia</span><strong className="text-emerald-400">{opp.evidence_score || 0}</strong></div>
-                            </div>
-
-                            {/* Why Now Highlight */}
-                            <div className="bg-blue-950/20 border border-blue-900/30 p-2.5 rounded-xl space-y-1 text-[11px]">
-                              <div className="flex items-center gap-1.5 text-blue-400 font-bold text-[10px]">
-                                <Clock className="w-3 h-3" />
-                                <span>¿POR QUÉ AHORA?</span>
-                              </div>
-                              <p className="text-slate-300 leading-snug">{whyNow.why_now}</p>
-                            </div>
-
-                            {/* Expandable Why Now & Evidence Chain Drawer */}
-                            {isExpanded && (
-                              <div className="pt-2 border-t border-slate-800 space-y-3 text-xs" onClick={(e) => e.stopPropagation()}>
-                                <div className="space-y-2 bg-slate-950 p-3 rounded-xl border border-slate-900 font-mono text-[10px]">
-                                  <div className="space-y-1">
-                                    <span className="text-slate-500 font-bold uppercase block">Situación Observada:</span>
-                                    <p className="text-slate-300">{whyNow.what_is_happening}</p>
-                                  </div>
-                                  <div className="space-y-1 pt-1">
-                                    <span className="text-slate-500 font-bold uppercase block">Por qué importa:</span>
-                                    <p className="text-slate-300">{whyNow.why_it_matters}</p>
-                                  </div>
-                                  <div className="space-y-1 pt-1">
-                                    <span className="text-slate-500 font-bold uppercase block">Acción con sentido:</span>
-                                    <p className="text-blue-300 font-bold">{whyNow.recommended_action}</p>
-                                  </div>
-                                  <div className="space-y-1 pt-1">
-                                    <span className="text-slate-500 font-bold uppercase block">Resultado económico potencial:</span>
-                                    <p className="text-emerald-400 font-bold">{whyNow.potential_economic_outcome}</p>
-                                  </div>
-                                </div>
-
-                                {/* Distinctions: Facts vs Inferences vs Estimates */}
-                                <div className="bg-slate-950 p-3 rounded-xl border border-slate-900 text-[10px] space-y-2">
-                                  <span className="text-slate-500 font-bold uppercase font-mono block">Trazabilidad de Evidencia:</span>
-                                  {whyNow.distinctions?.observed_facts && (
-                                    <div className="space-y-0.5">
-                                      <span className="text-emerald-400 font-bold">✓ Hechos Observados:</span>
-                                      <ul className="list-disc list-inside text-slate-300 pl-1">
-                                        {whyNow.distinctions.observed_facts.map((f: string, fIdx: number) => (
-                                          <li key={fIdx}>{f}</li>
-                                        ))}
-                                      </ul>
-                                    </div>
-                                  )}
-                                  {whyNow.distinctions?.inferences && (
-                                    <div className="space-y-0.5 pt-1">
-                                      <span className="text-amber-400 font-bold">⚡ Inferencias Estratégicas:</span>
-                                      <ul className="list-disc list-inside text-slate-300 pl-1">
-                                        {whyNow.distinctions.inferences.map((inf: string, iIdx: number) => (
-                                          <li key={iIdx}>{inf}</li>
-                                        ))}
-                                      </ul>
-                                    </div>
-                                  )}
-                                  {whyNow.distinctions?.estimates && (
-                                    <div className="space-y-0.5 pt-1">
-                                      <span className="text-sky-400 font-bold">📊 Estimaciones Económicas:</span>
-                                      <ul className="list-disc list-inside text-slate-300 pl-1">
-                                        {whyNow.distinctions.estimates.map((est: string, eIdx: number) => (
-                                          <li key={eIdx}>{est}</li>
-                                        ))}
-                                      </ul>
-                                    </div>
-                                  )}
-                                </div>
-
-                                {/* Action Buttons for Opportunity */}
-                                <div className="grid grid-cols-2 gap-2 pt-1 font-mono">
-                                  <button
-                                    onClick={() => submitDecision(opp.prospect_id, 'sent')}
-                                    className="h-10 text-xs font-semibold rounded-lg bg-emerald-600/20 border border-emerald-500/30 text-emerald-300 hover:bg-emerald-600 hover:text-white transition-colors"
-                                  >
-                                    ✓ Ejecutar Acción
-                                  </button>
-                                  <button
-                                    onClick={() => submitDecision(opp.prospect_id, 'discard')}
-                                    className="h-10 text-xs font-semibold rounded-lg bg-slate-900 border border-slate-800 text-slate-400 hover:bg-slate-800 hover:text-white"
-                                  >
-                                    ✕ Descartar
-                                  </button>
-                                </div>
-                              </div>
-                            )}
-                          </div>
-                        );
-                      })}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* TAB 2: PROSPECT DIRECTORY (LEGACY COMPATIBLE) */}
+            {/* CONTACT WORKBENCH: message-first; intelligence stays in the engine. */}
             {mainTab === 'prospects' && (
               <div className="space-y-3">
                 {/* Metric Scoreboard */}
-                <div className="grid grid-cols-2 gap-3.5 font-mono text-slate-200">
-                  <div className="bg-slate-900/40 p-4 rounded-2xl border border-slate-900">
-                    <span className="text-[10px] text-slate-500 block uppercase font-sans font-bold">Total Encontrados</span>
-                    <span className="text-xl font-bold tracking-tight text-slate-100 tabular-nums">
-                      {prospects.length}
-                    </span>
+                {(() => {
+                const m: any = currentMode === 'founder' ? stats?.workbench : roiStats;
+                const metrics: [string, unknown][] = [
+                  ['Empresas encontradas', m?.total_found],
+                  ['Correo listo', m?.pending_email],
+                  ['Borradores WhatsApp', m?.whatsapp_drafts],
+                  ['Contactados', m?.contacted]
+                ];
+                return <div className="grid grid-cols-2 gap-2.5 font-mono text-slate-200">
+                  {metrics.map(([label, value]) => <div key={label} className="bg-slate-900/40 p-3.5 rounded-2xl border border-slate-900">
+                    <span className="text-[10px] text-slate-500 block uppercase font-sans font-bold">{label}</span>
+                    <span className="text-xl font-bold tracking-tight text-slate-100 tabular-nums">{typeof value === 'number' ? value : 'N/D'}</span>
+                  </div>)}
+                  <div className="col-span-2 text-[10px] text-slate-500 flex items-center justify-between gap-2">
+                    <span>Respuestas registradas: {typeof m?.replied === 'number' ? m.replied : 'N/D'}</span>
+                    <span>WhatsApp requiere consentimiento explícito; borrador ≠ envío.</span>
                   </div>
-                  <div className="bg-slate-900/40 p-4 rounded-2xl border border-slate-900">
-                    <span className="text-[10px] text-slate-500 block uppercase font-sans font-bold">Pendientes Aprobar</span>
-                    <span className="text-xl font-bold tracking-tight text-purple-400 tabular-nums">
-                      {prospects.filter(p => getCategory(p) === 'APPROVED' || getCategory(p) === 'QUEUED').length}
-                    </span>
-                  </div>
-                </div>
+                </div>;
+              })()}
 
                 <div className="flex items-center justify-between border-b border-slate-900 pb-2">
                   <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Directorio de Prospectos Real</h3>
@@ -2136,7 +1488,7 @@ const submitDecision = async (prospectId: string, action: string) => {
 
                 {/* Status Filter Pills */}
                 <div className="flex items-center gap-1.5 overflow-x-auto pb-1 no-scrollbar text-[10px] font-mono font-bold">
-                  {(['ALL', 'SCOUTED', 'QUALIFIED', 'APPROVED', 'QUEUED', 'SENT', 'REPLIED', 'SUPPRESSED', 'BLOCKED'] as StatusCategory[]).map(cat => (
+                  {(['ALL', 'NEW', 'READY', 'SENT', 'REPLIED', 'BLOCKED'] as StatusCategory[]).map(cat => (
                     <button
                       key={cat}
                       onClick={() => setActiveFilter(cat)}
@@ -2146,7 +1498,7 @@ const submitDecision = async (prospectId: string, action: string) => {
                           : 'bg-slate-900/60 border-slate-800 text-slate-400 hover:text-white'
                       }`}
                     >
-                      {cat}
+                      {{ ALL: 'TODOS', NEW: 'NUEVOS', READY: 'LISTOS', SENT: 'CONTACTADOS', REPLIED: 'RESPUESTAS', BLOCKED: 'BLOQUEADOS' }[cat]}
                     </button>
                   ))}
                 </div>
@@ -2181,6 +1533,7 @@ const submitDecision = async (prospectId: string, action: string) => {
                         ? activeKitForProspect?.angle === 'tenant_b2b_service'
                         : ['weather_surge', 'stale_quotes', 'no_sms', 'missed_calls'].includes(activeKitForProspect?.angle);
                       const canOpenDirectChannel = Boolean(contactability?.commercial_prospect && contactability.contact_available && hasVerifiedOutreachAngle);
+      const canSendEmail = Boolean(contactability?.commercial_prospect && contactability.send_authorized && emailRecipient && isVerifiedEmailRecipient(p));
                       // A prepared Founder WhatsApp draft is already human-reviewed for this channel.
                       // Opening wa.me is still only a manual handoff; it does not prove account or opt-in.
                       const canOpenWhatsApp = canOpenDirectChannel || (isPreparedWhatsAppDraft && hasDirectWhatsAppRecipient(p.phone));
@@ -2271,21 +1624,18 @@ const submitDecision = async (prospectId: string, action: string) => {
                             </div>
                           )}
                           <div className="flex flex-wrap items-center gap-2 pt-1 font-mono text-[11px]">
-                            {canOpenDirectChannel && emailRecipient && (
-                              <a 
-                                href={`mailto:${emailRecipient}?subject=${encodeURIComponent(emailMessageSubject)}&body=${encodeURIComponent(emailMessageBody)}`}
-                                target="_blank" 
-                                rel="noreferrer" 
+                            {canSendEmail && (
+                              <button
+                                type="button"
                                 className="px-2.5 py-1 rounded-lg bg-blue-950/50 border border-blue-800/40 text-blue-300 hover:bg-blue-900/60 flex items-center gap-1 font-bold"
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  setShowOutcomeControls(prev => ({ ...prev, [p.id]: true }));
-                                   void recordProspectMessageEvent(p.id, 'message_channel_opened', 'email');
+                                  if (window.confirm(`¿Enviar ahora el correo preparado a ${emailRecipient} mediante el proveedor configurado?`)) void submitDecision(p.id, 'approve');
                                 }}
                               >
                                 <Mail className="w-3.5 h-3.5 text-blue-400" />
-                                Correo
-                              </a>
+                                Enviar correo
+                              </button>
                             )}
                             {canOpenWhatsApp && p.phone && hasDirectWhatsAppRecipient(p.phone) && toWhatsAppUrl(p.phone, whatsappMessageBody) && (
                               <a 
@@ -2365,13 +1715,7 @@ const submitDecision = async (prospectId: string, action: string) => {
                           {(showOutcomeControls[p.id] || isExpanded) && (
                             <div className="pt-2 border-t border-slate-900/80 space-y-2" onClick={(e) => e.stopPropagation()}>
                               <span className="text-[10px] font-mono text-slate-400 font-bold uppercase block">Registrar Resultado:</span>
-                              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                                <button
-                                  onClick={() => submitDecision(p.id, 'sent')}
-                                  className="py-2 px-2.5 text-xs font-bold font-mono rounded-lg bg-blue-900/30 border border-blue-700/40 text-blue-300 hover:bg-blue-800/50 transition-colors"
-                                >
-                                  Enviado
-                                </button>
+                              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
                                 <button
                                   onClick={() => submitDecision(p.id, 'replied')}
                                   className="py-2 px-2.5 text-xs font-bold font-mono rounded-lg bg-amber-900/30 border border-amber-700/40 text-amber-300 hover:bg-amber-800/50 transition-colors"
@@ -2602,71 +1946,7 @@ const submitDecision = async (prospectId: string, action: string) => {
               </div>
             )}
 
-            {/* TAB 3: MISSIONS SYSTEM (RADAR FUSION MAX) */}
-            {mainTab === 'missions' && (
-              <div className="space-y-4 font-mono">
-                {dailyMissions.length === 0 ? (
-                  <div className="bg-slate-900/40 border border-slate-800 rounded-2xl p-8 text-center text-slate-400 text-xs">
-                    <Target className="w-8 h-8 text-slate-600 mx-auto mb-2" />
-                    <p>Aún no hay misión de hoy. Corre el Radar.</p>
-                  </div>
-                ) : (
-                  dailyMissions.map((dm, dIdx) => (
-                    <div key={dIdx} className="bg-slate-900/40 border border-slate-800 rounded-2xl p-4 space-y-3">
-                      <div className="flex items-center justify-between border-b border-slate-800 pb-2">
-                        <div className="flex items-center gap-2">
-                          <Target className="w-4 h-4 text-blue-400" />
-                          <h4 className="text-xs font-bold text-white uppercase">Misión Diaria ({dm.day})</h4>
-                        </div>
-                        <span className="px-2 py-0.5 rounded text-[9px] font-bold uppercase bg-emerald-950/60 border border-emerald-800 text-emerald-300">
-                          {dm.status}
-                        </span>
-                      </div>
-
-                      <div className="space-y-1 text-xs">
-                        <span className="text-[10px] text-slate-500 block uppercase">Objetivo Operativo:</span>
-                        <p className="text-slate-200">{dm.goal}</p>
-                      </div>
-
-                      <div className="space-y-2 pt-2">
-                        <div>
-                          <div className="flex justify-between text-[10px] text-slate-400 mb-1">
-                            <span>Prospectos Calificados:</span>
-                            <span className="text-blue-400 font-bold">{dm.qualified_count} / {dm.target_qualified}</span>
-                          </div>
-                          <div className="w-full bg-slate-950 h-2 rounded-full overflow-hidden border border-slate-800">
-                            <div 
-                              className="bg-blue-600 h-full rounded-full transition-all"
-                              style={{ width: `${Math.min(100, ((dm.qualified_count || 0) / (dm.target_qualified || 1)) * 100)}%` }}
-                            />
-                          </div>
-                        </div>
-
-                        <div>
-                          <div className="flex justify-between text-[10px] text-slate-400 mb-1">
-                            <span>Outreach / Mensajes Enviados:</span>
-                            <span className="text-emerald-400 font-bold">{dm.outreach_count} / {dm.target_outreach}</span>
-                          </div>
-                          <div className="w-full bg-slate-950 h-2 rounded-full overflow-hidden border border-slate-800">
-                            <div 
-                              className="bg-emerald-500 h-full rounded-full transition-all"
-                              style={{ width: `${Math.min(100, ((dm.outreach_count || 0) / (dm.target_outreach || 1)) * 100)}%` }}
-                            />
-                          </div>
-                        </div>
-                      </div>
-
-                      <div className="grid grid-cols-2 gap-2 text-[10px] pt-1 text-slate-400 border-t border-slate-850">
-                        <div><strong className="text-slate-500 block">Mercados:</strong> {dm.markets}</div>
-                        <div><strong className="text-slate-500 block">Presupuesto:</strong> {dm.budget}</div>
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
-            )}
-
-            {/* TAB 4: MULTI-TENANT CONFIGURATION */}
+            {/* TENANT CONFIGURATION — backend intelligence remains tenant-scoped. */}
             {mainTab === 'tenant' && (
               <div className="bg-slate-900/40 border border-slate-800 rounded-2xl p-4 space-y-4 font-mono text-xs">
                 <div className="flex items-center justify-between border-b border-slate-800 pb-2">
