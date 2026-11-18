@@ -51,7 +51,7 @@ npx wrangler secret put GEMINI_SECONDARY_API_KEY # Key Secundaria para ampliaci�
 npx wrangler secret put GROQ_API_KEY             # Key de Groq (GPT-OSS 20B/120B)
 npx wrangler secret put HUNTER_API_KEY           # Búsqueda de emails en dominio (max 8/día)
 npx wrangler secret put ABSTRACT_API_KEY         # Validación de entregabilidad
-npx wrangler secret put GITHUB_ACTIONS_TOKEN      # GitHub Actions: dispatch de Scrapling (SIEMPRE como Secret)
+npx wrangler secret put GITHUB_ACTIONS_TOKEN_SECRET # GitHub Actions: dispatch de Scrapling (Secret cifrado; el binding legacy GITHUB_ACTIONS_TOKEN se ignora)
 npx wrangler secret put RADAR_SIDECAR_CALLBACK_KEY # Autenticación del callback Scrapling
 ```
 
