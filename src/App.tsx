@@ -2170,7 +2170,10 @@ const submitDecision = async (prospectId: string, action: string) => {
                       const generatedMessage = attackKits[p.id]?.generated_message;
                       const emailMessageBody = generatedMessage?.channel === "email" ? generatedMessage.body : (p.draft_body || "");
                       const emailMessageSubject = generatedMessage?.channel === "email" ? generatedMessage.subject : (p.draft_subject || "");
-                      const whatsappMessageBody = generatedMessage?.channel === "whatsapp" ? generatedMessage.body : "";
+                      const isPreparedWhatsAppDraft = currentMode === 'founder' && p.outcome === 'whatsapp_manual_ready';
+                      const whatsappMessageBody = generatedMessage?.channel === "whatsapp"
+                        ? generatedMessage.body
+                        : isPreparedWhatsAppDraft ? (p.draft_body || "") : "";
                       const emailRecipient = p.email && isValidEmailRecipient(p.email) ? p.email.trim() : null;
                       const contactability = p.contactability;
                       const activeKitForProspect = attackKits[p.id] || p.attack_kit;
@@ -2178,6 +2181,9 @@ const submitDecision = async (prospectId: string, action: string) => {
                         ? activeKitForProspect?.angle === 'tenant_b2b_service'
                         : ['weather_surge', 'stale_quotes', 'no_sms', 'missed_calls'].includes(activeKitForProspect?.angle);
                       const canOpenDirectChannel = Boolean(contactability?.commercial_prospect && contactability.contact_available && hasVerifiedOutreachAngle);
+                      // A prepared Founder WhatsApp draft is already human-reviewed for this channel.
+                      // Opening wa.me is still only a manual handoff; it does not prove account or opt-in.
+                      const canOpenWhatsApp = canOpenDirectChannel || (isPreparedWhatsAppDraft && hasDirectWhatsAppRecipient(p.phone));
 
                       return (
                         <div 
@@ -2281,7 +2287,7 @@ const submitDecision = async (prospectId: string, action: string) => {
                                 Correo
                               </a>
                             )}
-                            {canOpenDirectChannel && p.phone && hasDirectWhatsAppRecipient(p.phone) && toWhatsAppUrl(p.phone, whatsappMessageBody) && (
+                            {canOpenWhatsApp && p.phone && hasDirectWhatsAppRecipient(p.phone) && toWhatsAppUrl(p.phone, whatsappMessageBody) && (
                               <a 
                                 href={toWhatsAppUrl(p.phone, whatsappMessageBody)!}
                                 target="_blank" 
