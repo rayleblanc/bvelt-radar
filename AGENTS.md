@@ -10,6 +10,9 @@
 ## Rol de Radar
 - Radar observa y descubre empresas, buyers, señales y oportunidades originales.
 - Founder Mode encuentra compradores potenciales para Bvelt.
+- Core Founder discovery, D1 persistence, queue processing, AI drafting and manual contact must not depend on GitHub Actions. Actions/Scrapling is optional enrichment only; its failure is a visible degraded state, never a reason to suppress core discovery.
+- The Founder PWA is an owner-only workbench: Contactar is the default view; primary navigation is Contactar / Oportunidades / Más. Preserve Mission and Tenant configuration functionality under secondary navigation.
+- Every contact flow distinguishes channel opened, account verified, opt-in evidenced, message sent and reply received. WhatsApp deep links are manual; never mark a send from a link click. Server-side confirmation requires the existing verifiable opt-in evidence and cooldown gates.
 - Tenant Mode encuentra oportunidades para cada negocio autenticado a partir del perfil/ICP/territorio canónico de Bvelt.
 - Prospect research C23 usa realm=PROSPECT; no es evidencia Tenant ni entra en BEM Tenant outcomes/metrics/learning.
 - BEM en LocalFlowPro es memoria canónica; Brain decide; Radar no convierte puntuaciones de fuente en verdad comercial.
