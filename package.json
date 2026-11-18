@@ -8,7 +8,7 @@
     "build": "tsc && vite build",
     "lint": "tsc --noEmit",
     "preview": "vite preview",
-    "test:radar": "npx --yes tsx src/test_radar.ts && npx --yes tsx --test tests/emailTrustIcp.test.ts tests/tenantLearningIngest.test.ts tests/evidenceProvenance.test.ts tests/tenantProfileContract.test.ts tests/tenantBuyerSegments.test.ts tests/expandTenantIcp.test.ts",
+    "test:radar": "npx --yes tsx src/test_radar.ts && npx --yes tsx --test tests/emailTrustIcp.test.ts tests/tenantLearningIngest.test.ts tests/evidenceProvenance.test.ts tests/tenantProfileContract.test.ts tests/tenantBuyerSegments.test.ts tests/expandTenantIcp.test.ts tests/providerCooldown.test.ts",
     "deploy": "npx wrangler deploy"
   },
   "dependencies": {
