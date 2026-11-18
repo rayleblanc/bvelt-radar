@@ -1,0 +1,161 @@
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+import {
+  classifyProviderHttpStatus,
+  createProviderCooldownStore,
+  parseRetryAfterMs,
+  providerCooldownDurationMs,
+  providerCooldownKey,
+  type ProviderCooldownDatabase
+} from "../src/providerCooldown";
+import { generateAICopy } from "../src/worker";
+
+type StoredRow = { value: string; expires_at: number };
+
+function createDb(rows: Map<string, StoredRow> = new Map()) {
+  const statements: Array<{ sql: string; params: unknown[] }> = [];
+  const db: ProviderCooldownDatabase & {
+    statements: typeof statements;
+    rows: typeof rows;
+  } = {
+    statements,
+    rows,
+    prepare(sql: string) {
+      return {
+        bind(...params: unknown[]) {
+          return {
+            async first<T = Record<string, unknown>>() {
+              if (sql.includes("SELECT value, expires_at FROM radar_cache")) {
+                return (rows.get(String(params[0])) || null) as T | null;
+              }
+              return null;
+            },
+            async run() {
+              statements.push({ sql, params });
+              if (sql.includes("INSERT INTO radar_cache")) {
+                const key = String(params[0]);
+                const prior = rows.get(key);
+                const expiresAt = Math.max(Number(prior?.expires_at || 0), Number(params[2] || 0));
+                rows.set(key, { value: String(params[1]), expires_at: expiresAt });
+              }
+              if (sql.includes("UPDATE daily_budgets")) return { meta: { changes: 1 } };
+              return { meta: { changes: 1 } };
+            }
+          };
+        }
+      };
+    }
+  };
+  return db;
+}
+
+describe("provider/model cooldown policy", () => {
+  it("parses Retry-After delta-seconds and HTTP-date", () => {
+    const now = Date.UTC(2026, 10, 18, 12, 0, 0);
+    assert.equal(parseRetryAfterMs("17", now), 17_000);
+    const httpDate = new Date(now + 45_000).toUTCString();
+    const dateDelay = parseRetryAfterMs(httpDate, now);
+    assert.ok(dateDelay !== null && dateDelay >= 44_000 && dateDelay <= 45_000);
+    assert.equal(parseRetryAfterMs("not-a-date", now), null);
+  });
+
+  it("differentiates rate limits, server errors, timeouts, invalid models and auth failures", () => {
+    assert.equal(classifyProviderHttpStatus(429), "rate_limited");
+    assert.equal(classifyProviderHttpStatus(503), "server_error");
+    assert.equal(classifyProviderHttpStatus(408), "timeout");
+    assert.equal(classifyProviderHttpStatus(404), "model_not_found");
+    assert.equal(classifyProviderHttpStatus(401), "auth_error");
+    assert.equal(providerCooldownDurationMs("rate_limited", 123_000), 123_000);
+    assert.equal(providerCooldownDurationMs("server_error"), 30_000);
+    assert.equal(providerCooldownDurationMs("timeout"), 20_000);
+    assert.equal(providerCooldownDurationMs("model_not_found"), 6 * 60 * 60 * 1000);
+  });
+
+  it("persists a provider/model cooldown in shared D1 cache for another isolate", async () => {
+    const sharedRows = new Map<string, StoredRow>();
+    const storeA = createProviderCooldownStore();
+    const storeB = createProviderCooldownStore();
+    const dbA = createDb(sharedRows);
+    const dbB = createDb(sharedRows);
+    const now = Date.UTC(2026, 10, 18, 12, 0, 0);
+
+    const recorded = await storeA.recordFailure(dbA, "groq", "openai/gpt-oss-20b", {
+      failureClass: "rate_limited",
+      status: 429,
+      retryAfter: "120",
+      now
+    });
+    assert.equal(recorded?.cooldownUntil, now + 120_000);
+
+    const shared = await storeB.getCooldown(dbB, "groq", "openai/gpt-oss-20b", now + 1_000);
+    assert.equal(shared?.failureClass, "rate_limited");
+    assert.equal(shared?.status, 429);
+    assert.equal(shared?.cooldownUntil, now + 120_000);
+    assert.equal(await storeB.getCooldown(dbB, "groq", "openai/gpt-oss-120b", now + 1_000), null);
+    assert.equal(await storeB.getCooldown(dbB, "gemini", "openai/gpt-oss-20b", now + 1_000), null);
+    assert.ok(sharedRows.has(providerCooldownKey("groq", "openai/gpt-oss-20b")));
+  });
+
+  it("expires a cooldown and never keeps a model blocked after its expiry", async () => {
+    const rows = new Map<string, StoredRow>();
+    const storeA = createProviderCooldownStore();
+    const storeB = createProviderCooldownStore();
+    const dbA = createDb(rows);
+    const dbB = createDb(rows);
+    const now = Date.UTC(2026, 10, 18, 12, 0, 0);
+
+    await storeA.recordFailure(dbA, "gemini", "gemini-paid-test", {
+      failureClass: "server_error",
+      status: 503,
+      now
+    });
+    assert.ok(await storeB.getCooldown(dbB, "gemini", "gemini-paid-test", now + 1_000));
+    assert.equal(await storeB.getCooldown(dbB, "gemini", "gemini-paid-test", now + 31_000), null);
+  });
+
+  it("does not retry Groq models in the next call while their shared 429 cooldown is active", async () => {
+    const sharedRows = new Map<string, StoredRow>();
+    const db = createDb(sharedRows);
+    const originalFetch = globalThis.fetch;
+    let groqCalls = 0;
+    let workersAiCalls = 0;
+
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      if (String(input).includes("api.groq.com")) {
+        groqCalls += 1;
+        return new Response("rate limited", { status: 429, headers: { "Retry-After": "120" } });
+      }
+      throw new Error("unexpected test fetch target");
+    }) as typeof fetch;
+
+    const env: any = {
+      RADAR_DB: db,
+      GROQ_API_KEY: "unit-test-key",
+      AI: {
+        async run() {
+          workersAiCalls += 1;
+          return { response: JSON.stringify({ subject: "A question", body: "Would it be useful to compare notes?" }) };
+        }
+      }
+    };
+    const prospect = {
+      id: "cooldown-test-prospect",
+      tenant_id: "founder",
+      mode: "founder",
+      name: "Example Plumbing",
+      trade: "Plumbing",
+      city: "Austin"
+    };
+
+    try {
+      const first = await generateAICopy(prospect, "missed_calls", env, undefined, "email");
+      const second = await generateAICopy(prospect, "missed_calls", env, undefined, "email");
+      assert.equal(first.source, "workers_ai");
+      assert.equal(second.source, "workers_ai");
+      assert.equal(groqCalls, 2);
+      assert.equal(workersAiCalls, 2);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
