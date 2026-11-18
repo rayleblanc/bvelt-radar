@@ -1464,7 +1464,7 @@ const submitDecision = async (prospectId: string, action: string) => {
                 {(() => {
                 const m: any = currentMode === 'founder' ? stats?.workbench : roiStats;
                 const metrics: [string, unknown][] = [
-                  ['Empresas encontradas', currentMode === 'founder' ? m?.total_found : m?.total],
+                  ['Empresas encontradas', m?.total_found],
                   ['Correo listo', m?.pending_email],
                   ['Borradores WhatsApp', m?.whatsapp_drafts],
                   ['Contactados', m?.contacted]
