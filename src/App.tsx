@@ -414,6 +414,7 @@ export default function App() {
 
       if (isTenantMode && !hasTenantSelected) {
         setProspects([]);
+        setRoiStats(null);
         setLoading(false);
         return;
       }
@@ -683,8 +684,8 @@ const submitDecision = async (prospectId: string, action: string) => {
       // Success: update local opportunities and prospects state immediately so closed/dispatched items leave open list
       setProspects(prev => prev.map(p => p.id === prospectId ? {
         ...p,
-        status: (action === 'sent' || action === 'approve') ? 'sent' : action === 'wa_sent' ? 'contacted' : (action === 'discard' ? 'discarded' : action === 'replied' ? 'replied' : p.status),
-        outcome: action === 'wa_sent' ? 'whatsapp_manual_sent' : p.outcome
+        status: (action === 'sent' || action === 'approve' || action === 'email_manual_sent') ? 'sent' : action === 'wa_sent' ? 'contacted' : (action === 'discard' ? 'discarded' : action === 'replied' ? 'replied' : p.status),
+        outcome: action === 'wa_sent' ? 'whatsapp_manual_sent' : action === 'email_manual_sent' ? 'email_manual_sent' : p.outcome
       } : p));
 
       fetchTelemetry();
@@ -1530,7 +1531,7 @@ const submitDecision = async (prospectId: string, action: string) => {
                       const hasVerifiedOutreachAngle = currentMode === 'tenant'
                         ? activeKitForProspect?.angle === 'tenant_b2b_service'
                         : ['weather_surge', 'stale_quotes', 'no_sms', 'missed_calls'].includes(activeKitForProspect?.angle);
-                      const canOpenDirectChannel = Boolean(contactability?.commercial_prospect && contactability.contact_available && hasVerifiedOutreachAngle);
+                      const canOpenDirectChannel = Boolean(contactability?.commercial_prospect && contactability.contact_available && contactability.send_authorized && hasVerifiedOutreachAngle);
                       // A prepared Founder WhatsApp draft is already human-reviewed for this channel.
                       // Opening wa.me is still only a manual handoff; it does not prove account or opt-in.
                       const canOpenWhatsApp = canOpenDirectChannel || (isPreparedWhatsAppDraft && hasDirectWhatsAppRecipient(p.phone));
@@ -1621,7 +1622,7 @@ const submitDecision = async (prospectId: string, action: string) => {
                             </div>
                           )}
                           <div className="flex flex-wrap items-center gap-2 pt-1 font-mono text-[11px]">
-                            {canOpenDirectChannel && emailRecipient && (
+                            {canOpenDirectChannel && emailRecipient && isVerifiedEmailRecipient(p) && (
                               <a 
                                 href={`mailto:${emailRecipient}?subject=${encodeURIComponent(emailMessageSubject)}&body=${encodeURIComponent(emailMessageBody)}`}
                                 target="_blank" 
@@ -1717,10 +1718,10 @@ const submitDecision = async (prospectId: string, action: string) => {
                               <span className="text-[10px] font-mono text-slate-400 font-bold uppercase block">Registrar Resultado:</span>
                               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                                 <button
-                                  onClick={() => submitDecision(p.id, 'sent')}
+                                  onClick={() => { if (window.confirm('¿Enviaste manualmente este correo desde tu aplicación de email?')) void submitDecision(p.id, 'email_manual_sent'); }}
                                   className="py-2 px-2.5 text-xs font-bold font-mono rounded-lg bg-blue-900/30 border border-blue-700/40 text-blue-300 hover:bg-blue-800/50 transition-colors"
                                 >
-                                  Enviado
+                                  Confirmar envío manual
                                 </button>
                                 <button
                                   onClick={() => submitDecision(p.id, 'replied')}
