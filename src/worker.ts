@@ -2564,7 +2564,7 @@ export default {
                          OR tenant_outcome IN ('contacted','replied','booked','won','lost') THEN 1 ELSE 0 END) as contacted,
               SUM(COALESCE(won_value_usd, 0)) as won_value_usd_total,
               SUM(CASE WHEN expected_value IS NOT NULL AND expected_value > 0 THEN expected_value ELSE 0 END) as pipeline_ev_raw,
-              SUM(CASE WHEN status = 'approved' AND email IS NOT NULL AND TRIM(email) <> '' AND json_extract(signals_json, '$.is_email_validated') = 1 AND suppression_reason IS NULL AND (cooldown_until IS NULL OR cooldown_until <= ?) THEN 1 ELSE 0 END) as pending_email,
+              SUM(CASE WHEN status = 'approved' AND email IS NOT NULL AND TRIM(email) <> '' AND CASE WHEN json_valid(signals_json) THEN json_extract(signals_json, '$.is_email_validated') = 1 ELSE 0 END AND suppression_reason IS NULL AND (cooldown_until IS NULL OR cooldown_until <= ?) AND (outcome IS NULL OR outcome = '') AND NOT EXISTS (SELECT 1 FROM suppression s WHERE lower(s.key) = lower(prospects.email)) THEN 1 ELSE 0 END) as pending_email,
               SUM(CASE WHEN status = 'notified' AND outcome = 'whatsapp_manual_ready' AND phone IS NOT NULL AND TRIM(phone) <> '' THEN 1 ELSE 0 END) as whatsapp_drafts,
               AVG(COALESCE(score, opportunity_score, 0)) as avg_score
             FROM prospects
@@ -4365,9 +4365,11 @@ async function handleStats(env: Env, headers: Record<string, string>): Promise<R
       COUNT(*) AS total_found,
       SUM(CASE WHEN status = 'approved'
         AND email IS NOT NULL AND TRIM(email) <> ''
-        AND json_extract(signals_json, '$.is_email_validated') = 1
+        AND CASE WHEN json_valid(signals_json) THEN json_extract(signals_json, '$.is_email_validated') = 1 ELSE 0 END
         AND suppression_reason IS NULL
         AND (cooldown_until IS NULL OR cooldown_until <= ?)
+        AND (outcome IS NULL OR outcome = '')
+        AND NOT EXISTS (SELECT 1 FROM suppression s WHERE lower(s.key) = lower(prospects.email))
         THEN 1 ELSE 0 END) AS pending_email,
       SUM(CASE WHEN status = 'notified' AND outcome = 'whatsapp_manual_ready'
         AND phone IS NOT NULL AND TRIM(phone) <> ''
