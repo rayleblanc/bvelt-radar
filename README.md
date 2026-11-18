@@ -188,3 +188,10 @@ GitHub Actions runs `npm ci`, `npm run build`, `npm run test:radar` and the Side
 Founder prospecting is currently a manual-first acquisition experiment. The Worker enforces `FOUNDER_MANUAL_APPROVAL_REQUIRED=true` in code, so a legacy `FOUNDER_AUTO_OUTREACH=true` binding cannot auto-send email. Eligible prospects are routed to the interactive Telegram approval queue. The 24-hour digest reports this mode explicitly.
 
 Do not remove this hard gate until paid demand, legal/channel review, suppression and opt-out handling, and delivery observability have been demonstrated and the owner explicitly approves the change. This policy does not change Tenant Mode or the AI provider cascade.
+
+
+## Shared AI provider cooldown
+
+Groq, Gemini and Workers AI share provider/model cooldown state through the existing D1 `radar_cache` table. The namespace is `provider_cooldown:v1:`; no new migration, storage service or paid provider is added. The cooldown policy respects both `Retry-After` delta-seconds and HTTP dates and distinguishes rate limits, server errors, timeouts, missing models, authentication errors, invalid responses and network failures.
+
+The existing sequence remains unchanged: Groq primary, Gemini only with confirmed paid processing, Workers AI fallback, then deterministic output. Model names are unchanged. Founder outreach remains hard-gated for Telegram human approval and cannot be enabled by the legacy auto-outreach binding.
