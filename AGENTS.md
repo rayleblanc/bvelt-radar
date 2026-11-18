@@ -79,3 +79,11 @@
 5. Separar cambios de Founder/Tenant y probar aislamiento, idempotencia, errores de fuente y recuperación.
 6. Tras checks verdes y diff revisado, usar la autorización permanente de deploy Radar; comprobar versión 100%, bindings, cron y runtime.
 7. Reportar archivos, SHA, PR/merge, logs, pruebas, deploy/smoke, riesgos y bloqueos reales.
+
+
+## C23.4 prospect finding contract — contract-only (2026-11-18)
+
+- Added `schemas/prospect-finding.v1.schema.json` for Founder acquisition research findings. It is explicitly `realm=PROSPECT`, versioned, source-visible and deterministic; it is not a tenant-evidence record.
+- The contract reuses Bvelt's canonical evidence status vocabulary, while separating scan outcome (`OBSERVED`, `NOT_OBSERVED_IN_SCOPE`, `UNAVAILABLE`) so a missing field in a bounded scan is not represented as universal absence. `UNAVAILABLE` requires `UNKNOWN`; a reproducible absence inside the inspected scope may be `VERIFIED`.
+- Reconciliation performed read-only against LocalFlowPro `BveltEvidence` and Radar migrations `0028` / `0031`. Existing Radar `source_evidence` stores `FOUNDER` / `TENANT` realms and its row shape is not byte-compatible with this prospect contract. No table, migration, write path, ingestion or tenant behavior was changed.
+- `tests/prospectFindingSchema.test.ts` is added to `npm run test:radar`; tests are integrated but not executed in this session.

@@ -1,0 +1,276 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bvelt.app/schemas/radar/prospect-finding.v1.schema.json",
+  "title": "Bvelt Radar Prospect Finding v1",
+  "description": "A deterministic, source-visible observation about a Founder-mode acquisition prospect. Separate from tenant evidence and from the existing source_evidence D1 row format.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "findingId",
+    "realm",
+    "prospectId",
+    "subjectId",
+    "field",
+    "valueType",
+    "value",
+    "resultStatus",
+    "evidenceStatus",
+    "sourceType",
+    "sourceUrl",
+    "sourceLabel",
+    "observedAt",
+    "fetchedAt",
+    "deterministicMethod",
+    "deterministicMethodVersion",
+    "confidence",
+    "limitations",
+    "coverage"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "findingId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "realm": {
+      "const": "PROSPECT"
+    },
+    "prospectId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "subjectId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "field": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120,
+      "pattern": "^[a-z][a-z0-9_.-]*$"
+    },
+    "valueType": {
+      "enum": [
+        "string",
+        "number",
+        "boolean",
+        "object",
+        "array",
+        "null"
+      ]
+    },
+    "value": {},
+    "unit": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 40
+    },
+    "resultStatus": {
+      "enum": [
+        "OBSERVED",
+        "NOT_OBSERVED_IN_SCOPE",
+        "UNAVAILABLE"
+      ]
+    },
+    "evidenceStatus": {
+      "enum": [
+        "VERIFIED",
+        "DECLARED",
+        "ESTIMATED",
+        "MODELED",
+        "BENCHMARK",
+        "DEMO",
+        "UNKNOWN"
+      ]
+    },
+    "sourceType": {
+      "enum": [
+        "PUBLIC_WEBSITE",
+        "PUBLIC_DIRECTORY",
+        "HTTP",
+        "HTML",
+        "JSON_LD",
+        "SITEMAP",
+        "ROBOTS",
+        "DNS",
+        "PAGE_SPEED",
+        "OTHER"
+      ]
+    },
+    "sourceUrl": {
+      "type": "string",
+      "format": "uri",
+      "maxLength": 2048
+    },
+    "sourceLabel": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "sourceExcerpt": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 500
+    },
+    "sourceContentHash": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "observedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "fetchedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "validUntil": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "deterministicMethod": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120
+    },
+    "deterministicMethodVersion": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 40
+    },
+    "confidence": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 1
+    },
+    "limitations": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 240
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "inspectedScope",
+        "scannedUrls",
+        "skippedPaths"
+      ],
+      "properties": {
+        "inspectedScope": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "scannedUrls": {
+          "type": "array",
+          "maxItems": 20,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "format": "uri",
+            "maxLength": 2048
+          }
+        },
+        "skippedPaths": {
+          "type": "array",
+          "maxItems": 20,
+          "items": {
+            "type": "string",
+            "maxLength": 300
+          }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "resultStatus": {
+            "const": "UNAVAILABLE"
+          }
+        },
+        "required": [
+          "resultStatus"
+        ]
+      },
+      "then": {
+        "properties": {
+          "evidenceStatus": {
+            "const": "UNKNOWN"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "resultStatus": {
+            "const": "NOT_OBSERVED_IN_SCOPE"
+          }
+        },
+        "required": [
+          "resultStatus"
+        ]
+      },
+      "then": {
+        "properties": {
+          "evidenceStatus": {
+            "const": "VERIFIED"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "resultStatus": {
+            "const": "OBSERVED"
+          }
+        },
+        "required": [
+          "resultStatus"
+        ]
+      },
+      "then": {
+        "properties": {
+          "evidenceStatus": {
+            "enum": [
+              "VERIFIED",
+              "DECLARED",
+              "ESTIMATED",
+              "MODELED",
+              "BENCHMARK",
+              "DEMO"
+            ]
+          }
+        }
+      }
+    }
+  ]
+}
