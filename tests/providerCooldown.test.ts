@@ -121,14 +121,18 @@ describe("provider/model cooldown policy", () => {
     let geminiCalls = 0;
     let workersAiCalls = 0;
 
-    globalThis.fetch = (async (input: RequestInfo | URL) => {
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.includes("api.groq.com")) {
         groqCalls += 1;
-        if (url.includes("gpt-oss-20b")) {
+        const model = JSON.parse(String(init?.body || "{}")).model;
+        if (model === "openai/gpt-oss-20b") {
           return new Response("rate limited", { status: 429, headers: { "Retry-After": "120" } });
         }
-        return new Response("upstream unavailable", { status: 503 });
+        if (model === "openai/gpt-oss-120b") {
+          return new Response("upstream unavailable", { status: 503 });
+        }
+        throw new Error("unexpected Groq model");
       }
       if (url.includes("generativelanguage.googleapis.com")) {
         geminiCalls += 1;
