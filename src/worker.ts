@@ -2549,6 +2549,7 @@ export default {
           const res = await env.RADAR_DB.prepare(`
             SELECT 
               COUNT(*) as total,
+              (SELECT COUNT(*) FROM prospects allp WHERE COALESCE(NULLIF(TRIM(allp.tenant_id), ''), 'founder') = ?) as total_found,
               SUM(CASE WHEN status IN ('scouted','qualified','scored','enriched') THEN 1 ELSE 0 END) as pipeline,
               SUM(CASE WHEN status IN ('sent','delivered','opened','clicked','contacted','replied','booked','converted','won','lost') OR outcome IN ('sent','delivered','opened','clicked','whatsapp_manual_sent','positive','replied','booked','won','lost','converted') OR tenant_outcome IN ('contacted','replied','booked','won','lost') THEN 1 ELSE 0 END) as outreach,
               SUM(CASE WHEN status IN ('sent','delivered','opened','clicked','contacted','replied','booked','converted','won','lost')
@@ -2570,7 +2571,7 @@ export default {
             FROM prospects
             WHERE COALESCE(tenant_id, 'founder') = ?
               AND status NOT IN ('discarded','suppressed','blocked')
-          `).bind(new Date().toISOString(), tenantId).first() as any;
+          `).bind(new Date().toISOString(), tenantId, tenantId).first() as any;
 
           const total = Number(res?.total || 0);
           const outreach = Number(res?.outreach || 0);
@@ -2586,6 +2587,7 @@ export default {
           return Response.json({
             tenant_id: tenantId,
             total,
+            total_found: Number(res?.total_found || 0),
             pending_email: Number(res?.pending_email || 0),
             whatsapp_drafts: Number(res?.whatsapp_drafts || 0),
             pipeline: Number(res?.pipeline || 0),
@@ -2604,7 +2606,7 @@ export default {
           }, { headers: corsHeaders });
         } catch (e: any) {
           return Response.json({
-            tenant_id: tenantId, total: 0, pending_email: 0, whatsapp_drafts: 0, pipeline: 0, outreach: 0,
+            tenant_id: tenantId, total: 0, total_found: 0, pending_email: 0, whatsapp_drafts: 0, pipeline: 0, outreach: 0,
             conversion_denominator: 0, contacted: 0, replied: 0, booked: 0,
             won: 0, lost: 0, won_value_usd_total: 0, pipeline_ev_usd: 0,
             avg_score: 0, reply_rate_pct: 0, win_rate_pct: 0
