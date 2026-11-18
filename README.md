@@ -1,5 +1,14 @@
 # 📡 bvelt-radar v2
 
+## Founder: flujo diario simple
+1. Abre **Contactar**: es la pantalla inicial y el espacio principal de trabajo.
+2. Revisa negocio, ciudad, sector, score y evidencia; descarta lo que no encaje.
+3. Genera o revisa el mensaje con IA y elige el canal disponible.
+4. WhatsApp abre un chat manual con el borrador prellenado. Abrirlo no envía el mensaje ni acredita consentimiento. El envío solo se registra con opt-in verificable.
+5. Usa **Oportunidades** para priorizar; **Más** conserva Misiones y configuración Tenant.
+
+**GitHub Actions no es requisito para descubrir ni trabajar prospectos.** `POST /run` usa Cloudflare Queues y el Worker; Scrapling/Actions es enriquecimiento opcional. Si falta el secret cifrado, el sidecar se omite sin bloquear el motor principal.
+
 **Plan maestro único:** [Bvelt Ecosystem Master Plan](https://github.com/rayleblanc/LocalFlowPro/blob/main/docs/MASTER_PLAN_BVELT_ECOSYSTEM_2026-12-10.md). Las reglas específicas de Radar están en AGENTS.md; este README es referencia operativa, no un plan paralelo.
 
 **bvelt-radar** es un Cloudflare Worker autónomo para prospección B2B y descubrimiento de negocios de servicios en los mercados y nichos configurados para **Bvelt**.
