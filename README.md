@@ -1,11 +1,14 @@
 # 📡 bvelt-radar v2
 
-## Founder: flujo diario simple
-1. Abre **Contactar**: es la pantalla inicial y el espacio principal de trabajo.
-2. Revisa negocio, ciudad, sector, score y evidencia; descarta lo que no encaje.
-3. Genera o revisa el mensaje con IA y elige el canal disponible.
-4. WhatsApp abre un chat manual con el borrador prellenado. Abrirlo no envía el mensaje ni acredita consentimiento. El envío solo se registra con opt-in verificable.
-5. Usa **Oportunidades** para priorizar; **Más** conserva Misiones y configuración Tenant.
+## Founder: flujo diario
+1. **Contactar** es la pantalla principal: revisar prospectos, preparar correo con IA y abrir el canal de contacto.
+2. Los filtros se reducen a nuevos, listos, contactados, respuestas y bloqueados.
+3. **Correo listo** cuenta únicamente prospectos aprobados con email verificado, sin supresión ni cooldown activo. El total cambia al confirmarse una transición persistida.
+4. **Borradores WhatsApp** cuenta drafts manuales preparados; no equivale a consentimiento ni a envío. El registro de envío exige opt-in verificable.
+5. **Contactados** cuenta resultados confirmados, no ventanas mailto/wa.me abiertas.
+6. Misiones, scoring, oportunidades, budgets, colas, aprendizaje y research siguen en backend; no son tareas que el fundador tenga que administrar. Configuración Tenant queda como destino secundario.
+
+Los indicadores proceden de agregaciones D1 por tenant/realm, no de los primeros 100 prospectos cargados en el navegador. Los estados aprobados no se cuentan como pendientes de aprobación.
 
 **GitHub Actions no es requisito para descubrir ni trabajar prospectos.** `POST /run` usa Cloudflare Queues y el Worker; Scrapling/Actions es enriquecimiento opcional. Si falta el secret cifrado, el sidecar se omite sin bloquear el motor principal.
 
