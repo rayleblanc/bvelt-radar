@@ -408,14 +408,12 @@ export default function App() {
         }
       } catch (e) {}
 
-      // In Tenant mode: /prospects and /opportunities must ALWAYS send tenant_id=selectedTenantId.
-      // If no real tenant is selected (still 'founder'), show empty — never mix founder data into tenant view.
+      // Tenant mode always scopes prospect reads to the selected tenant; never mix Founder data.
       const isTenantMode = currentMode === 'tenant';
       const hasTenantSelected = isTenantMode && !!selectedTenantId && selectedTenantId !== 'founder';
 
       if (isTenantMode && !hasTenantSelected) {
         setProspects([]);
-        setOpportunities([]);
         setLoading(false);
         return;
       }
