@@ -1166,9 +1166,22 @@ export default {
         const id = body.id || body.prospect_id;
         const action = body.action || body.event_type;
         const notes = body.notes || body.content || body.text;
-        
+
         if (!id || !action) {
           return Response.json({ error: "Missing required fields: id and action" }, { status: 400, headers: corsHeaders });
+        }
+
+        // WhatsApp remains a human-operated channel. Opening wa.me never records a send.
+        // Confirmation is accepted only for a prepared Founder draft with explicit opt-in evidence.
+        if (action === "wa_sent") {
+          const result = await recordManualWhatsAppSent(String(id), env);
+          return Response.json({
+            success: result.success,
+            reason: result.reason,
+            id: String(id),
+            channel: "whatsapp",
+            dispatch: "manual_founder_confirmation"
+          }, { status: result.success ? 200 : 409, headers: corsHeaders });
         }
 
         return await handleDecision(id, action, notes, env, corsHeaders);
