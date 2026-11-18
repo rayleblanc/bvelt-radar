@@ -1532,7 +1532,8 @@ const submitDecision = async (prospectId: string, action: string) => {
                       const hasVerifiedOutreachAngle = currentMode === 'tenant'
                         ? activeKitForProspect?.angle === 'tenant_b2b_service'
                         : ['weather_surge', 'stale_quotes', 'no_sms', 'missed_calls'].includes(activeKitForProspect?.angle);
-                      const canOpenDirectChannel = Boolean(contactability?.commercial_prospect && contactability.contact_available && contactability.send_authorized && hasVerifiedOutreachAngle);
+                      const canOpenDirectChannel = Boolean(contactability?.commercial_prospect && contactability.contact_available && hasVerifiedOutreachAngle);
+      const canSendEmail = Boolean(contactability?.commercial_prospect && contactability.send_authorized && emailRecipient && isVerifiedEmailRecipient(p));
                       // A prepared Founder WhatsApp draft is already human-reviewed for this channel.
                       // Opening wa.me is still only a manual handoff; it does not prove account or opt-in.
                       const canOpenWhatsApp = canOpenDirectChannel || (isPreparedWhatsAppDraft && hasDirectWhatsAppRecipient(p.phone));
@@ -1623,7 +1624,7 @@ const submitDecision = async (prospectId: string, action: string) => {
                             </div>
                           )}
                           <div className="flex flex-wrap items-center gap-2 pt-1 font-mono text-[11px]">
-                            {canOpenDirectChannel && emailRecipient && isVerifiedEmailRecipient(p) && (
+                            {canSendEmail && (
                               <button
                                 type="button"
                                 className="px-2.5 py-1 rounded-lg bg-blue-950/50 border border-blue-800/40 text-blue-300 hover:bg-blue-900/60 flex items-center gap-1 font-bold"
