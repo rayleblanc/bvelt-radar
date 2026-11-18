@@ -53,6 +53,18 @@
 24. Cambios de contrato Bvelt↔Radar deben actualizarse coordinadamente en ambos repos o versionar API. No romper producción silenciosamente.
 25. No introducir refactors ajenos al requisito ni mergear ramas divergentes completas sin revisión selectiva.
 
+## Handoff vivo — 2026-11-18
+
+- **Último main:** `eb794e81381429922ef82c5696c2fa8cdb7fb784`.
+- **C19 cooldown compartido de IA integrado:** PR #47, squash merge; PR cerrado. No queda PR abierto.
+- `src/providerCooldown.ts` persiste la salud/cooldown por proveedor+modelo en el namespace `provider_cooldown:v1:` dentro de la tabla D1 existente `radar_cache`. Se comparte entre Worker isolates; conserva fallback de memoria local si D1 no está disponible. No añade migraciones ni almacena prompts, payloads de tenants, claves o respuestas.
+- Los adaptadores Groq y Gemini respetan `Retry-After` como segundos o fecha HTTP; diferencian 429, 5xx, timeout, 404 de modelo, 401/403, respuesta inválida y fallo de red. Workers AI usa el mismo estado de cooldown cuando falla o devuelve respuesta no válida.
+- Aplicación en `generateAICopy` y `expandTenantIcp`. Se conserva el orden Groq 20B → 120B → Gemini solo pagado → Workers AI GLM-4.7 Flash → fallback determinista. Los nombres de modelos y `GEMINI_PAID_TIER_CONFIRMED=false` no se modificaron.
+- CI del PR #47: run `44345075550`, `npm run build` y `npm run test:radar` en verde; 31 pruebas Node con 0 fallos, batería custom de Radar (84 casos) aprobada; `pytest sidecar/tests`: 21 passed. `worker-bundle` omitido por diseño en evento PR; no equivale a deploy.
+- **No se desplegó el Worker y no se modificaron secrets, bindings, cron, queues ni D1 schema.** La versión activa de producción sigue sin comprobarse contra este SHA.
+- Pendiente C19: smoke controlado de cada provider/fallback en Worker desplegado y lectura de uso `ai_units` por tenant; contrato uniforme de telemetría (provider/model/status/latency/tokens/failure class); métricas de consumo/rate limit; verificación multimodal/UNAVAILABLE; ampliar fallos simulados (5xx, timeout, vacío, quota Workers AI agotada, provider key ausente). No afirmar capacidad para 200 clientes antes de cerrar estos puntos.
+- No reintentar manualmente un proveedor bloqueado; el cooldown D1 es compartido. La cascada determinista y sus límites de presupuesto siguen vigentes.
+
 ## Protocolo
 
 1. Leer este archivo y el plan maestro completo.
