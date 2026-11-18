@@ -1608,7 +1608,7 @@ app.get(['/opportunities', '/api/opportunities'], (req, res) => {
       timing_score: p.timing_score || 10,
       evidence_score: p.evidence_score || 10,
       signal_freshness_score: p.signal_freshness_score || 100,
-      expected_value: p.expected_value || 3400,
+      expected_value: p.expected_value ?? null,
       decision_state: p.decision_state || p.status || "identified",
       why_now_json: JSON.stringify(stratWhyNow),
       priority_tier: (p.score || 0) >= 80 ? "high" : (p.score || 0) >= 50 ? "medium" : "low",
