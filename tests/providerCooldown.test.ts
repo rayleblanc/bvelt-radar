@@ -8,7 +8,7 @@ import {
   providerCooldownKey,
   type ProviderCooldownDatabase
 } from "../src/providerCooldown";
-import { generateAICopy } from "../src/worker";
+import { generateAICopy, WORKERS_AI_FALLBACK_MODEL } from "../src/worker";
 
 type StoredRow = { value: string; expires_at: number };
 
@@ -113,17 +113,36 @@ describe("provider/model cooldown policy", () => {
     assert.equal(await storeB.getCooldown(dbB, "gemini", "gemini-paid-test", now + 31_000), null);
   });
 
-  it("does not retry Groq models in the next call while their shared 429 cooldown is active", async () => {
+  it("cools down Groq and Gemini after 429, 5xx, timeout and empty responses", async () => {
     const sharedRows = new Map<string, StoredRow>();
     const db = createDb(sharedRows);
     const originalFetch = globalThis.fetch;
     let groqCalls = 0;
+    let geminiCalls = 0;
     let workersAiCalls = 0;
 
-    globalThis.fetch = (async (input: RequestInfo | URL) => {
-      if (String(input).includes("api.groq.com")) {
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("api.groq.com")) {
         groqCalls += 1;
-        return new Response("rate limited", { status: 429, headers: { "Retry-After": "120" } });
+        const model = JSON.parse(String(init?.body || "{}")).model;
+        if (model === "openai/gpt-oss-20b") {
+          return new Response("rate limited", { status: 429, headers: { "Retry-After": "120" } });
+        }
+        if (model === "openai/gpt-oss-120b") {
+          return new Response("upstream unavailable", { status: 503 });
+        }
+        throw new Error("unexpected Groq model");
+      }
+      if (url.includes("generativelanguage.googleapis.com")) {
+        geminiCalls += 1;
+        if (url.includes("gemini-3.8-flash")) {
+          throw Object.assign(new Error("The operation timed out"), { name: "TimeoutError" });
+        }
+        return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "" }] } }] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
       }
       throw new Error("unexpected test fetch target");
     }) as typeof fetch;
@@ -131,6 +150,9 @@ describe("provider/model cooldown policy", () => {
     const env: any = {
       RADAR_DB: db,
       GROQ_API_KEY: "unit-test-key",
+      GEMINI_FOUNDER_API_KEY: "unit-test-gemini-key",
+      GEMINI_PAID_TIER_CONFIRMED: "true",
+      GEMINI_MODELS: "gemini-3.8-flash,gemini-3.5-flash-lite",
       AI: {
         async run() {
           workersAiCalls += 1;
@@ -139,7 +161,7 @@ describe("provider/model cooldown policy", () => {
       }
     };
     const prospect = {
-      id: "cooldown-test-prospect",
+      id: "cooldown-mixed-failures",
       tenant_id: "founder",
       mode: "founder",
       name: "Example Plumbing",
@@ -152,10 +174,48 @@ describe("provider/model cooldown policy", () => {
       const second = await generateAICopy(prospect, "missed_calls", env, undefined, "email");
       assert.equal(first.source, "workers_ai");
       assert.equal(second.source, "workers_ai");
-      assert.equal(groqCalls, 2);
-      assert.equal(workersAiCalls, 2);
+      assert.equal(groqCalls, 2, "Groq 20B and 120B are each attempted once");
+      assert.equal(geminiCalls, 2, "paid Gemini models are each attempted once");
+      assert.equal(workersAiCalls, 2, "the healthy fallback remains available for both calls");
+
+      const groq429 = JSON.parse(sharedRows.get(providerCooldownKey("groq", "openai/gpt-oss-20b"))!.value);
+      const groq503 = JSON.parse(sharedRows.get(providerCooldownKey("groq", "openai/gpt-oss-120b"))!.value);
+      const geminiTimeout = JSON.parse(sharedRows.get(providerCooldownKey("gemini", "gemini-3.8-flash"))!.value);
+      const geminiEmpty = JSON.parse(sharedRows.get(providerCooldownKey("gemini", "gemini-3.5-flash-lite"))!.value);
+      assert.equal(groq429.failureClass, "rate_limited");
+      assert.equal(groq429.status, 429);
+      assert.equal(groq429.retryAfterMs, 120_000);
+      assert.equal(groq503.failureClass, "server_error");
+      assert.equal(geminiTimeout.failureClass, "timeout");
+      assert.equal(geminiEmpty.failureClass, "invalid_response");
     } finally {
       globalThis.fetch = originalFetch;
     }
   });
+
+  it("backs off Workers AI after its quota returns 429 and uses deterministic copy", async () => {
+    const rows = new Map<string, StoredRow>();
+    const db = createDb(rows);
+    let workersAiCalls = 0;
+    const env: any = {
+      RADAR_DB: db,
+      AI: {
+        async run() {
+          workersAiCalls += 1;
+          throw Object.assign(new Error("Workers AI daily quota exhausted"), { status: 429 });
+        }
+      }
+    };
+    const prospect = { id: "cooldown-ai-quota", tenant_id: "founder", mode: "founder", name: "Example Plumbing", trade: "Plumbing", city: "Austin" };
+
+    const first = await generateAICopy(prospect, "missed_calls", env);
+    const second = await generateAICopy(prospect, "missed_calls", env);
+    const stored = rows.get(providerCooldownKey("workers_ai", WORKERS_AI_FALLBACK_MODEL));
+
+    assert.equal(first.source, "template");
+    assert.equal(second.source, "template");
+    assert.equal(workersAiCalls, 1, "Workers AI is called once and skipped while its cooldown is active");
+    assert.equal(JSON.parse(stored!.value).failureClass, "rate_limited");
+  });
+
 });
