@@ -1537,7 +1537,8 @@ const submitDecision = async (prospectId: string, action: string, ownerLawfulBas
                         ? activeKitForProspect?.angle === 'tenant_b2b_service'
                         : ['weather_surge', 'stale_quotes', 'no_sms', 'missed_calls', 'general_intro'].includes(activeKitForProspect?.angle);
                       const canOpenDirectChannel = Boolean(contactability?.commercial_prospect && contactability.contact_available && hasVerifiedOutreachAngle);
-      const canSendEmail = Boolean(contactability?.commercial_prospect && contactability.manual_email_available && emailRecipient);
+                      const canUsePhoneChannel = Boolean(contactability?.commercial_prospect && contactability.channels?.phone && p.phone);
+                      const canSendEmail = Boolean(contactability?.commercial_prospect && contactability.manual_email_available && emailRecipient);
                       // A prepared Founder WhatsApp draft is already human-reviewed for this channel.
                       // Opening wa.me is still only a manual handoff; it does not prove account or opt-in.
                       const canOpenWhatsApp = canOpenDirectChannel || (isPreparedWhatsAppDraft && hasDirectWhatsAppRecipient(p.phone));
@@ -1671,7 +1672,7 @@ const submitDecision = async (prospectId: string, action: string, ownerLawfulBas
                                 Confirmar envío
                               </button>
                             )}
-                            {canOpenDirectChannel && p.phone && toSmsUrl(p.phone, emailMessageBody) && (
+                            {canUsePhoneChannel && p.phone && toSmsUrl(p.phone, emailMessageBody) && (
                               <a
                                 href={toSmsUrl(p.phone, emailMessageBody)!}
                                 className="px-2.5 py-1 rounded-lg bg-sky-950/50 border border-sky-800/40 text-sky-300 hover:bg-sky-900/60 flex items-center gap-1 font-bold"
@@ -1685,7 +1686,7 @@ const submitDecision = async (prospectId: string, action: string, ownerLawfulBas
                                 SMS
                               </a>
                             )}
-                            {canOpenDirectChannel && p.phone && toTelUrl(p.phone) && (
+                            {canUsePhoneChannel && p.phone && toTelUrl(p.phone) && (
                               <a
                                 href={toTelUrl(p.phone)!}
                                 className="px-2.5 py-1 rounded-lg bg-indigo-950/50 border border-indigo-800/40 text-indigo-300 hover:bg-indigo-900/60 flex items-center gap-1 font-bold"
@@ -1830,7 +1831,7 @@ const submitDecision = async (prospectId: string, action: string, ownerLawfulBas
                                             rel="noreferrer"
                                             className="inline-block px-2 py-1 rounded bg-emerald-950/50 border border-emerald-800 text-emerald-300 font-bold"
                                           >
-                                            WhatsApp con texto del kit · no verificado
+                                            WhatsApp con texto del kit · cuenta no comprobada
                                           </a>
                                         )}
                                         {p.phone && toSmsUrl(p.phone, attackKits[p.id].sms || '') && (
