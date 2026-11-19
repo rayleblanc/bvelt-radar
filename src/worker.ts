@@ -9142,11 +9142,19 @@ export function calculateMultiFactorScore(
     if (item.website && isRealWebsite(item.website)) contact += 6;
     contact = Math.min(30, contact);
     breakdownT.contactability = contact;
-    tenantScore += contact;
 
-    // Commercial opportunity / multi-unit signal (0-20)
-    let commercial = 5;
-    if (/llc|inc|corp|group|partners|properties|management|associates/i.test(nameLower)) commercial += 6;
+    // Operational scale / buyer structure (0-30), independent of contact channel.
+    let operationalScale = 0;
+    if (/property|management|manager|hoa|apartment|condo|facility|realty|real estate|hotel|motel|resort/i.test(haystack)) operationalScale += 12;
+    if (signals.multiple_areas) operationalScale += 8;
+    if (item.source === "permits") operationalScale += 5;
+    if (item.website && isRealWebsite(item.website)) operationalScale += 5;
+    operationalScale = Math.min(30, operationalScale);
+    breakdownT.operational_scale = operationalScale;
+    tenantScore += operationalScale;
+
+    // Commercial opportunity / local and observed activity (0-20)
+    let commercial = 4;
     if (isPriorityCity) commercial += 5;
     if (item.source === "permits") commercial += 6;
     const pairKey = `pair:${item.city}|${tradeLower}`;
@@ -9168,7 +9176,8 @@ export function calculateMultiFactorScore(
     tenantScore += evidence;
 
     tenantScore = Math.min(100, Math.max(0, Math.round(tenantScore)));
-    const confidence = Math.min(100, 40 + (email ? 20 : 0) + (phone ? 15 : 0) + (item.website ? 15 : 0) + (isEmailValidated ? 10 : 0));
+    const detectedTenantSignals = [signals.contact_form, signals.lead_capture, signals.quote_request, signals.multiple_areas].filter(Boolean).length;
+    const confidence = Math.min(100, 30 + detectedTenantSignals * 15 + (item.website && isRealWebsite(item.website) ? 10 : 0));
 
     return {
       totalScore: tenantScore,
@@ -9183,7 +9192,7 @@ export function calculateMultiFactorScore(
 
   // --- FOUNDER MODE: 6-COMPONENT FORMULA (contractors who need Bvelt) ---
   
-  // No real website / only social = high pain for Founder (leads die on voicemail)
+  // Website presence is a channel/evidence fact, not proof of customer leakage.
   const webLower = String(item.website || "").toLowerCase();
   const isSocialOnlySite = !!webLower && (
     /facebook\.com|fb\.com|instagram\.com|linktr\.ee|bit\.ly|business\.site|wixsite\.com/i.test(webLower)
@@ -9195,13 +9204,11 @@ export function calculateMultiFactorScore(
 
   // 1. Need Evidence (0 - 30 pts)
   let needEvidenceScore = 0;
-  if (signals.sms_gap) needEvidenceScore += 12;
-  if (!signals.booking) needEvidenceScore += 8;
-  if (!signals.quote_request && !signals.estimate_language) needEvidenceScore += 8;
-  if (signals.emergency && signals.sms_gap) needEvidenceScore += 4;
-  if (phone && !email) needEvidenceScore += 4;
-  // +12 "Sin web propia" — do NOT discard; these are high-fit Bvelt leads
-  if (hasNoRealWebsite) needEvidenceScore += 12;
+  if (signals.sms_gap) needEvidenceScore += 10;
+  if (signals.missed_calls || signals.missed_call_evidence) needEvidenceScore += 10;
+  if (signals.emergency) needEvidenceScore += 5;
+  if (signals.quote_request || signals.estimate_language) needEvidenceScore += 5;
+  // Missing website/booking/quote/channel observations remain UNKNOWN, not pain.
   needEvidenceScore = Math.min(30, Math.max(0, needEvidenceScore));
 
   // 2. Bvelt Fit (0 - 20 pts)
@@ -9209,16 +9216,14 @@ export function calculateMultiFactorScore(
   const isPreferred = PREFERRED_TRADES.has(tradeLower) ||
     /hvac|plumb|electr|roof|lawn|landscap|pool|clean|handyman/i.test(tradeLower);
   if (isPreferred) bveltFitScore += 15;
-  const isIndependent = /brothers|sons|family|llc|services|pro|tech|contracting|group|co\b/i.test(item.name || "");
-  if (isIndependent) bveltFitScore += 5;
+  if (signals.multiple_areas) bveltFitScore += 5;
   bveltFitScore = Math.min(20, Math.max(0, bveltFitScore));
 
   // 3. Timing (0 - 15 pts)
   let timingScore = 0;
   if (item.signal_event) timingScore += 8;
-  const isHiring = /hiring|career|join our team|empleo|trabaja con nosotros/i.test(item.name || "") || !!signals.specific_landing_pages;
+  const isHiring = /hiring|career|join our team|empleo|trabaja con nosotros/i.test(item.name || "") || signals.hiring === true;
   if (isHiring) timingScore += 7;
-  if (isPreferred) timingScore += 5;
   timingScore = Math.min(15, Math.max(0, timingScore));
 
   // 4. Commercial Value (0 - 15 pts)
@@ -9253,12 +9258,12 @@ export function calculateMultiFactorScore(
     }
     evidenceItems.push({
       signal_type: type,
-      value: isDetected ? 'detected' : 'not_detected',
+      value: isDetected ? 'detected' : 'not_observed',
       source_url: item.website || "local_db",
       source_type: item.website ? 'website_scrape' : 'directory_claim',
       observed_at: new Date().toISOString(),
       evidence_text: isDetected ? text : `No signals of ${type} found.`,
-      confidence: conf,
+      confidence: isDetected ? conf : 0,
       freshness: 1.0,
       page_type: 'homepage'
     });
@@ -9273,19 +9278,15 @@ export function calculateMultiFactorScore(
   addEvidence('service_area_expansion', !!signals.multiple_areas, "Multiple service areas detected.");
 
   const detectedCount = evidenceItems.filter(e => e.value === 'detected').length;
-  let evidenceConfidenceScore = 6.5;
-  if (detectedCount > 0) {
-    evidenceConfidenceScore = Math.min(10, 6.5 + (detectedCount * 0.7));
-  }
+  let evidenceConfidenceScore = detectedCount > 0
+    ? Math.min(10, detectedCount * 1.5)
+    : 0;
   evidenceConfidenceScore = Math.min(10, Math.max(0, evidenceConfidenceScore));
 
-  const totalScore = Math.round(needEvidenceScore + bveltFitScore + timingScore + commercialValueScore + contactabilityNew + evidenceConfidenceScore);
+  const totalScore = Math.round(needEvidenceScore + bveltFitScore + timingScore + commercialValueScore + evidenceConfidenceScore);
 
   // Separate confidence score (0-100)
-  let confidenceScore = 50;
-  if (email && isEmailValidated) confidenceScore += 25;
-  else if (email) confidenceScore += 15;
-  if (phone) confidenceScore += 15;
+  let confidenceScore = 30 + detectedCount * 12;
   if (item.website && isRealWebsite(item.website)) confidenceScore += 10;
   confidenceScore = Math.min(100, Math.max(0, confidenceScore));
 
