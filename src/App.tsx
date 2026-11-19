@@ -1537,7 +1537,7 @@ const submitDecision = async (prospectId: string, action: string, ownerLawfulBas
                         ? activeKitForProspect?.angle === 'tenant_b2b_service'
                         : ['weather_surge', 'stale_quotes', 'no_sms', 'missed_calls', 'general_intro'].includes(activeKitForProspect?.angle);
                       const canOpenDirectChannel = Boolean(contactability?.commercial_prospect && contactability.contact_available && hasVerifiedOutreachAngle);
-      const canSendEmail = Boolean(contactability?.commercial_prospect && contactability.send_authorized && emailRecipient);
+      const canSendEmail = Boolean(contactability?.commercial_prospect && contactability.manual_email_available && emailRecipient);
                       // A prepared Founder WhatsApp draft is already human-reviewed for this channel.
                       // Opening wa.me is still only a manual handoff; it does not prove account or opt-in.
                       const canOpenWhatsApp = canOpenDirectChannel || (isPreparedWhatsAppDraft && hasDirectWhatsAppRecipient(p.phone));
@@ -1654,7 +1654,7 @@ const submitDecision = async (prospectId: string, action: string, ownerLawfulBas
                                 }}
                               >
                                 <MessageSquare className="w-3.5 h-3.5 text-emerald-400" />
-                                WhatsApp <span className="text-[8px] opacity-70">· no verificado</span>
+                                WhatsApp <span className="text-[8px] opacity-70">· cuenta no comprobada</span>
                               </a>
                             )}
                             {currentMode === 'founder' && p.outcome === 'whatsapp_manual_ready' && (
@@ -1852,7 +1852,7 @@ const submitDecision = async (prospectId: string, action: string, ownerLawfulBas
                                 const activeKit = attackKits[p.id] || (p.attack_kit ? (typeof p.attack_kit === 'string' ? JSON.parse(p.attack_kit) : p.attack_kit) : null);
                                 const isDoNotContact =
                                   !activeKit ||
-                                  !["weather_surge", "stale_quotes", "no_sms", "missed_calls"].includes(activeKit.angle) ||
+                                  !["weather_surge", "stale_quotes", "no_sms", "missed_calls", "general_intro"].includes(activeKit.angle) ||
                                   activeKit?.next_action?.startsWith("DO_NOT_CONTACT") ||
                                   activeKit?.next_action?.includes("DO_NOT_CONTACT") ||
                                   p.outcome?.includes("off_icp") ||
