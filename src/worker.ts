@@ -18,7 +18,7 @@ import { getAlerts, tradeForEvent, eventAppliesToTrade, WeatherAlert } from './w
 import { dispatchEmail, normalizeOutreachBody, BVELT_SITE, EmailDispatchResult, inspectOutboundEmailAuth } from './emailDispatcher';
 import { auditDomainSecurityAndMx, auditWebsitePerformance, auditCityWeatherEmergency } from './openAudits';
 import { pickTargets, findPlace, findNearestPlace, formatPlaceLabel, markSearched, placeKey, radiusKm, haversineKm } from './geoFrontier';
-import { sanitizeEmail, sanitizeProspectEmail, isOffIcpName, hasMxRecords } from './emailSanitizer';
+import { sanitizeEmail, sanitizeProspectEmail, isOffIcpName, isCategoryNameMismatch, hasMxRecords } from './emailSanitizer';
 import { dispatchScraplingResearch } from './research/githubActions';
 import { recordScopedLearningEvent, readScopedLearningStats } from './learningIntegrity';
 import { fetchPermitContractors as fetchMunicipalPermitContractors } from './permitSources';
@@ -4072,7 +4072,7 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
           decisionJson = { success: result.success, reason: result.reason };
         } else {
           const decisionAction = (action === "approve" || action === "sent") ? "sent" : (action === "discard" ? "discard" : action);
-          const decisionRes = await handleDecision(prospectId, decisionAction, `Triggered via Telegram Button (${action})`, env, {});
+          const decisionRes = await handleDecision(prospectId, decisionAction, `Triggered via Telegram Button (${action})`, env, {}, true);
           decisionJson = await decisionRes.json().catch(() => ({}));
         }
         const isSendAction = action === "approve" || action === "sent";
@@ -7851,7 +7851,7 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
     WHERE id = ?
   `).bind(draft.subject, draft.body, new Date().toISOString(), prospect_id).run();
 
-  const actionableMsg = formatProspectTelegramMessage({ ...prospect, status: 'queued' }, env);
+  const actionableMsg = formatProspectTelegramMessage({ ...prospect, status: 'queued' }, env) + `\n\nAl pulsar Approve confirmas que tienes una base legal aplicable para este destinatario. Si el email no está verificado por proveedor, aceptas el riesgo adicional de rebote.`;
   const inlineButtons = [
     [
       { text: "✅ Approve", callback_data: `approve:${prospect_id}` },
@@ -13367,6 +13367,17 @@ export function checkTradeCoherence(
   }
 
   const normDeclared = (declaredTrade || '').toLowerCase().replace(/[\s-]+/g, '_');
+
+  // A stale directory category must not erase a real business. When no
+  // high-confidence replacement exists, preserve it under a neutral trade label.
+  if (isCategoryNameMismatch(name, declaredTrade) && inferred.confidence !== "high") {
+    return {
+      coherent: true,
+      verifiedTrade: inferred.trade !== "general" ? inferred.trade : "local_service_business",
+      reason: "category_mismatch_retained_for_owner_review",
+      disqualified: false
+    };
+  }
 
   // If text clues give a specific trade with high confidence
   if (inferred.confidence === 'high' && inferred.trade !== 'general') {
