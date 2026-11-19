@@ -1184,7 +1184,7 @@ export default {
           }, { status: result.success ? 200 : 409, headers: corsHeaders });
         }
 
-        return await handleDecision(id, action, notes, env, corsHeaders, body.owner_lawful_basis_asserted === true);
+        return await handleDecision(id, action, notes, env, corsHeaders, body.owner_manual_approval_asserted === true);
       }
 
       // 7. Manual Suppression Addition
@@ -4727,7 +4727,7 @@ async function handleDecision(
   notes: string | undefined,
   env: Env,
   headers: Record<string, string>,
-  ownerLawfulBasisAsserted = false
+  ownerManualApprovalAsserted = false
 ): Promise<Response> {
   const db = env.RADAR_DB;
   
@@ -4739,12 +4739,12 @@ async function handleDecision(
   const timestamp = new Date().toISOString();
 
   if (action === "sent" || action === "approve") {
-    if (!ownerLawfulBasisAsserted) {
+    if (!ownerManualApprovalAsserted) {
       return Response.json({
         success: false,
         blocked: true,
-        reason: "owner_lawful_basis_confirmation_required",
-        message: "Confirma que existe una base legal aplicable para contactar a este destinatario antes de enviar."
+        reason: "owner_manual_approval_confirmation_required",
+        message: "Confirma que has revisado este contacto y quieres realizar el envío manual."
       }, { status: 409, headers });
     }
     const preflightError = getManualSendPreflightError(prospect);
@@ -4875,7 +4875,7 @@ async function handleDecision(
         await db.prepare("INSERT INTO prospect_events (id, prospect_id, event_type, content, created_at) VALUES (?, ?, ?, ?, ?)")
           .bind("msg_" + crypto.randomUUID(), id, "message_send_authorized", JSON.stringify({
             channel: "email", authorization: "explicit_user_action",
-            owner_lawful_basis_asserted: ownerLawfulBasisAsserted,
+            owner_manual_approval_asserted: ownerManualApprovalAsserted,
             email_policy: resolveFounderEmailPolicy(prospect).status,
             deliverability_override: !providerVerified,
             deliverability_state: providerVerified ? "provider_verified" : "syntax_and_mx_only",
@@ -7950,7 +7950,7 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
     WHERE id = ?
   `).bind(draft.subject, draft.body, new Date().toISOString(), prospect_id).run();
 
-  const actionableMsg = formatProspectTelegramMessage({ ...prospect, status: 'queued' }, env) + `\n\nAl pulsar Approve confirmas que tienes una base legal aplicable para este destinatario. Si el email no está verificado por proveedor, aceptas el riesgo adicional de rebote.`;
+  const actionableMsg = formatProspectTelegramMessage({ ...prospect, status: 'queued' }, env) + `\n\nAl pulsar Approve confirmas que has revisado este contacto y autorizas el envío manual. Si el email no está verificado por proveedor, existe riesgo adicional de rebote.`;
   const inlineButtons = [
     [
       { text: "✅ Approve", callback_data: `approve:${prospect_id}` },
