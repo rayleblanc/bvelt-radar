@@ -92,6 +92,8 @@ tests.push({
     assert(!disqualified.commercial_prospect && disqualified.contact_available && !disqualified.send_authorized && !disqualified.manual_email_available, "Hard disqualification must remain excluded without erasing the independent contactability fact");
     const scoreReview = resolveProspectContactability({ status: "disqualified", outcome: "below_minimum_score", email: "owner@northstarplumbing.com", signals_json: JSON.stringify({ is_email_validated: false }) });
     assert(scoreReview.commercial_prospect && scoreReview.manual_email_available && !scoreReview.send_authorized && scoreReview.send_state === "owner_review", "A low score is a review outcome, not a hard ban on owner-reviewed contact through a valid email");
+    const legacyScoreReview = resolveProspectContactability({ status: "disqualified", outcome: "low_score_or_no_email", email: "owner@northstarplumbing.com" });
+    assert(legacyScoreReview.manual_email_available && !legacyScoreReview.send_authorized, "Legacy low-score/no-email outcomes with a later available email must remain owner-reviewable");
     const offIcp = resolveProspectContactability({ decision_state: "off_icp", phone: "+1 416 234 5678" });
     assert(!offIcp.commercial_prospect && offIcp.contact_available && !offIcp.send_authorized, "Off-ICP status must remain distinct from available contact data");
     const approved = resolveProspectContactability({ status: "approved", email: "owner@northstarplumbing.com" });
