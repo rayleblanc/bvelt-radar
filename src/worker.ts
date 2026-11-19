@@ -7063,7 +7063,8 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
     breakdown.senal = senal;
 
     finalScore = Math.min(100, Math.max(0, encaje + contacto + cercania + senal));
-    confidence = Math.min(100, 40 + (prospect.phone ? 25 : 0) + (prospect.email ? 20 : 0) + (isEmailValidated ? 15 : 0));
+    const tenantEvidenceCount = [signals.active_permits, signals.contact_form, signals.lead_capture, signals.quote_request, signals.multiple_areas].filter(Boolean).length;
+    confidence = Math.min(95, 35 + tenantEvidenceCount * 12 + (prospect.website ? 10 : 0));
     evidenceSummary = `Comprador B2B para ${tcRow?.niche || prospect.trade} en ${prospect.city}${distKm !== null ? ` (a ${distKm} km)` : ''}`;
     painHypothesis = { mode: "tenant_buyer", icp_match: matchesSegment };
     bveltAngle = "tenant_buyer_opportunity";
@@ -7167,26 +7168,26 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
   }
 
   const strat = isTenant ? {
-    fit_score: breakdown.encaje ? Math.round((breakdown.encaje / 40) * 100) : 50,
-    intent_score: breakdown.senal ? Math.round((breakdown.senal / 15) * 100) : 50,
-    pain_score: 50,
-    ability_to_pay_score: 75,
-    contactability_score: breakdown.contacto ? Math.round((breakdown.contacto / 25) * 100) : 50,
-    timing_score: breakdown.cercania ? Math.round((breakdown.cercania / 20) * 100) : 50,
-    evidence_score: 60,
-    signal_freshness_score: 100,
+    fit_score: breakdown.encaje ? Math.round((breakdown.encaje / 40) * 100) : 0,
+    intent_score: breakdown.senal ? Math.round((breakdown.senal / 15) * 100) : 0,
+    pain_score: 0,
+    ability_to_pay_score: 0,
+    contactability_score: breakdown.contacto ? Math.round((breakdown.contacto / 25) * 100) : 0,
+    timing_score: 0,
+    evidence_score: Math.min(100, confidence),
+    signal_freshness_score: 0,
     strategic_score: finalScore,
-    expected_value: Math.round(finalScore * 25),
+    expected_value: null,
     decision_state: finalScore >= 60 ? "actionable" : "identified",
     priority_tier: finalScore >= 75 ? "high" : finalScore >= 50 ? "medium" : "low",
     why_now_json: JSON.stringify({ signals: signalTags }),
     why_now: {
-      what_is_happening: `Comprador B2B local para ${prospect.trade} en ${prospect.city}`,
+      what_is_happening: `Candidato comprador B2B potencial para ${prospect.trade} en ${prospect.city}`,
       what_evidence_exists: signalTags,
-      why_it_matters: "Cliente de alto valor para contratación y mantenimiento",
-      why_now: "Ubicación cercana y canales de contacto activos",
-      recommended_action: "Llamar directo o contactar para presentar servicios",
-      potential_economic_result: "Contratos de servicio y mantenimiento recurrente",
+      why_it_matters: "El segmento puede comprar los servicios configurados por el Tenant; capacidad y necesidad deben confirmarse." ,
+      why_now: "El territorio coincide con la configuración; la disponibilidad del canal se evalúa por separado.",
+      recommended_action: "Validar encaje y canal disponible; después preparar una presentación neutral de los servicios del Tenant.",
+      potential_economic_result: "N/D — requiere señales comerciales y datos económicos del Tenant",
       distinctions: { observed_facts: signalTags, inferences: [], estimations: [] }
     }
   } : calculateStrategicScores(
