@@ -114,3 +114,8 @@ Archivos, diff, commit/SHA, PR/merge, tests realmente ejecutados, logs completos
 - Respuestas negativas/opt-out/complaint y hard bounce sí suprimen; not_interested no convierte al negocio en malo, pero detiene futuros contactos directos a ese destinatario conforme a la solicitud. Referral potential puede seguir registrado sin volver a contactar al mismo destinatario.
 - Scoring no es autorización de envío. No usar score como legal gate ni channel-ready como medida de buyer quality. Mantener todos los negocios válidos visibles con una acción siguiente y razón clara.
 - Esta política prevalece sobre instrucciones antiguas que exijan consentimiento indiscriminadamente para todo email. No elimina las protecciones de WhatsApp/SMS ni los requisitos de suppression y sender identity.
+### Estado técnico de envío email — hallazgo 19-11-2026
+- Main documenta FOUNDER_AUTO_OUTREACH=false: hoy el flujo Founder prepara draft/approval; no está habilitado el envío automático.
+- emailDispatcher.ts usa Resend/Brevo solo si hay key; sin proveedor real cae a simulated. Requiere remitente @bvelt.app y valida sintaxis + MX; MX no demuestra existencia del buzón individual.
+- normalizeOutreachBody solo normaliza enlaces/añade bvelt.app; no garantiza footer de baja, dirección postal, opt-out operativo ni List-Unsubscribe. El prompt/README que menciona Reply STOP no sustituye enforcement en el dispatcher.
+- Antes de habilitar envíos: verificar dominio/remitente SPF, DKIM, DMARC, return-path y configurar dirección/contacto postal real; implementar footer y baja idempotente en backend + webhooks Resend/Brevo; añadir policy resolver y send modes P7.2. No inventar dirección ni cambiar auto-outreach en producción sin validar todo.
