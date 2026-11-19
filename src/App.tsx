@@ -1535,7 +1535,7 @@ const submitDecision = async (prospectId: string, action: string, ownerLawfulBas
                       const activeKitForProspect = attackKits[p.id] || p.attack_kit;
                       const hasVerifiedOutreachAngle = currentMode === 'tenant'
                         ? activeKitForProspect?.angle === 'tenant_b2b_service'
-                        : ['weather_surge', 'stale_quotes', 'no_sms', 'missed_calls'].includes(activeKitForProspect?.angle);
+                        : ['weather_surge', 'stale_quotes', 'no_sms', 'missed_calls', 'general_intro'].includes(activeKitForProspect?.angle);
                       const canOpenDirectChannel = Boolean(contactability?.commercial_prospect && contactability.contact_available && hasVerifiedOutreachAngle);
       const canSendEmail = Boolean(contactability?.commercial_prospect && contactability.send_authorized && emailRecipient);
                       // A prepared Founder WhatsApp draft is already human-reviewed for this channel.
