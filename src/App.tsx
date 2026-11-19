@@ -90,7 +90,8 @@ interface Prospect {
     contact_available: boolean;
     channels: { email: boolean; phone: boolean; whatsapp_direct: boolean; website: boolean };
     send_authorized: boolean;
-    send_state?: "authorized" | "confirmed" | "not_authorized";
+    manual_email_available?: boolean;
+    send_state?: "authorized" | "confirmed" | "owner_review" | "not_authorized";
   };
 }
 
