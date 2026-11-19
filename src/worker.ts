@@ -11376,10 +11376,10 @@ export function ensureLegalFooter(body: string, env: Env): string {
   // Remove legacy STOP-only or stale signature blocks before applying the
   // current complete postal address and email-specific unsubscribe instruction.
   const withoutLegacy = original
-    .replace(/\\n{2,}Reply STOP to opt out\\s*$/i, "")
-    .replace(/\\n{2,}--\\s*\\n[\\s\\S]*$/i, "")
+    .replace(/\n{2,}Reply STOP to opt out\\s*$/i, "")
+    .replace(/\n{2,}--\\s*\\n[\\s\\S]*$/i, "")
     .trim();
-  return [withoutLegacy, footer].filter(Boolean).join("\\n\\n");
+  return [withoutLegacy, footer].filter(Boolean).join("\n\n");
 }
 
 /**
