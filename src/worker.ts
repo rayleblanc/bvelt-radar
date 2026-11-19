@@ -9838,6 +9838,7 @@ const GEOAPIFY_PROFILES: Array<{ match: RegExp; categories: string; name?: RegEx
   { match: /auto|car_repair|towing/, categories: "service,office,commercial", name: /auto|car repair|mechanic|towing|tow truck|collision/i },
   { match: /dental|medical|optometry/, categories: "service,office,commercial", name: /dental|dentist|clinic|medical|optometry|optometrist|eye care/i },
   { match: /law_firm|accounting|insurance/, categories: "office,commercial", name: /law|attorney|accounting|accountant|insurance|tax/i },
+  { match: /wealth management|financial advisor|financial services|financial planner|investment management|asset management|banking/, categories: "office,commercial", name: /wealth|financial|investment|asset management|financial advisor|planner|capital|portfolio|bank/i },
   { match: /tutoring|training|school/, categories: "education", name: /school|tutor|training|academy|learning/i },
   { match: /restaurant|catering|event_venue/, categories: "catering", name: /restaurant|catering|event|venue|banquet|wedding/i },
   { match: /hardware|equipment|repair_shop/, categories: "service,office,commercial", name: /hardware|equipment|rental|repair|supply/i },
@@ -9848,6 +9849,12 @@ const GEOAPIFY_PROFILES: Array<{ match: RegExp; categories: string; name?: RegEx
   { match: /local_service_business/, categories: "service,office,commercial" },
 ];
 
+export function resolveGeoapifyProfile(trade: string): { categories: string; name?: RegExp } | null {
+  const normalizedTrade = String(trade || "").trim().toLowerCase().replace(/[_-]+/g, " ");
+  if (!normalizedTrade) return null;
+  return GEOAPIFY_PROFILES.find(profile => profile.match.test(normalizedTrade)) || null;
+}
+
 export async function fetchGeoapifyBusinesses(
   city: string,
   trade: string,
@@ -9856,10 +9863,9 @@ export async function fetchGeoapifyBusinesses(
 ): Promise<{ businesses: any[]; status: string }> {
   if (!apiKey || !apiKey.trim()) return { businesses: [], status: "skipped (no GEOAPIFY_API_KEY)" };
   if (!geo || !geo.bbox || geo.bbox.length < 4) return { businesses: [], status: "skipped (no bbox)" };
-  const t = trade.toLowerCase();
-  // Do not let the substring "facility" route storage_facility into the
-  // property-management profile; it mislabels real-estate and wealth firms.
-  const profile = GEOAPIFY_PROFILES.find(p => p.match.test(t));
+  // Normalize internal trade keys (real_estate, wealth_management, etc.)
+  // before matching. Keep storage_facility distinct from property management.
+  const profile = resolveGeoapifyProfile(trade);
   if (!profile) return { businesses: [], status: "skipped (trade not mapped)" };
   try {
     const rect = `${geo.bbox[2]},${geo.bbox[0]},${geo.bbox[3]},${geo.bbox[1]}`; // lonMin,latMin,lonMax,latMax
