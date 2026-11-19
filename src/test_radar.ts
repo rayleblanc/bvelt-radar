@@ -980,6 +980,7 @@ tests.push({
       null, false, null, false, false, {}, {}
     );
     assert(missing.pain_score === 0, "Missing booking/quote signals must not be interpreted as pain");
+    assert(missing.expected_value === null, "No observed pain must produce N/D expected value, not fabricated zero or revenue");
     assert(missing.decision_state !== "closed", "Low evidence should remain identified, not closed");
 
     const withEmail = calculateStrategicScores(
