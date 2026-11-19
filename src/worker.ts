@@ -9214,7 +9214,8 @@ export function calculateMultiFactorScore(
   let bveltFitScore = 0;
   const isPreferred = PREFERRED_TRADES.has(tradeLower) ||
     /hvac|plumb|electr|roof|lawn|landscap|pool|clean|handyman/i.test(tradeLower);
-  if (isPreferred) bveltFitScore += 15;
+  if (isPriorityTrade) bveltFitScore += 15;
+  else if (isPreferred) bveltFitScore += 10;
   if (signals.multiple_areas) bveltFitScore += 5;
   bveltFitScore = Math.min(20, Math.max(0, bveltFitScore));
 
