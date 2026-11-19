@@ -9850,9 +9850,14 @@ const GEOAPIFY_PROFILES: Array<{ match: RegExp; categories: string; name?: RegEx
 ];
 
 export function resolveGeoapifyProfile(trade: string): { categories: string; name?: RegExp } | null {
-  const normalizedTrade = String(trade || "").trim().toLowerCase().replace(/[_-]+/g, " ");
-  if (!normalizedTrade) return null;
-  return GEOAPIFY_PROFILES.find(profile => profile.match.test(normalizedTrade)) || null;
+  const rawTrade = String(trade || "").trim().toLowerCase();
+  if (!rawTrade) return null;
+  const normalizedTrade = rawTrade.replace(/[_-]+/g, " ");
+  // Support both the canonical internal key and its human-readable form;
+  // existing profiles may intentionally use either spelling.
+  return GEOAPIFY_PROFILES.find(profile =>
+    profile.match.test(normalizedTrade) || profile.match.test(rawTrade)
+  ) || null;
 }
 
 export async function fetchGeoapifyBusinesses(
