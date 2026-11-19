@@ -1,7 +1,7 @@
 declare const process: any;
 import { resolveGithubActionsToken } from './research/githubActions';
 
-import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey, notifyOnce, isVerifiedDeliverableEmail, evaluateFounderOutreachEligibility, buildTechnicalAuditSnapshot, isEmailValidatedForOutreach, isCompletePostalAddress, sendTelegramWithRetry, extractEmailAddress, evaluateResearchEvidenceQuality, classifyReplyText, getTelegramApprovalFeedback, getManualSendPreflightError, hasAIGenerationProvider, WORKERS_AI_FALLBACK_MODEL, extractWorkersAiText, resolveProspectContactability, buildProspectEvidenceContext, buildScheduledRunId, getCurrentDaySenderCount, normalizeWhatsAppPhone, extractPhoneDigits, hasUsableContactChannel, hasEnrichableContactData, buildWhatsAppClickToChatUrl, buildWhatsAppOutreachBody, shouldUseManualWhatsAppFallback, isDiscoveryInfrastructureFailure, hasConfirmedWhatsAppOptIn, isValidWhatsAppConsentEvidenceRef, normalizeGeneratedMessage } from './worker';
+import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey, notifyOnce, isVerifiedDeliverableEmail, evaluateFounderOutreachEligibility, buildTechnicalAuditSnapshot, isEmailValidatedForOutreach, isCompletePostalAddress, sendTelegramWithRetry, extractEmailAddress, evaluateResearchEvidenceQuality, classifyReplyText, getTelegramApprovalFeedback, getManualSendPreflightError, hasAIGenerationProvider, WORKERS_AI_FALLBACK_MODEL, extractWorkersAiText, resolveProspectContactability, buildProspectEvidenceContext, buildScheduledRunId, getCurrentDaySenderCount, normalizeWhatsAppPhone, extractPhoneDigits, hasUsableContactChannel, hasEnrichableContactData, buildWhatsAppClickToChatUrl, buildWhatsAppOutreachBody, shouldUseManualWhatsAppFallback, isDiscoveryInfrastructureFailure, hasConfirmedWhatsAppOptIn, isValidWhatsAppConsentEvidenceRef, normalizeGeneratedMessage, selectHunterDomainEmail } from './worker';
 import { DEFAULT_FOUNDER_MISSION, MissionConfig } from './worker';
 import { buildResendIdempotencyKey, buildBrandedEmailHtml, resolveBveltSender, inspectOutboundEmailAuth, normalizeOutreachBody } from './emailDispatcher';
 import { fetchPermitContractors } from './permitSources';
@@ -29,6 +29,19 @@ function assert(condition: boolean, message: string) {
     throw new Error(message);
   }
 }
+
+tests.push({
+  name: "Hunter no-match responses are distinguished from missing/invalid contacts",
+  run: () => {
+    assert(selectHunterDomainEmail([]) === null, "A successful Hunter response with no emails must be represented as no match");
+    assert(selectHunterDomainEmail([{ value: "info@example.com", confidence: 35, type: "generic" }]) === null, "Low-confidence generic addresses must not pass the existing quality floor");
+    const selected = selectHunterDomainEmail([
+      { value: "contact@northstar.example", confidence: 80, type: "generic" },
+      { value: "jane.doe@northstar.example", confidence: 70, type: "personal" }
+    ]);
+    assert(selected === "jane.doe@northstar.example", "Personal business contact should retain the existing preference over generic contact@");
+  }
+});
 
 tests.push({
   name: "Discovery infrastructure failures do not count toward empty-market cooldowns",
@@ -948,39 +961,39 @@ tests.push({
   }
 });
 
-// Test 7: Hard Quality Gates (Banned retail chains & minimum actionable thresholds)
+// Test 7: market-wide discovery keeps valid commercial entities regardless of chain size.
 tests.push({
-  name: "Hard Quality Gates block retail chains and reject junk rows (score < 35 & no email)",
+  name: "Founder market discovery does not hard-reject chains; invalid entities remain separately filtered",
   run: async () => {
-    const { isHardRejectedChain, calculateMultiFactorScore } = await import('./worker');
-
-    // Banned retail chains
-    assert(isHardRejectedChain("Walmart Supercenter") === true, "Walmart must be hard-rejected");
-    assert(isHardRejectedChain("Lowe's Home Improvement") === true, "Lowe's must be hard-rejected");
-    assert(isHardRejectedChain("lowes plumbing supply") === true, "lowes must be hard-rejected");
-    assert(isHardRejectedChain("The Home Depot") === true, "Home Depot must be hard-rejected");
-    assert(isHardRejectedChain("Costco Wholesale") === true, "Costco must be hard-rejected");
-    assert(isHardRejectedChain("Target Store") === true, "Target must be hard-rejected");
-    assert(isHardRejectedChain("Sam's Club") === true, "Sam's Club must be hard-rejected");
-    assert(isHardRejectedChain("Menards Home Improvement") === true, "Menards must be hard-rejected");
-
-    // Real contractor operators NOT banned
-    assert(isHardRejectedChain("Apex Plumbing & Heating LLC") === false, "Contractor must not be banned");
-    assert(isHardRejectedChain("SunState HVAC Solutions") === false, "Contractor must not be banned");
-
-    // Scoring a retail chain returns 0
-    const walmartScore = calculateMultiFactorScore(
+    const { isHardRejectedChain, calculateMultiFactorScore, calculateStrategicScores, resolveFounderEmailPolicy } = await import('./worker');
+    for (const name of ["Walmart Supercenter", "Lowe's Home Improvement", "The Home Depot", "Costco Wholesale", "Target Store"]) {
+      assert(isHardRejectedChain(name) === false, `${name} must remain a possible enterprise/referral prospect`);
+    }
+    const score = calculateMultiFactorScore(
       { name: "Walmart Supercenter", trade: "retail", city: "Tampa, FL" },
-      "info@walmart.com",
-      true,
-      "+18135550000",
-      true,
-      false,
-      {},
-      {}
+      "info@walmart.com", true, "+18135550000", true, false, {}, {}
     );
-    assert(walmartScore.totalScore === 0, "Walmart score must be 0");
-    assert(walmartScore.breakdown.platform_fit === 0, "Platform fit for Walmart must be 0");
+    assert(score.totalScore > 0, "Large chains must not receive an artificial zero score");
+
+    const missing = calculateStrategicScores(
+      { name: "Northstar Services", city: "Austin, TX", trade: "plumbing", website: "northstar.example.org" },
+      null, false, null, false, false, {}, {}
+    );
+    assert(missing.pain_score === 0, "Missing booking/quote signals must not be interpreted as pain");
+    assert(missing.expected_value === null, "No observed pain must produce N/D expected value, not fabricated zero or revenue");
+    assert(missing.decision_state !== "closed", "Low evidence should remain identified, not closed");
+
+    const withEmail = calculateStrategicScores(
+      { name: "Northstar Services", city: "Austin, TX", trade: "plumbing", website: "northstar.example.org" },
+      "owner@northstar.example.org", false, null, false, false, {}, {}
+    );
+    assert(withEmail.strategic_score === missing.strategic_score, "Email availability must not inflate opportunity score");
+
+    assert(resolveFounderEmailPolicy({ city: "Austin, TX" }).status === "SEND_ALLOWED", "US B2B first-touch may auto-send subject to sender and CAN-SPAM controls");
+    assert(resolveFounderEmailPolicy({ city: "Toronto, ON" }).status === "CONSENT_REQUIRED", "Canada requires a recorded lawful basis before automatic dispatch");
+    assert(resolveFounderEmailPolicy({ city: "London, England", recipient_type: "corporate" }).status === "SEND_ALLOWED", "UK corporate subscriber can use the B2B route");
+    assert(resolveFounderEmailPolicy({ city: "London, England" }).status === "OWNER_REVIEW", "Unknown UK subscriber type must remain owner review");
+    assert(resolveFounderEmailPolicy({ city: "Unknown City" }).status === "POLICY_UNKNOWN", "Unknown jurisdiction must not auto-send");
   }
 });
 
@@ -2659,7 +2672,7 @@ tests.push({
 tests.push({
   name: "ICP policy follows market-universe and Tenant buyer scope",
   run: () => {
-    assert(isOffIcpName("Gentlemen's Barber & Shave Parlor") === true, "Founder must exclude hair/nail salon category");
+    assert(isOffIcpName("Gentlemen's Barber & Shave Parlor") === false, "Founder retains all real commercial categories; mismatches are corrected, not excluded");
     assert(isOffIcpName("Northside Auto Repair") === false, "Automotive businesses remain Founder-eligible");
     assert(isOffIcpName("Downtown Dental Clinic") === false, "Healthcare businesses remain Founder-eligible");
     assert(isOffIcpName("Harborview Hotel") === false, "Hospitality businesses remain Founder-eligible");
@@ -2725,9 +2738,9 @@ tests.push({
       })
     };
     const bareKit = buildAttackKit(bareProspect);
-    assert(bareKit.angle === "no_evidence", "Bare phone/form must not invent missed_calls; angle should be no_evidence");
+    assert(bareKit.angle === "general_intro", "Bare phone/form must use a neutral intro, not invent missed_calls or block contact");
     assert(bareKit.sms === "", "No SMS should be generated without verified friction");
-    assert(bareKit.next_action.includes("DO_NOT_CONTACT"), "Next action must be DO_NOT_CONTACT");
+    assert(!bareKit.next_action.includes("DO_NOT_CONTACT"), "No friction evidence must not block a neutral first contact");
 
     // 2. Candidate with VERIFIED missed call friction -> missed_calls angle
     const verifiedMissedCallProspect = {
@@ -2788,8 +2801,8 @@ tests.push({
       signals_json: JSON.stringify({ missed_call_evidence: true })
     };
     const barberKit = buildAttackKit(offIcpProspect);
-    assert(barberKit.angle === "disqualified_off_icp", "Barbershop must be disqualified as off-ICP");
-    assert(barberKit.sms === "", "Disqualified prospect must get zero SMS");
+    assert(barberKit.angle !== "disqualified_off_icp", "A valid local business must remain reviewable despite a stale trade label");
+    assert(!/missed calls|unanswered calls|lost leads/i.test(barberKit.sms), "No unobserved pain may be asserted in outreach copy");
   }
 });
 

@@ -1,5 +1,3 @@
-import marketUniverse from "../sidecar/config/market-universe.json";
-
 /**
  * Email Sanitizer & ICP Guard for Bvelt Radar
  * Prevents invalid emails (e.g. clock@2x.png, system mailboxes, disposables)
@@ -213,25 +211,6 @@ export async function hasMxRecords(domainOrEmail: string): Promise<boolean> {
   }
 }
 
-const MARKET_EXCLUSIONS = new Set(
-  (((marketUniverse as any).excluded_business_categories || []) as string[])
-    .map((value) => String(value).trim().toLowerCase())
-);
-
-const FOUNDER_EXCLUSION_RULES: Array<{ category: string; pattern: RegExp }> = [
-  { category: "pet care", pattern: /\b(pet care|pet store|pet grooming|dog grooming|veterinary|vet clinic|animal hospital)\b/i },
-  { category: "hair/nail salons", pattern: /\b(barber|barbershop|hairdresser|hair salon|nail salon|beauty salon|salon)\b/i },
-  { category: "tattoo/piercing", pattern: /\b(tattoo|piercing)\b/i },
-  { category: "gyms/fitness studios", pattern: /\b(gym|fitness studio|crossfit|pilates|yoga)\b/i },
-  { category: "massage", pattern: /\b(massage)\b/i },
-  { category: "grocery/supermarket", pattern: /\b(grocery|supermarket)\b/i },
-  { category: "convenience stores", pattern: /\b(convenience store)\b/i },
-  { category: "florists", pattern: /\b(florist|flower shop)\b/i },
-  { category: "boutiques", pattern: /\b(boutique)\b/i },
-  { category: "pure ecommerce", pattern: /\b(pure e[- ]?commerce|online[- ]only|dropshipping)\b/i },
-  { category: "low-value retail", pattern: /\b(dollar store|discount store|thrift store|pawn shop)\b/i },
-];
-
 const NON_BUSINESS_ENTITY_REGEX =
   /\b(church|iglesia|ministry|ministerio|chapel|temple|parish|cathedral|mosque|synagogue|school|college|university|library|museum|soccer|hockey|baseball|football club|minor (?:soccer|hockey|baseball)|sports? club|recreation centre|recreation center|community centre|community center|hoa\b|homeowners? association|city of\b|town of\b|municipality|charity|non[- ]?profit|ngo\b)\b/i;
 
@@ -284,25 +263,16 @@ export function isOffIcpName(
   if (!name || typeof name !== "string") return true;
   const clean = name.trim().toLowerCase();
   if (!clean) return true;
+  void allowTenantBuyer;
+  void categoryOrTrade;
 
   if (/\b(?:variation|variant)\s*#?\s*\d+\b/i.test(clean)) return true;
 
   if (NON_BUSINESS_ENTITY_REGEX.test(clean)) return true;
 
-  if (isCategoryNameMismatch(name, categoryOrTrade)) {
-    // Food-service names are allowed through so checkTradeCoherence can
-    // reclassify a stale trade (test: Sun Garden Chinese + landscaping).
-    // Non-food mismatches (lighting retail as electrician) stay hard-blocked.
-    if (!FOOD_SERVICE_NAME_REGEX.test(clean)) {
-      return true;
-    }
-  }
-
-  if (allowTenantBuyer) return false;
-
-  return FOUNDER_EXCLUSION_RULES.some((rule) =>
-    MARKET_EXCLUSIONS.has(rule.category) && rule.pattern.test(clean)
-  );
+  // Founder discovery is market-wide: excluded categories are prioritization hints,
+  // not hard rejection rules. Keep only objective entity/category-integrity checks above.
+  return false;
 }
 
 export function outreachQualityBlocked(input: {

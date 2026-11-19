@@ -18,7 +18,7 @@ import { getAlerts, tradeForEvent, eventAppliesToTrade, WeatherAlert } from './w
 import { dispatchEmail, normalizeOutreachBody, BVELT_SITE, EmailDispatchResult, inspectOutboundEmailAuth } from './emailDispatcher';
 import { auditDomainSecurityAndMx, auditWebsitePerformance, auditCityWeatherEmergency } from './openAudits';
 import { pickTargets, findPlace, findNearestPlace, formatPlaceLabel, markSearched, placeKey, radiusKm, haversineKm } from './geoFrontier';
-import { sanitizeEmail, sanitizeProspectEmail, isOffIcpName, hasMxRecords } from './emailSanitizer';
+import { sanitizeEmail, sanitizeProspectEmail, isOffIcpName, isCategoryNameMismatch, hasMxRecords } from './emailSanitizer';
 import { dispatchScraplingResearch } from './research/githubActions';
 import { recordScopedLearningEvent, readScopedLearningStats } from './learningIntegrity';
 import { fetchPermitContractors as fetchMunicipalPermitContractors } from './permitSources';
@@ -1184,7 +1184,7 @@ export default {
           }, { status: result.success ? 200 : 409, headers: corsHeaders });
         }
 
-        return await handleDecision(id, action, notes, env, corsHeaders);
+        return await handleDecision(id, action, notes, env, corsHeaders, body.owner_lawful_basis_asserted === true);
       }
 
       // 7. Manual Suppression Addition
@@ -4072,7 +4072,7 @@ async function handleTelegramWebhook(request: Request, env: Env, headers: Record
           decisionJson = { success: result.success, reason: result.reason };
         } else {
           const decisionAction = (action === "approve" || action === "sent") ? "sent" : (action === "discard" ? "discard" : action);
-          const decisionRes = await handleDecision(prospectId, decisionAction, `Triggered via Telegram Button (${action})`, env, {});
+          const decisionRes = await handleDecision(prospectId, decisionAction, `Triggered via Telegram Button (${action})`, env, {}, true);
           decisionJson = await decisionRes.json().catch(() => ({}));
         }
         const isSendAction = action === "approve" || action === "sent";
@@ -4677,11 +4677,12 @@ async function recordManualWhatsAppSent(prospectId: string, env: Env): Promise<{
  * Handle Prospect Decision (sent | discard | suppress) & Record Learning Feedback
  */
 async function handleDecision(
-  id: string, 
-  action: string, 
-  notes: string | undefined, 
-  env: Env, 
-  headers: Record<string, string>
+  id: string,
+  action: string,
+  notes: string | undefined,
+  env: Env,
+  headers: Record<string, string>,
+  ownerLawfulBasisAsserted = false
 ): Promise<Response> {
   const db = env.RADAR_DB;
   
@@ -4693,6 +4694,14 @@ async function handleDecision(
   const timestamp = new Date().toISOString();
 
   if (action === "sent" || action === "approve") {
+    if (!ownerLawfulBasisAsserted) {
+      return Response.json({
+        success: false,
+        blocked: true,
+        reason: "owner_lawful_basis_confirmation_required",
+        message: "Confirma que existe una base legal aplicable para contactar a este destinatario antes de enviar."
+      }, { status: 409, headers });
+    }
     const preflightError = getManualSendPreflightError(prospect);
     if (preflightError) {
       return Response.json({
@@ -4752,9 +4761,9 @@ async function handleDecision(
       if (manualSuppression) {
         return Response.json({ success: false, blocked: true, reason: "suppressed: " + manualSuppression.reason, id }, { status: 409, headers });
       }
-      if (!isEmailValidatedForOutreach(prospect.signals_json || "{}")) {
-        return Response.json({ success: false, blocked: true, reason: "email_not_provider_verified", id }, { status: 409, headers });
-      }
+      // Explicit owner action may send a syntactically valid address without provider mailbox verification.
+      // Suppression, sender identity, lawful-basis acknowledgement, Trust-Stack and idempotency remain mandatory.
+      const providerVerified = isEmailValidatedForOutreach(prospect.signals_json || "{}");
       const manualSequenceId = env.RESEND_API_KEY?.trim() ? "resend_live" : env.BREVO_API_KEY?.trim() ? "brevo_live" : "manual_simulated";
       manualIdempotencyKey = buildOutreachIdempotencyKey(prospect.tenant_id || "founder", prospect.id, manualSequenceId, manualEligibility.nextTouch);
       const existingManual = await db.prepare("SELECT status FROM outreach_idempotency WHERE idempotency_key = ?").bind(manualIdempotencyKey).first() as any;
@@ -4817,7 +4826,14 @@ async function handleDecision(
 
       try {
         await db.prepare("INSERT INTO prospect_events (id, prospect_id, event_type, content, created_at) VALUES (?, ?, ?, ?, ?)")
-          .bind("msg_" + crypto.randomUUID(), id, "message_send_authorized", JSON.stringify({ channel: "email", authorization: "explicit_user_action", mode: prospect.mode || "founder", tenant_id: prospect.tenant_id || "founder" }), timestamp).run();
+          .bind("msg_" + crypto.randomUUID(), id, "message_send_authorized", JSON.stringify({
+            channel: "email", authorization: "explicit_user_action",
+            owner_lawful_basis_asserted: ownerLawfulBasisAsserted,
+            email_policy: resolveFounderEmailPolicy(prospect).status,
+            deliverability_override: !providerVerified,
+            deliverability_state: providerVerified ? "provider_verified" : "syntax_and_mx_only",
+            mode: prospect.mode || "founder", tenant_id: prospect.tenant_id || "founder"
+          }), timestamp).run();
       } catch (eventError: any) { console.warn("[ManualEmail] send authorization log failed:", eventError?.message || eventError); }
 
       dispatchOutcome = await dispatchEmail({
@@ -6706,21 +6722,33 @@ async function handleEnrichJob(job: RadarJobMessage, env: Env): Promise<void> {
 
   // Step c: Hunter Domain Search BEFORE guessing patterns (bounce killer)
   // Prefer Hunter / scrape over inventing contact@
+  let hunterSearchOutcome: "not_attempted" | "found" | "no_match" | "unavailable" = "not_attempted";
   if (domain && env.HUNTER_API_KEY) {
-    try {
-      const reserved = await reserveBudget(env.RADAR_DB, tenantId, 'hunter_units', 1);
-      if (reserved) {
-        const hunterEmail = await fetchHunterEmail(domain, env.HUNTER_API_KEY);
-        if (hunterEmail) {
-          const hunterEmailCheck = sanitizeEmail(String(hunterEmail || ""));
-          emailCandidate = hunterEmailCheck.valid ? hunterEmailCheck.email : emailCandidate;
+    const reserved = await reserveBudget(env.RADAR_DB, tenantId, 'hunter_units', 1);
+    if (reserved) {
+      try {
+        const hunterResult = await fetchHunterEmail(domain, env.HUNTER_API_KEY);
+        if (hunterResult.requestSucceeded) {
+          hunterSearchOutcome = hunterResult.email ? "found" : "no_match";
+          if (hunterResult.email) {
+            const hunterEmailCheck = sanitizeEmail(hunterResult.email);
+            emailCandidate = hunterEmailCheck.valid ? hunterEmailCheck.email : emailCandidate;
+          }
+          // Count and commit every successful HTTP request, even when Hunter finds no usable address.
           await env.RADAR_DB.prepare("UPDATE runs SET hunter_calls = hunter_calls + 1 WHERE id = ?").bind(job.run_id).run();
           await commitBudget(env.RADAR_DB, tenantId, 'hunter_units', 1);
         } else {
+          hunterSearchOutcome = "unavailable";
           await releaseBudget(env.RADAR_DB, tenantId, 'hunter_units', 1);
         }
+      } catch (e: any) {
+        hunterSearchOutcome = "unavailable";
+        await releaseBudget(env.RADAR_DB, tenantId, 'hunter_units', 1);
+        console.warn("[Hunter] Domain search unavailable; budget reservation released:", String(e?.message || e).slice(0, 120));
       }
-    } catch (e: any) {}
+    } else {
+      hunterSearchOutcome = "unavailable";
+    }
   }
 
   // Step d: NEVER invent contact@ (primary bounce driver in Resend metrics).
@@ -6755,6 +6783,7 @@ async function handleEnrichJob(job: RadarJobMessage, env: Env): Promise<void> {
     is_email_validated: isEmailValidated,
     email_source: emailSource,
     email_quality: emailQuality,
+    hunter_search_outcome: hunterSearchOutcome,
     permits_90d: effectivePermits,
     signals,
     technical_audits: buildTechnicalAuditSnapshot(null, null, null)
@@ -6932,7 +6961,7 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
   let painHypothesis: any = {};
   const signalTags: string[] = [];
   let bveltAngle = "";
-  let variantId = "missed_calls";
+  let variantId = "general_intro";
 
   if (isTenant) {
     let tcRow: any = null;
@@ -7034,7 +7063,8 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
     breakdown.senal = senal;
 
     finalScore = Math.min(100, Math.max(0, encaje + contacto + cercania + senal));
-    confidence = Math.min(100, 40 + (prospect.phone ? 25 : 0) + (prospect.email ? 20 : 0) + (isEmailValidated ? 15 : 0));
+    const tenantEvidenceCount = [signals.active_permits, signals.contact_form, signals.lead_capture, signals.quote_request, signals.multiple_areas].filter(Boolean).length;
+    confidence = Math.min(95, 35 + tenantEvidenceCount * 12 + (prospect.website ? 10 : 0));
     evidenceSummary = `Comprador B2B para ${tcRow?.niche || prospect.trade} en ${prospect.city}${distKm !== null ? ` (a ${distKm} km)` : ''}`;
     painHypothesis = { mode: "tenant_buyer", icp_match: matchesSegment };
     bveltAngle = "tenant_buyer_opportunity";
@@ -7138,26 +7168,26 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
   }
 
   const strat = isTenant ? {
-    fit_score: breakdown.encaje ? Math.round((breakdown.encaje / 40) * 100) : 50,
-    intent_score: breakdown.senal ? Math.round((breakdown.senal / 15) * 100) : 50,
-    pain_score: 50,
-    ability_to_pay_score: 75,
-    contactability_score: breakdown.contacto ? Math.round((breakdown.contacto / 25) * 100) : 50,
-    timing_score: breakdown.cercania ? Math.round((breakdown.cercania / 20) * 100) : 50,
-    evidence_score: 60,
-    signal_freshness_score: 100,
+    fit_score: breakdown.encaje ? Math.round((breakdown.encaje / 40) * 100) : 0,
+    intent_score: breakdown.senal ? Math.round((breakdown.senal / 15) * 100) : 0,
+    pain_score: 0,
+    ability_to_pay_score: 0,
+    contactability_score: breakdown.contacto ? Math.round((breakdown.contacto / 25) * 100) : 0,
+    timing_score: 0,
+    evidence_score: Math.min(100, confidence),
+    signal_freshness_score: 0,
     strategic_score: finalScore,
-    expected_value: Math.round(finalScore * 25),
+    expected_value: null,
     decision_state: finalScore >= 60 ? "actionable" : "identified",
     priority_tier: finalScore >= 75 ? "high" : finalScore >= 50 ? "medium" : "low",
     why_now_json: JSON.stringify({ signals: signalTags }),
     why_now: {
-      what_is_happening: `Comprador B2B local para ${prospect.trade} en ${prospect.city}`,
+      what_is_happening: `Candidato comprador B2B potencial para ${prospect.trade} en ${prospect.city}`,
       what_evidence_exists: signalTags,
-      why_it_matters: "Cliente de alto valor para contratación y mantenimiento",
-      why_now: "Ubicación cercana y canales de contacto activos",
-      recommended_action: "Llamar directo o contactar para presentar servicios",
-      potential_economic_result: "Contratos de servicio y mantenimiento recurrente",
+      why_it_matters: "El segmento puede comprar los servicios configurados por el Tenant; capacidad y necesidad deben confirmarse." ,
+      why_now: "El territorio coincide con la configuración; la disponibilidad del canal se evalúa por separado.",
+      recommended_action: "Validar encaje y canal disponible; después preparar una presentación neutral de los servicios del Tenant.",
+      potential_economic_result: "N/D — requiere señales comerciales y datos económicos del Tenant",
       distinctions: { observed_facts: signalTags, inferences: [], estimations: [] }
     }
   } : calculateStrategicScores(
@@ -7179,41 +7209,25 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
   const contactable = hasUsableContactChannel(prospect.email, prospect.phone);
   const minScoreGate = isTenant
     ? (Number(overrides?.min_score) || Number(missionConfig?.min_score) || 40)
-    : 45;
-  const isDisqualified = finalScore < minScoreGate || !contactable;
+    : 35;
+  const needsEnrichment = !contactable;
+  const lowPriority = finalScore < minScoreGate;
 
-  if (isDisqualified) {
-    const disqualificationOutcome = finalScore < minScoreGate ? "below_minimum_score" : "no_contact_channel";
+  if (needsEnrichment || lowPriority) {
+    const nextOutcome = needsEnrichment ? "needs_contact_enrichment" : "low_priority_keep_visible";
     await env.RADAR_DB.prepare(`
       UPDATE prospects
       SET score = ?, opportunity_score = ?, confidence_score = ?, evidence_json = ?, commercial_value_band = ?, pain_hypothesis_json = ?, signals_json = ?, score_breakdown = ?, variant_id = ?, bvelt_angle = ?,
-          fit_score = ?, intent_score = ?, pain_score = ?, ability_to_pay_score = ?, contactability_score = ?, timing_score = ?, evidence_score = ?, signal_freshness_score = ?, expected_value = ?, decision_state = 'disqualified', why_now_json = ?,
-          status = 'disqualified', outcome = ?, updated_at = ?
+          fit_score = ?, intent_score = ?, pain_score = ?, ability_to_pay_score = ?, contactability_score = ?, timing_score = ?, evidence_score = ?, signal_freshness_score = ?, expected_value = ?, decision_state = 'identified', why_now_json = ?,
+          status = 'identified', outcome = ?, updated_at = ?
       WHERE id = ?
     `).bind(
-      finalScore,
-      finalScore,
-      confidence,
-      JSON.stringify(evidenceItems),
-      valueBand,
-      JSON.stringify(painHypothesis),
-      JSON.stringify(updatedMeta),
-      JSON.stringify(breakdown),
-      variantId,
-      bveltAngle,
-      strat.fit_score,
-      strat.intent_score,
-      strat.pain_score,
-      strat.ability_to_pay_score,
-      strat.contactability_score,
-      strat.timing_score,
-      strat.evidence_score,
-      strat.signal_freshness_score,
-      strat.expected_value,
-      strat.why_now_json,
-      disqualificationOutcome,
-      new Date().toISOString(),
-      prospect_id
+      finalScore, finalScore, confidence, JSON.stringify(evidenceItems), valueBand,
+      JSON.stringify(painHypothesis), JSON.stringify(updatedMeta), JSON.stringify(breakdown),
+      variantId, bveltAngle, strat.fit_score, strat.intent_score, strat.pain_score,
+      strat.ability_to_pay_score, strat.contactability_score, strat.timing_score,
+      strat.evidence_score, strat.signal_freshness_score, strat.expected_value,
+      strat.why_now_json, nextOutcome, new Date().toISOString(), prospect_id
     ).run();
     return;
   }
@@ -7415,26 +7429,20 @@ async function handleApproveJob(job: RadarJobMessage, env: Env): Promise<void> {
     return;
   }
 
-  // Email prospects continue to the email path; valid phone-only prospects use
-  // the reviewed WhatsApp handoff below. Never discard a usable phone for lack of email.
-  if (Number(prospect.score || 0) < 45) {
-    await env.RADAR_DB.prepare("UPDATE prospects SET status = 'disqualified', outcome = 'below_outreach_score', updated_at = ? WHERE id = ?")
-      .bind(new Date().toISOString(), prospect_id).run();
-    return;
-  }
+  // Score ranks work; it is not a permission gate. An explicit owner may review/send any valid business prospect.
   if (!hasUsableContactChannel(prospect.email, prospect.phone)) {
     await env.RADAR_DB.prepare("UPDATE prospects SET status = 'disqualified', outcome = 'no_contact_channel', updated_at = ? WHERE id = ?")
       .bind(new Date().toISOString(), prospect_id).run();
     return;
   }
-  const verifiedEmail = sanitizeEmail(String(prospect.email || "")).valid && isEmailValidatedForOutreach(prospect.signals_json || "{}");
+  const syntacticallyValidEmail = sanitizeEmail(String(prospect.email || "")).valid;
   const directWhatsApp = Boolean(normalizeWhatsAppPhone(prospect.phone));
-  if (!verifiedEmail && !directWhatsApp) {
+  if (!syntacticallyValidEmail && !directWhatsApp) {
     const holdAt = new Date().toISOString();
-    await env.RADAR_DB.prepare("UPDATE prospects SET status = 'hold', outcome = 'no_verified_direct_channel', updated_at = ? WHERE id = ?")
+    await env.RADAR_DB.prepare("UPDATE prospects SET status = 'hold', outcome = 'no_valid_direct_channel', updated_at = ? WHERE id = ?")
       .bind(holdAt, prospect_id).run();
-    await notifyOnce(env, `no_verified_direct_channel_${prospect.id}`,
-      `<b>⏸️ Prospecto en HOLD — falta destinatario verificable</b>\n<b>Negocio:</b> ${escapeHtml(String(prospect.name || ""))}\n<b>Motivo:</b> correo sin verificación de entregabilidad y teléfono sin código internacional explícito para WhatsApp. Se puede llamar desde Radar; no se abrirá un enlace de WhatsApp sin destinatario.`);
+    await notifyOnce(env, `no_valid_direct_channel_${prospect.id}`,
+      `<b>⏸️ Prospecto en HOLD — falta un canal utilizable</b>\n<b>Negocio:</b> ${escapeHtml(String(prospect.name || ""))}\n<b>Motivo:</b> no hay email con sintaxis válida ni teléfono internacional utilizable. El prospecto permanece guardado para enriquecimiento.`);
     return;
   }
 
@@ -7445,7 +7453,7 @@ async function handleApproveJob(job: RadarJobMessage, env: Env): Promise<void> {
     UPDATE prospects SET status = 'approved', updated_at = ? WHERE id = ?
   `).bind(approvalTimestamp, prospect_id).run();
   try {
-    const approvedChannel = shouldUseManualWhatsAppFallback(prospect.email, prospect.phone, prospect.signals_json || "{}") ? "whatsapp" : "email";
+    const approvedChannel = sanitizeEmail(String(prospect.email || "")).valid ? "email" : "whatsapp";
     await env.RADAR_DB.prepare("INSERT INTO prospect_events (id, prospect_id, event_type, content, created_at) VALUES (?, ?, ?, ?, ?)")
       .bind("msg_" + crypto.randomUUID(), prospect_id, "message_send_authorized", JSON.stringify({ channel: approvedChannel, authorization: "telegram_human_approval", mode: "founder", tenant_id: "founder" }), approvalTimestamp).run();
   } catch (eventError: any) { console.warn("[ApproveJob] send authorization event log failed:", eventError?.message || eventError); }
@@ -7474,14 +7482,10 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
       .bind(isHardRejectedChain(prospect.name) ? "hard_rejected_chain" : "off_icp_name", new Date().toISOString(), prospect_id).run();
     return;
   }
-  if ((prospect.score || 0) < 45) {
-    await env.RADAR_DB.prepare("UPDATE prospects SET status = 'disqualified', outcome = 'below_outreach_score', updated_at = ? WHERE id = ?")
-      .bind(new Date().toISOString(), prospect_id).run();
-    return;
-  }
+  // Low score never deletes the prospect. It only prevents automatic send; owner review remains available.
   // If there is no provider-verified email, use a phone-based manual WhatsApp
   // fallback when possible. Never treat the unverified email as deliverable.
-  if (shouldUseManualWhatsAppFallback(prospect.email, prospect.phone, prospect.signals_json || "{}")) {
+  if (!sanitizeEmail(String(prospect.email || "")).valid && shouldUseManualWhatsAppFallback(prospect.email, prospect.phone, prospect.signals_json || "{}")) {
     const phoneDigits = extractPhoneDigits(prospect.phone);
     const waPhone = normalizeWhatsAppPhone(prospect.phone);
     if (!phoneDigits) {
@@ -7519,7 +7523,7 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
 
     let draft: { subject: string; body: string };
     try {
-      draft = await generateAICopy(prospect, prospect.variant_id || "missed_calls", env, missionConfig, "whatsapp");
+      draft = await generateAICopy(prospect, prospect.variant_id || "general_intro", env, missionConfig, "whatsapp");
       await commitBudget(env.RADAR_DB, "founder", "finalize_units", 1);
     } catch (error: any) {
       await releaseBudget(env.RADAR_DB, "founder", "finalize_units", 1);
@@ -7595,14 +7599,14 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
   prospect.email = emailCheck.email;
   let signalsMeta: any = {};
   try { signalsMeta = JSON.parse(prospect.signals_json || "{}"); } catch {}
-  // Role-based mailboxes (info@, contact@, admin@) are not inherently invalid.
-  // Keep the provider-verification gate, but do not reject them solely by local-part.
-  if (!isEmailValidatedForOutreach(signalsMeta)) {
-    console.warn(`[Outreach] Hold ${prospect.id} — email not provider-verified`);
-    await env.RADAR_DB.prepare("UPDATE prospects SET status = 'hold', outcome = 'skipped_unverified_email', updated_at = ? WHERE id = ?")
+  // Provider verification gates autonomous dispatch, not discovery or owner review.
+  const emailProviderVerified = isEmailValidatedForOutreach(signalsMeta);
+  const emailTrustPolicy = resolveFounderEmailPolicy(prospect);
+  if (!(await hasMxRecords(prospect.email))) {
+    await env.RADAR_DB.prepare("UPDATE prospects SET status = 'hold', outcome = 'recipient_domain_no_mx', updated_at = ? WHERE id = ?")
       .bind(new Date().toISOString(), prospect_id).run();
-    await notifyOnce(env, `unverified_email_${prospect.id}`,
-      `<b>⏸️ Prospecto en HOLD — correo sin verificar</b>\n<b>Negocio:</b> ${escapeHtml(String(prospect.name || ""))}\n<b>Correo:</b> ${escapeHtml(String(prospect.email || "No disponible"))}\n<i>Radar no enviará hasta confirmar que el buzón es entregable.</i>`);
+    await notifyOnce(env, `recipient_no_mx_${prospect.id}`,
+      `<b>⏸️ Email no utilizable</b>\n<b>Negocio:</b> ${escapeHtml(String(prospect.name || ""))}\n<b>Motivo:</b> el dominio no publica registros MX. El prospecto permanece disponible para otro canal o enriquecimiento.`);
     return;
   }
 
@@ -7728,6 +7732,8 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
     job.mode === "founder" &&
     !outreachPaused &&
     (autoFlag === "true" || autoFlag === "1" || autoFlag === "yes") &&
+    emailProviderVerified &&
+    emailTrustPolicy.status === "SEND_ALLOWED" &&
     (isElite || isStrongAuto);
 
   const todayDate = new Date().toISOString().split('T')[0];
@@ -7846,7 +7852,7 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
     WHERE id = ?
   `).bind(draft.subject, draft.body, new Date().toISOString(), prospect_id).run();
 
-  const actionableMsg = formatProspectTelegramMessage({ ...prospect, status: 'queued' }, env);
+  const actionableMsg = formatProspectTelegramMessage({ ...prospect, status: 'queued' }, env) + `\n\nAl pulsar Approve confirmas que tienes una base legal aplicable para este destinatario. Si el email no está verificado por proveedor, aceptas el riesgo adicional de rebote.`;
   const inlineButtons = [
     [
       { text: "✅ Approve", callback_data: `approve:${prospect_id}` },
@@ -8723,42 +8729,10 @@ export async function getPriorityTargets(
  * Hard Quality Gate: Rejected Retail and Banned Chains (Bvelt ICP)
  */
 export function isHardRejectedChain(name: string): boolean {
-  if (!name) return false;
-  const n = name.toLowerCase().trim();
-  const banned = [
-    "walmart", "lowe's", "lowes", "home depot", "costco", "target", "sam's club", "sams club",
-    "menards", "ace hardware", "true value", "harbor freight", "tractor supply", "best buy",
-    "kroger", "publix", "walgreens", "cvs", "dollar tree", "dollar general", "family dollar",
-    "autozone", "auto zone", "advance auto", "o'reilly", "sherwin-williams", "floor & decor",
-    "staples", "office depot", "target store"
-  ];
-  if (banned.some(b => n.includes(b))) return true;
-
-  // Hard-reject retail garden centers, nurseries, feed/garden stores, plant stores, supply houses
-  // (name~ search matches "Garden Store" / "Feed & Garden" which are NOT field operators)
-  if (
-    /garden cent(er|re)/i.test(n) ||
-    /\bgarden store\b/i.test(n) ||
-    /\bfeed\b.*\bgarden\b/i.test(n) ||
-    /\bgarden\b.*\bfeed\b/i.test(n) ||
-    /\bfeed store\b/i.test(n) ||
-    /\bagricultural supply\b/i.test(n) ||
-    /plant nursery/i.test(n) ||
-    /tree nursery/i.test(n) ||
-    /\bnursery\b/i.test(n) ||
-    /plant (shop|store|boutique)/i.test(n) ||
-    /greenhouse & (nursery|gifts|retail)/i.test(n) ||
-    /flower (shop|market|store)/i.test(n) ||
-    /\bflorist\b/i.test(n) ||
-    /building supplies/i.test(n) ||
-    /landscape supply/i.test(n) ||
-    /stone supply/i.test(n) ||
-    /mulch supply/i.test(n) ||
-    /\bpet store\b/i.test(n) ||
-    /\bgrocery\b/i.test(n)
-  ) {
-    return true;
-  }
+  // Large retailers and chains are not invalid entities. Keep them in the universe
+  // as lower-priority/referral/enterprise possibilities; never make a name blacklist
+  // the sole reason to erase a commercial prospect.
+  void name;
   return false;
 }
 
@@ -8779,7 +8753,7 @@ export interface StrategicScoreBreakdown {
   evidence_score: number;
   signal_freshness_score: number;
   strategic_score: number;
-  expected_value: number;
+  expected_value: number | null;
   decision_state: string;
   priority_tier: 'critical' | 'high' | 'medium' | 'low';
   why_now_json: string;
@@ -8851,10 +8825,10 @@ export function calculateStrategicScores(
   else if (isPreferredTrade) fit_score += 35;
   else fit_score += 20;
 
-  const isIndependent = /brothers|sons|family|llc|services|pro|tech|contracting|group|co\b/i.test(nameLower);
-  if (isIndependent) fit_score += 25;
+  // Legal suffixes and generic words in a name are not proof of buyer fit.
   if (isPriorityCity) fit_score += 15;
   if (item.website && isRealWebsite(item.website)) fit_score += 15;
+  if (signals.multiple_areas) fit_score += 10;
   fit_score = Math.min(100, Math.max(0, fit_score));
 
   // 2. INTENT SCORE (0 - 100)
@@ -8868,25 +8842,22 @@ export function calculateStrategicScores(
 
   // 3. PAIN SCORE (0 - 100)
   let pain_score = 0;
-  if (signals.sms_gap) pain_score += 40;
-  if (!signals.booking) pain_score += 25;
-  if (signals.emergency) pain_score += 20;
-  if (!signals.quote_request && !signals.estimate_language) pain_score += 15;
+  // Only observed positive friction signals add pain. Missing booking/quote data is UNKNOWN.
+  if (signals.sms_gap) pain_score += 35;
+  if (signals.missed_calls) pain_score += 35;
+  if (signals.emergency) pain_score += 15;
+  if (signals.quote_request || signals.estimate_language) pain_score += 15;
   pain_score = Math.min(100, Math.max(0, pain_score));
 
   // 4. ABILITY TO PAY SCORE (0 - 100)
   let ability_to_pay_score = 0;
+  // Observable scale/complexity signals only; no legal suffix or email-host shortcut.
   const isHighTicketTrade = /hvac|roof|electr|plumb|builder|contractor|commercial/i.test(tradeLower);
-  if (isHighTicketTrade) ability_to_pay_score += 40;
-  else ability_to_pay_score += 25;
-
-  if (item.website && isRealWebsite(item.website)) {
-    ability_to_pay_score += 25;
-    if (email && !/@(gmail|yahoo|hotmail|outlook)\.com$/i.test(email)) {
-      ability_to_pay_score += 20;
-    }
-  }
-  if (signals.multiple_areas) ability_to_pay_score += 15;
+  if (isHighTicketTrade) ability_to_pay_score += 25;
+  if (item.website && isRealWebsite(item.website)) ability_to_pay_score += 15;
+  if (signals.multiple_areas) ability_to_pay_score += 25;
+  if (item.source === "permits" || item.signal_event) ability_to_pay_score += 20;
+  if (signals.quote_request || signals.estimate_language) ability_to_pay_score += 15;
   ability_to_pay_score = Math.min(100, Math.max(0, ability_to_pay_score));
 
   // 5. CONTACTABILITY SCORE (0 - 100)
@@ -8905,7 +8876,7 @@ export function calculateStrategicScores(
   let timing_score = 0;
   if (item.signal_event) timing_score += 45;
   if (item.source === 'permits') timing_score += 35;
-  if (isPreferredTrade) timing_score += 20;
+  // Trade preference is fit, not timing. Timing uses dated/current demand signals only.
   timing_score = Math.min(100, Math.max(0, timing_score));
 
   // 7. EVIDENCE SCORE (0 - 100)
@@ -8937,13 +8908,13 @@ export function calculateStrategicScores(
   // COMPOSITE STRATEGIC SCORE (0 - 100)
   const freshnessMultiplier = signal_freshness_score / 100;
   let strategic_score = Math.round(
-    (fit_score * 0.20) +
+    (fit_score * 0.25) +
     (pain_score * 0.20) +
-    (intent_score * 0.15) +
-    (timing_score * 0.15) +
-    (contactability_score * 0.15) +
+    (intent_score * 0.20) +
+    (timing_score * 0.10) +
     (ability_to_pay_score * 0.10) +
-    (evidence_score * freshnessMultiplier * 0.05)
+    (evidence_score * freshnessMultiplier * 0.10) +
+    (signal_freshness_score * 0.05)
   );
   strategic_score = Math.min(100, Math.max(0, strategic_score));
 
@@ -8965,14 +8936,18 @@ export function calculateStrategicScores(
   } else if (priority_tier === 'medium') {
     decision_state = 'analyzing';
   } else {
-    decision_state = 'closed';
+    decision_state = 'identified';
   }
 
   // EXPECTED VALUE: P(convert) × ticket — ticket by trade economics
   const avgJobValue = estimateTicketUsd(item.trade || "");
-  const estimatedMonthlyRecoveredValue = Math.round(avgJobValue * (pain_score / 100) * 2.2);
+  const estimatedMonthlyRecoveredValue = pain_score > 0
+    ? Math.round(avgJobValue * (pain_score / 100) * 2.2)
+    : null;
   const conversionProb = (strategic_score / 100) * (contactability_score / 100) * 0.32;
-  const expected_value = Math.round(estimatedMonthlyRecoveredValue * conversionProb);
+  const expected_value = estimatedMonthlyRecoveredValue === null
+    ? null
+    : Math.round(estimatedMonthlyRecoveredValue * conversionProb);
 
   // WHY NOW STRUCTURED REASONING
   const observed_facts: string[] = [];
@@ -8988,30 +8963,29 @@ export function calculateStrategicScores(
   if (signals.sms_gap) {
     inferences.push("High probability of dropping mobile visitors who prefer asynchronous messaging over voice calls");
   }
-  if (signals.emergency && !signals.booking) {
-    inferences.push("Technicians engaged in field jobs leave incoming calls to voicemail during surge hours");
+  if (signals.emergency) {
+    inferences.push("Emergency-service availability may create time-sensitive inbound demand; missed-call leakage is not yet verified.");
   }
   if (item.signal_event) {
     inferences.push("Elevated local call volume creates immediate backlog and customer leakage");
   }
 
   const estimations: string[] = [
-    `Estimated average contractor ticket for ${item.trade}: $${avgJobValue}`,
-    `Estimated monthly revenue at risk from dropped leads: $${estimatedMonthlyRecoveredValue}`,
-    `Calculated expected value under current timing window: $${expected_value}`
+    `Estimated average ticket benchmark for ${item.trade}: ${avgJobValue}`,
+    ...(expected_value === null ? [] : [`Modeled opportunity value: ${expected_value}; not verified revenue`])
   ];
 
   const why_now = {
     what_is_happening: item.signal_event 
       ? `Active demand surge in ${item.city} driven by ${item.signal_event} with high contractor need`
-      : `${item.name} is actively advertising ${item.trade} in ${item.city} with evident lead response gaps`,
+      : `${item.name} is a discovered ${item.trade} business in ${item.city}; lead-response pain is not yet established`,
     what_evidence_exists: observed_facts,
-    why_it_matters: "Every missed call or slow estimate follow-up redirects high-margin jobs to prompt competitors.",
+    why_it_matters: "Unanswered inquiries can cost service businesses opportunities, but this prospect's loss volume has not been verified.",
     why_now: item.signal_event 
       ? `Event window is live right now; immediate automated outreach produces peak response rates.`
-      : `High contactability and verifiable pain signal create an optimal window for high-relevance outreach.`,
-    recommended_action: "Dispatch personalized outreach with interactive demo illustrating automated instant-response recovery.",
-    potential_economic_result: `$${estimatedMonthlyRecoveredValue} estimated monthly recovered jobs (${expected_value} EV)`,
+      : `No time-sensitive pain has been verified; qualify the business before making a recovery claim.`,
+    recommended_action: "Keep visible, enrich contact details and qualify potential fit without asserting a problem.",
+    potential_economic_result: expected_value === null ? "N/D — no observed loss signal to model yet" : `Modeled opportunity: ${expected_value}; not verified revenue`,
     distinctions: {
       observed_facts,
       inferences,
@@ -9168,11 +9142,19 @@ export function calculateMultiFactorScore(
     if (item.website && isRealWebsite(item.website)) contact += 6;
     contact = Math.min(30, contact);
     breakdownT.contactability = contact;
-    tenantScore += contact;
 
-    // Commercial opportunity / multi-unit signal (0-20)
-    let commercial = 5;
-    if (/llc|inc|corp|group|partners|properties|management|associates/i.test(nameLower)) commercial += 6;
+    // Operational scale / buyer structure (0-30), independent of contact channel.
+    let operationalScale = 0;
+    if (/property|management|manager|hoa|apartment|condo|facility|realty|real estate|hotel|motel|resort/i.test(haystack)) operationalScale += 12;
+    if (signals.multiple_areas) operationalScale += 8;
+    if (item.source === "permits") operationalScale += 5;
+    if (item.website && isRealWebsite(item.website)) operationalScale += 5;
+    operationalScale = Math.min(30, operationalScale);
+    breakdownT.operational_scale = operationalScale;
+    tenantScore += operationalScale;
+
+    // Commercial opportunity / local and observed activity (0-20)
+    let commercial = 4;
     if (isPriorityCity) commercial += 5;
     if (item.source === "permits") commercial += 6;
     const pairKey = `pair:${item.city}|${tradeLower}`;
@@ -9194,7 +9176,8 @@ export function calculateMultiFactorScore(
     tenantScore += evidence;
 
     tenantScore = Math.min(100, Math.max(0, Math.round(tenantScore)));
-    const confidence = Math.min(100, 40 + (email ? 20 : 0) + (phone ? 15 : 0) + (item.website ? 15 : 0) + (isEmailValidated ? 10 : 0));
+    const detectedTenantSignals = [signals.contact_form, signals.lead_capture, signals.quote_request, signals.multiple_areas].filter(Boolean).length;
+    const confidence = Math.min(100, 30 + detectedTenantSignals * 15 + (item.website && isRealWebsite(item.website) ? 10 : 0));
 
     return {
       totalScore: tenantScore,
@@ -9209,7 +9192,7 @@ export function calculateMultiFactorScore(
 
   // --- FOUNDER MODE: 6-COMPONENT FORMULA (contractors who need Bvelt) ---
   
-  // No real website / only social = high pain for Founder (leads die on voicemail)
+  // Website presence is a channel/evidence fact, not proof of customer leakage.
   const webLower = String(item.website || "").toLowerCase();
   const isSocialOnlySite = !!webLower && (
     /facebook\.com|fb\.com|instagram\.com|linktr\.ee|bit\.ly|business\.site|wixsite\.com/i.test(webLower)
@@ -9221,35 +9204,33 @@ export function calculateMultiFactorScore(
 
   // 1. Need Evidence (0 - 30 pts)
   let needEvidenceScore = 0;
-  if (signals.sms_gap) needEvidenceScore += 12;
-  if (!signals.booking) needEvidenceScore += 8;
-  if (!signals.quote_request && !signals.estimate_language) needEvidenceScore += 8;
-  if (signals.emergency && signals.sms_gap) needEvidenceScore += 4;
-  if (phone && !email) needEvidenceScore += 4;
-  // +12 "Sin web propia" — do NOT discard; these are high-fit Bvelt leads
-  if (hasNoRealWebsite) needEvidenceScore += 12;
+  if (signals.sms_gap) needEvidenceScore += 10;
+  if (signals.missed_calls || signals.missed_call_evidence) needEvidenceScore += 10;
+  if (signals.emergency) needEvidenceScore += 5;
+  if (signals.quote_request || signals.estimate_language) needEvidenceScore += 5;
+  // Missing website/booking/quote/channel observations remain UNKNOWN, not pain.
   needEvidenceScore = Math.min(30, Math.max(0, needEvidenceScore));
 
   // 2. Bvelt Fit (0 - 20 pts)
   let bveltFitScore = 0;
   const isPreferred = PREFERRED_TRADES.has(tradeLower) ||
     /hvac|plumb|electr|roof|lawn|landscap|pool|clean|handyman/i.test(tradeLower);
-  if (isPreferred) bveltFitScore += 15;
-  const isIndependent = /brothers|sons|family|llc|services|pro|tech|contracting|group|co\b/i.test(item.name || "");
-  if (isIndependent) bveltFitScore += 5;
+  if (isPriorityTrade) bveltFitScore += 15;
+  else if (isPreferred) bveltFitScore += 10;
+  if (signals.multiple_areas) bveltFitScore += 5;
   bveltFitScore = Math.min(20, Math.max(0, bveltFitScore));
 
   // 3. Timing (0 - 15 pts)
   let timingScore = 0;
   if (item.signal_event) timingScore += 8;
-  const isHiring = /hiring|career|join our team|empleo|trabaja con nosotros/i.test(item.name || "") || !!signals.specific_landing_pages;
+  const isHiring = /hiring|career|join our team|empleo|trabaja con nosotros/i.test(item.name || "") || signals.hiring === true;
   if (isHiring) timingScore += 7;
-  if (isPreferred) timingScore += 5;
   timingScore = Math.min(15, Math.max(0, timingScore));
 
   // 4. Commercial Value (0 - 15 pts)
   let commercialValueScore = 0;
   if (isPriorityCity) commercialValueScore += 10;
+  if (isPriorityTrade) commercialValueScore += 1;
   const tradeKey = `trade:${tradeLower}`;
   const winRate = learningStats[tradeKey] || 0;
   if (winRate > 0.6) commercialValueScore += 5;
@@ -9279,12 +9260,12 @@ export function calculateMultiFactorScore(
     }
     evidenceItems.push({
       signal_type: type,
-      value: isDetected ? 'detected' : 'not_detected',
+      value: isDetected ? 'detected' : 'not_observed',
       source_url: item.website || "local_db",
       source_type: item.website ? 'website_scrape' : 'directory_claim',
       observed_at: new Date().toISOString(),
       evidence_text: isDetected ? text : `No signals of ${type} found.`,
-      confidence: conf,
+      confidence: isDetected ? conf : 0,
       freshness: 1.0,
       page_type: 'homepage'
     });
@@ -9299,19 +9280,15 @@ export function calculateMultiFactorScore(
   addEvidence('service_area_expansion', !!signals.multiple_areas, "Multiple service areas detected.");
 
   const detectedCount = evidenceItems.filter(e => e.value === 'detected').length;
-  let evidenceConfidenceScore = 6.5;
-  if (detectedCount > 0) {
-    evidenceConfidenceScore = Math.min(10, 6.5 + (detectedCount * 0.7));
-  }
+  let evidenceConfidenceScore = detectedCount > 0
+    ? Math.min(10, detectedCount * 1.5)
+    : 0;
   evidenceConfidenceScore = Math.min(10, Math.max(0, evidenceConfidenceScore));
 
-  const totalScore = Math.round(needEvidenceScore + bveltFitScore + timingScore + commercialValueScore + contactabilityNew + evidenceConfidenceScore);
+  const totalScore = Math.round(needEvidenceScore + bveltFitScore + timingScore + commercialValueScore + evidenceConfidenceScore);
 
   // Separate confidence score (0-100)
-  let confidenceScore = 50;
-  if (email && isEmailValidated) confidenceScore += 25;
-  else if (email) confidenceScore += 15;
-  if (phone) confidenceScore += 15;
+  let confidenceScore = 30 + detectedCount * 12;
   if (item.website && isRealWebsite(item.website)) confidenceScore += 10;
   confidenceScore = Math.min(100, Math.max(0, confidenceScore));
 
@@ -9355,7 +9332,6 @@ export function calculateMultiFactorScore(
   let legacyCommercial = 0;
   if (isPriorityCity) legacyCommercial += 5;
   if (isPriorityTrade || isPreferred) legacyCommercial += 5;
-  if (isIndependent) legacyCommercial += 2;
   if (winRate > 0.6) legacyCommercial += 3;
   else if (winRate > 0.3) legacyCommercial += 1;
 
@@ -9384,13 +9360,13 @@ export function calculateMultiFactorScore(
 
   const painHypothesis: Record<string, string> = {};
   if (signals.sms_gap) {
-    painHypothesis.sms_gap = "The business has a prominent phone number but no option to text or SMS. Up to 60% of consumers prefer text over voice calls, leading to potential drop-off of mobile visitors.";
+    painHypothesis.sms_gap = "A phone-first contact path was observed without a corresponding text/SMS option on the reviewed page; customer preference and lost-lead impact are not verified.";
   }
-  if (!signals.booking) {
-    painHypothesis.booking_gap = "Lacks self-service online scheduling. Busy professionals are forced to call during business hours, resulting in missed appointment opportunities.";
+  if (signals.missed_calls || signals.missed_call_evidence) {
+    painHypothesis.missed_call_evidence = "Observed missed-call or unanswered-call evidence was recorded.";
   }
-  if (!signals.quote_request && !signals.estimate_language) {
-    painHypothesis.quote_gap = "Requires manual back-and-forth for estimates. 50% of consumers choose the speediest contractor; manual followups risk losing leads to instant-responders.";
+  if (signals.quote_request || signals.estimate_language) {
+    painHypothesis.quote_flow_observed = "An online quote or estimate workflow was observed; follow-up performance is not established.";
   }
 
   const strat = calculateStrategicScores(
@@ -11063,7 +11039,7 @@ export function buildAttackKit(p: any): {
   const city = String(p.city || "");
   const isTenantLead = p.mode === 'tenant' || (p.tenant_id && p.tenant_id !== 'founder');
 
-  // 1. Off-ICP and Trade Coherence Hard Gate (Barbers, Salons, etc. CANNOT get SMS)
+  // 1. Preserve valid businesses; correct stale category labels instead of excluding them.
   const coherence = checkTradeCoherence(
     name,
     String(p.trade || ''),
@@ -11148,7 +11124,7 @@ export function buildAttackKit(p: any): {
     (angleHint === "missed_calls" && (signals.missed_call_verified || signals.unanswered_call))
   );
 
-  let selectedAngle: 'weather_surge' | 'stale_quotes' | 'no_sms' | 'missed_calls' | null = null;
+  let selectedAngle: 'weather_surge' | 'stale_quotes' | 'no_sms' | 'missed_calls' | 'general_intro' | null = null;
   if (hasWeatherSignal) {
     selectedAngle = 'weather_surge';
   } else if (hasQuoteSignal) {
@@ -11159,24 +11135,14 @@ export function buildAttackKit(p: any): {
     selectedAngle = 'missed_calls';
   }
 
-  if (!selectedAngle) {
-    return {
-      prospect_id: String(p.id || ""),
-      name,
-      why_this_lead: `DO NOT CONTACT: no verified friction or observable evidence for outreach angle`,
-      email: { subject: "", body: "" },
-      sms: "",
-      call_script: "- DO NOT CONTACT: No verified friction or observable evidence for outreach angle.",
-      next_action: "DO_NOT_CONTACT — no evidence for angle",
-      angle: "no_evidence"
-    };
-  }
+  if (!selectedAngle) selectedAngle = "general_intro";
 
   const reasons: string[] = [];
   if (selectedAngle === "weather_surge") reasons.push("señal climática/demanda: " + String(p.signal_event || "alerta meteorológica"));
   else if (selectedAngle === "stale_quotes") reasons.push("señal de solicitud de presupuesto/estimación");
   else if (selectedAngle === "no_sms") reasons.push("señal de limitación del canal escrito");
-  else reasons.push("señal verificada relacionada con atención de llamadas para " + tradeLabel + " en " + city);
+  else if (selectedAngle === "missed_calls") reasons.push("señal verificada relacionada con atención de llamadas para " + tradeLabel + " en " + city);
+  else reasons.push("presentación comercial neutral; no se ha observado un problema específico.");
 
   const why = name + " en " + city + " (" + tradeLabel + "): " + reasons.join("; ") + ".";
   const question = selectedAngle === "weather_surge" && p.signal_event
@@ -11185,7 +11151,9 @@ export function buildAttackKit(p: any): {
       ? "Preguntar cómo dan seguimiento a una solicitud de presupuesto concreta."
       : selectedAngle === "no_sms"
         ? "Preguntar qué canal escrito prefieren sus clientes."
-        : "Preguntar cómo retoman una consulta cuando el equipo no puede responder una llamada.";
+        : selectedAngle === "missed_calls"
+          ? "Preguntar cómo retoman una consulta cuando el equipo no puede responder una llamada."
+          : "Preguntar cómo reciben y organizan actualmente las consultas de nuevos clientes.";
 
   const call_script = "- Una sola pregunta: " + question + "\n- Explicar únicamente la capacidad verificada de Bvelt: organizar el seguimiento de consultas de clientes.\n- No solicitar listas de presupuestos, inventarios de cotizaciones ni auditorías en el primer contacto.";
   const next = "Generar y revisar un mensaje IA contextual antes de abrir un canal.";
@@ -12141,37 +12109,37 @@ async function scrapeWebsiteContact(url: string): Promise<{
 /**
  * Hunter.io Domain Search (Email finder)
  */
-async function fetchHunterEmail(domain: string, apiKey: string): Promise<string | null> {
-  const url = `https://api.hunter.io/v2/domain-search?domain=${encodeURIComponent(domain)}&api_key=${apiKey}`;
-  const res = await fetch(url, { signal: AbortSignal.timeout(6000) });
-  if (!res.ok) return null;
-  const body: any = await res.json();
-  const emails: any[] = body.data?.emails || [];
-  if (!emails.length) return null;
-
+export function selectHunterDomainEmail(emails: any[]): string | null {
+  if (!Array.isArray(emails) || !emails.length) return null;
   // Prefer higher confidence; prefer personal over generic contact@
   const scored = emails
     .map((e: any) => {
-      const value = String(e.value || "").toLowerCase();
-      const conf = typeof e.confidence === "number" ? e.confidence : 0;
+      const value = String(e?.value || "").toLowerCase();
+      const conf = typeof e?.confidence === "number" ? e.confidence : 0;
       const local = value.split("@")[0] || "";
       const isContact = /^(contact|admin|office|mail|webmaster)$/i.test(local);
       const isInfo = /^(info|hello|hi|support|sales)$/i.test(local);
-      const isPersonal = e.type === "personal" || (local.includes(".") && !isContact);
+      const isPersonal = e?.type === "personal" || (local.includes(".") && !isContact);
       let rank = conf;
       if (isPersonal) rank += 15;
       if (isInfo) rank += 5;
-      if (isContact) rank -= 25; // contact@ drives permanent bounces
-      return { value: e.value as string, conf, rank };
+      if (isContact) rank -= 25;
+      return { value: e?.value as string, conf, rank };
     })
-    .filter((e: any) => e.conf >= 40 || e.rank >= 50)
+    .filter((e: any) => e.value && (e.conf >= 40 || e.rank >= 50))
     .sort((a: any, b: any) => b.rank - a.rank);
-
   if (!scored.length) return null;
-  // Absolute floor: confidence 50+ preferred; allow 40+ only if personal-shaped
   const pick = scored.find((e: any) => e.conf >= 50) || scored[0];
-  if (pick.conf < 40) return null;
-  return pick.value;
+  return pick.conf >= 40 ? pick.value : null;
+}
+
+async function fetchHunterEmail(domain: string, apiKey: string): Promise<{ email: string | null; requestSucceeded: boolean }> {
+  const url = `https://api.hunter.io/v2/domain-search?domain=${encodeURIComponent(domain)}&api_key=${apiKey}`;
+  const res = await fetch(url, { signal: AbortSignal.timeout(6000) });
+  if (!res.ok) return { email: null, requestSucceeded: false };
+  const body: any = await res.json();
+  // A successful no-match response still consumed a provider request/credit.
+  return { email: selectHunterDomainEmail(body.data?.emails || []), requestSucceeded: true };
 }
 
 /**
@@ -12197,6 +12165,51 @@ export function isVerifiedDeliverableEmail(
     && Number(qualityScore) >= 0.7
     && !isDisposable
     && !isCatchall;
+}
+
+export type FounderEmailPolicyStatus = "SEND_ALLOWED" | "OWNER_REVIEW" | "CONSENT_REQUIRED" | "SUPPRESSED" | "POLICY_UNKNOWN";
+
+export function resolveFounderEmailPolicy(prospect: any): { status: FounderEmailPolicyStatus; country: string | null; reason: string } {
+  const meta = (() => {
+    try { return typeof prospect?.signals_json === "string" ? JSON.parse(prospect.signals_json || "{}") : (prospect?.signals_json || {}); }
+    catch { return {}; }
+  })();
+  const raw = String(prospect?.country_code || prospect?.country || meta.country_code || meta.country || "").trim().toUpperCase();
+  const location = String(prospect?.city || prospect?.location || "").trim().toUpperCase();
+  const tail = location.split(",").map((part: string) => part.trim()).filter(Boolean).slice(-1)[0] || "";
+  const usStates = new Set("AL AK AZ AR CA CO CT DE FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN MS MO MT NE NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY DC".split(" "));
+  const caProvinces = new Set("AB BC MB NB NL NS NT NU ON PE QC SK YT".split(" "));
+  const ukRegions = new Set(["ENGLAND", "SCOTLAND", "WALES", "NORTHERN IRELAND"]);
+  const auRegions = new Set("NSW VIC QLD SA WA TAS NT ACT".split(" "));
+  let country = raw;
+  if (!country) {
+    if (usStates.has(tail)) country = "US";
+    else if (caProvinces.has(tail)) country = "CA";
+    else if (ukRegions.has(tail)) country = "GB";
+    else if (auRegions.has(tail)) country = "AU";
+  }
+  if (["US", "USA", "UNITED STATES", "UNITED STATES OF AMERICA"].includes(country)) {
+    return { status: "SEND_ALLOWED", country: "US", reason: "US commercial email may be sent without prior opt-in when CAN-SPAM sender, content and opt-out requirements are met." };
+  }
+  const recipientType = String(prospect?.recipient_type || meta.recipient_type || "").toLowerCase();
+  const sourcePublished = Boolean(meta.email_source_url || meta.email_source || meta.email_published_publicly === true);
+  const roleRelevant = meta.email_role_relevant === true || meta.role_relevant === true;
+  const basis = String(meta.email_lawful_basis || meta.consent_basis || "").toLowerCase();
+  if (["GB", "UK", "UNITED KINGDOM"].includes(country)) {
+    if (["corporate", "company", "limited_company", "llp"].includes(recipientType)) {
+      return { status: "SEND_ALLOWED", country: "GB", reason: "Corporate subscriber classified; sender identity and working opt-out remain required." };
+    }
+    return { status: "OWNER_REVIEW", country: "GB", reason: "Subscriber type is not confirmed as corporate; sole traders and some partnerships have different PECR treatment." };
+  }
+  if (["CA", "CANADA", "AU", "AUSTRALIA", "NZ", "NEW ZEALAND"].includes(country)) {
+    const hasBasis = ["express_consent", "implied_consent", "existing_business_relationship", "published_business_contact"].includes(basis);
+    if (hasBasis && sourcePublished && roleRelevant) {
+      return { status: "SEND_ALLOWED", country: country.startsWith("A") ? "AU" : country.startsWith("N") ? "NZ" : "CA", reason: "Documented lawful basis and role-relevant public business contact recorded." };
+    }
+    return { status: "CONSENT_REQUIRED", country: country.startsWith("A") ? "AU" : country.startsWith("N") ? "NZ" : "CA", reason: "A valid consent or other applicable lawful basis must be recorded before dispatch." };
+  }
+  if (!country) return { status: "POLICY_UNKNOWN", country: null, reason: "Country is not established; owner review is required." };
+  return { status: "OWNER_REVIEW", country, reason: "Country-specific B2B electronic marketing rules are not yet classified in Radar." };
 }
 
 export function isEmailValidatedForOutreach(signals: unknown): boolean {
@@ -13338,16 +13351,27 @@ export function checkTradeCoherence(
   }
 
   const inferred = inferTradeFromTextDetailed(name, tags || '', website || '');
-  if (inferred.isNonHomeService) {
+  if (inferred.isNonHomeService && mode === "tenant") {
     return {
       coherent: false,
       verifiedTrade: null,
-      reason: `non_home_service: clues indicate off-ICP`,
+      reason: `non_home_service: outside this tenant's configured buyer/service universe`,
       disqualified: true
     };
   }
 
   const normDeclared = (declaredTrade || '').toLowerCase().replace(/[\s-]+/g, '_');
+
+  // A stale directory category must not erase a real business. When no
+  // high-confidence replacement exists, preserve it under a neutral trade label.
+  if (isCategoryNameMismatch(name, declaredTrade) && inferred.confidence !== "high") {
+    return {
+      coherent: true,
+      verifiedTrade: inferred.trade !== "general" ? inferred.trade : "local_service_business",
+      reason: "category_mismatch_retained_for_owner_review",
+      disqualified: false
+    };
+  }
 
   // If text clues give a specific trade with high confidence
   if (inferred.confidence === 'high' && inferred.trade !== 'general') {

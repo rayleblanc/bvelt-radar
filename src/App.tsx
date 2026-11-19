@@ -421,9 +421,12 @@ export default function App() {
 
       // Founder mode never sends tenant_id (backend defaults to founder).
       // Tenant mode always scopes to the selected tenant — isolation is strict.
-      const queryParam = isTenantMode
-        ? `?tenant_id=${encodeURIComponent(selectedTenantId)}`
-        : '';
+      const prospectQuery = new URLSearchParams();
+      if (isTenantMode) prospectQuery.set('tenant_id', selectedTenantId);
+      // READY is backed by the persisted approved queue, not merely the latest 100 records.
+      // The API already scopes this status by tenant and returns contactability per row.
+      if (activeFilter === 'READY') prospectQuery.set('status', 'approved');
+      const queryParam = prospectQuery.toString() ? `?${prospectQuery.toString()}` : '';
 
       // 3. GET /prospects
       let prospectsRes = await fetch(`${apiUrl}/prospects${queryParam}`, {
@@ -548,10 +551,10 @@ export default function App() {
     return () => window.removeEventListener('beforeinstallprompt', handleInstallPrompt);
   }, [apiUrl]);
 
-  // Refetch telemetry on mode or tenant change
+  // Refetch the prospect work queue when its server-side category scope changes.
   useEffect(() => {
     fetchTelemetry();
-  }, [currentMode, selectedTenantId]);
+  }, [currentMode, selectedTenantId, activeFilter]);
 
   // Handle manual API config updates
   const saveApiSettings = (urlVal: string) => {
@@ -646,14 +649,15 @@ export default function App() {
     }
   };
 
-const submitDecision = async (prospectId: string, action: string) => {
+const submitDecision = async (prospectId: string, action: string, ownerLawfulBasisConfirmed = false) => {
     try {
       const isTenantMode = currentMode === 'tenant';
       const payload: any = {
         id: prospectId,
         action,
         prospect_id: prospectId,
-        event_type: action
+        event_type: action,
+        owner_lawful_basis_asserted: ownerLawfulBasisConfirmed
       };
       if (isTenantMode && selectedTenantId && selectedTenantId !== 'founder') {
         payload.tenant_id = selectedTenantId;
@@ -1531,9 +1535,9 @@ const submitDecision = async (prospectId: string, action: string) => {
                       const activeKitForProspect = attackKits[p.id] || p.attack_kit;
                       const hasVerifiedOutreachAngle = currentMode === 'tenant'
                         ? activeKitForProspect?.angle === 'tenant_b2b_service'
-                        : ['weather_surge', 'stale_quotes', 'no_sms', 'missed_calls'].includes(activeKitForProspect?.angle);
+                        : ['weather_surge', 'stale_quotes', 'no_sms', 'missed_calls', 'general_intro'].includes(activeKitForProspect?.angle);
                       const canOpenDirectChannel = Boolean(contactability?.commercial_prospect && contactability.contact_available && hasVerifiedOutreachAngle);
-      const canSendEmail = Boolean(contactability?.commercial_prospect && contactability.send_authorized && emailRecipient && isVerifiedEmailRecipient(p));
+      const canSendEmail = Boolean(contactability?.commercial_prospect && contactability.send_authorized && emailRecipient);
                       // A prepared Founder WhatsApp draft is already human-reviewed for this channel.
                       // Opening wa.me is still only a manual handoff; it does not prove account or opt-in.
                       const canOpenWhatsApp = canOpenDirectChannel || (isPreparedWhatsAppDraft && hasDirectWhatsAppRecipient(p.phone));
@@ -1630,7 +1634,7 @@ const submitDecision = async (prospectId: string, action: string) => {
                                 className="px-2.5 py-1 rounded-lg bg-blue-950/50 border border-blue-800/40 text-blue-300 hover:bg-blue-900/60 flex items-center gap-1 font-bold"
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  if (window.confirm(`¿Enviar ahora el correo preparado a ${emailRecipient} mediante el proveedor configurado?`)) void submitDecision(p.id, 'approve');
+                                  if (window.confirm(`¿Enviar el correo a ${emailRecipient}? Confirma que tienes una base legal aplicable para este destinatario. Si el buzón no está verificado por proveedor, el riesgo de rebote es mayor.`)) void submitDecision(p.id, 'approve', true);
                                 }}
                               >
                                 <Mail className="w-3.5 h-3.5 text-blue-400" />
@@ -1865,14 +1869,18 @@ const submitDecision = async (prospectId: string, action: string) => {
                                       </button>
                                     ) : !isValidEmailRecipient(p.email) ? (
                                       <button disabled className="h-10 px-2 rounded-lg bg-slate-900 border border-slate-800 text-slate-500 text-[10px] font-bold">SIN EMAIL VÁLIDO</button>
-                                    ) : !isVerifiedEmailRecipient(p) ? (
-                                      <button disabled className="h-10 px-2 rounded-lg bg-amber-950/30 border border-amber-900/40 text-amber-400 text-[10px] font-bold">EMAIL SIN VERIFICAR</button>
                                     ) : (
                                       <button
-                                        onClick={() => submitDecision(p.id, 'sent')}
+                                        onClick={() => {
+                                          const verified = isVerifiedEmailRecipient(p);
+                                          const warning = verified
+                                            ? `¿Enviar el correo a ${p.email}? Confirma que tienes una base legal aplicable.`
+                                            : `El correo ${p.email} tiene sintaxis válida, pero no está verificado por proveedor. ¿Confirmas que tienes una base legal aplicable y aceptas el mayor riesgo de rebote?`;
+                                          if (window.confirm(warning)) void submitDecision(p.id, 'sent', true);
+                                        }}
                                         className="h-10 text-xs font-semibold rounded-lg bg-emerald-600/20 border border-emerald-500/20 text-emerald-400 hover:bg-emerald-600 hover:text-white transition-colors"
                                       >
-                                        ✓ Enviar (Lock)
+                                        ✓ Enviar correo
                                       </button>
                                     )}
                                     <button
