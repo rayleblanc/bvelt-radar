@@ -2738,9 +2738,9 @@ tests.push({
       })
     };
     const bareKit = buildAttackKit(bareProspect);
-    assert(bareKit.angle === "no_evidence", "Bare phone/form must not invent missed_calls; angle should be no_evidence");
+    assert(bareKit.angle === "general_intro", "Bare phone/form must use a neutral intro, not invent missed_calls or block contact");
     assert(bareKit.sms === "", "No SMS should be generated without verified friction");
-    assert(bareKit.next_action.includes("DO_NOT_CONTACT"), "Next action must be DO_NOT_CONTACT");
+    assert(!bareKit.next_action.includes("DO_NOT_CONTACT"), "No friction evidence must not block a neutral first contact");
 
     // 2. Candidate with VERIFIED missed call friction -> missed_calls angle
     const verifiedMissedCallProspect = {
