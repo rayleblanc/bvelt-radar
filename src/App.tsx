@@ -651,7 +651,7 @@ export default function App() {
     }
   };
 
-const submitDecision = async (prospectId: string, action: string, ownerLawfulBasisConfirmed = false) => {
+const submitDecision = async (prospectId: string, action: string, ownerManualApprovalConfirmed = false) => {
     try {
       const isTenantMode = currentMode === 'tenant';
       const payload: any = {
@@ -659,7 +659,7 @@ const submitDecision = async (prospectId: string, action: string, ownerLawfulBas
         action,
         prospect_id: prospectId,
         event_type: action,
-        owner_lawful_basis_asserted: ownerLawfulBasisConfirmed
+        owner_manual_approval_asserted: ownerManualApprovalConfirmed
       };
       if (isTenantMode && selectedTenantId && selectedTenantId !== 'founder') {
         payload.tenant_id = selectedTenantId;
@@ -1884,8 +1884,8 @@ const submitDecision = async (prospectId: string, action: string, ownerLawfulBas
                                         onClick={() => {
                                           const verified = isVerifiedEmailRecipient(p);
                                           const warning = verified
-                                            ? `¿Enviar el correo a ${p.email}? Confirma que tienes una base legal aplicable.`
-                                            : `El correo ${p.email} tiene sintaxis válida, pero no está verificado por proveedor. ¿Confirmas que tienes una base legal aplicable y aceptas el mayor riesgo de rebote?`;
+                                            ? `¿Enviar el correo a ${p.email}? Acción manual: has revisado el contacto. ¿Continuar?`
+                                            : `El correo ${p.email} tiene sintaxis válida, pero no está verificado por proveedor y puede rebotar. ¿Enviar de todas formas?`;
                                           if (window.confirm(warning)) void submitDecision(p.id, 'sent', true);
                                         }}
                                         className="h-10 text-xs font-semibold rounded-lg bg-emerald-600/20 border border-emerald-500/20 text-emerald-400 hover:bg-emerald-600 hover:text-white transition-colors"
