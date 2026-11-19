@@ -1184,7 +1184,7 @@ export default {
           }, { status: result.success ? 200 : 409, headers: corsHeaders });
         }
 
-        return await handleDecision(id, action, notes, env, corsHeaders);
+        return await handleDecision(id, action, notes, env, corsHeaders, body.owner_lawful_basis_asserted === true);
       }
 
       // 7. Manual Suppression Addition
@@ -4677,11 +4677,12 @@ async function recordManualWhatsAppSent(prospectId: string, env: Env): Promise<{
  * Handle Prospect Decision (sent | discard | suppress) & Record Learning Feedback
  */
 async function handleDecision(
-  id: string, 
-  action: string, 
-  notes: string | undefined, 
-  env: Env, 
-  headers: Record<string, string>
+  id: string,
+  action: string,
+  notes: string | undefined,
+  env: Env,
+  headers: Record<string, string>,
+  ownerLawfulBasisAsserted = false
 ): Promise<Response> {
   const db = env.RADAR_DB;
   
@@ -4693,6 +4694,14 @@ async function handleDecision(
   const timestamp = new Date().toISOString();
 
   if (action === "sent" || action === "approve") {
+    if (!ownerLawfulBasisAsserted) {
+      return Response.json({
+        success: false,
+        blocked: true,
+        reason: "owner_lawful_basis_confirmation_required",
+        message: "Confirma que existe una base legal aplicable para contactar a este destinatario antes de enviar."
+      }, { status: 409, headers });
+    }
     const preflightError = getManualSendPreflightError(prospect);
     if (preflightError) {
       return Response.json({
@@ -4819,7 +4828,8 @@ async function handleDecision(
         await db.prepare("INSERT INTO prospect_events (id, prospect_id, event_type, content, created_at) VALUES (?, ?, ?, ?, ?)")
           .bind("msg_" + crypto.randomUUID(), id, "message_send_authorized", JSON.stringify({
             channel: "email", authorization: "explicit_user_action",
-            owner_lawful_basis_asserted: true,
+            owner_lawful_basis_asserted: ownerLawfulBasisAsserted,
+            email_policy: resolveFounderEmailPolicy(prospect).status,
             deliverability_override: !providerVerified,
             deliverability_state: providerVerified ? "provider_verified" : "syntax_and_mx_only",
             mode: prospect.mode || "founder", tenant_id: prospect.tenant_id || "founder"
