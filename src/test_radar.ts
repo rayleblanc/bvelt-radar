@@ -1,7 +1,7 @@
 declare const process: any;
 import { resolveGithubActionsToken } from './research/githubActions';
 
-import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey, notifyOnce, isVerifiedDeliverableEmail, evaluateFounderOutreachEligibility, buildTechnicalAuditSnapshot, isEmailValidatedForOutreach, isCompletePostalAddress, sendTelegramWithRetry, extractEmailAddress, evaluateResearchEvidenceQuality, classifyReplyText, getTelegramApprovalFeedback, getManualSendPreflightError, hasAIGenerationProvider, WORKERS_AI_FALLBACK_MODEL, extractWorkersAiText, resolveProspectContactability, buildProspectEvidenceContext, buildScheduledRunId, getCurrentDaySenderCount, normalizeWhatsAppPhone, extractPhoneDigits, hasUsableContactChannel, hasEnrichableContactData, buildWhatsAppClickToChatUrl, buildWhatsAppOutreachBody, shouldUseManualWhatsAppFallback, isDiscoveryInfrastructureFailure, hasConfirmedWhatsAppOptIn, isValidWhatsAppConsentEvidenceRef, normalizeGeneratedMessage, selectHunterDomainEmail } from './worker';
+import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey, notifyOnce, isVerifiedDeliverableEmail, evaluateFounderOutreachEligibility, buildTechnicalAuditSnapshot, isEmailValidatedForOutreach, isCompletePostalAddress, sendTelegramWithRetry, extractEmailAddress, evaluateResearchEvidenceQuality, classifyReplyText, getTelegramApprovalFeedback, getManualSendPreflightError, hasAIGenerationProvider, WORKERS_AI_FALLBACK_MODEL, extractWorkersAiText, resolveProspectContactability, buildProspectEvidenceContext, buildScheduledRunId, getCurrentDaySenderCount, normalizeWhatsAppPhone, extractPhoneDigits, hasUsableContactChannel, hasEnrichableContactData, buildWhatsAppClickToChatUrl, buildWhatsAppOutreachBody, shouldUseManualWhatsAppFallback, isDiscoveryInfrastructureFailure, hasConfirmedWhatsAppOptIn, isValidWhatsAppConsentEvidenceRef, normalizeGeneratedMessage, selectHunterDomainEmail, recordRunFinalization } from './worker';
 import { DEFAULT_FOUNDER_MISSION, MissionConfig } from './worker';
 import { buildResendIdempotencyKey, buildBrandedEmailHtml, resolveBveltSender, inspectOutboundEmailAuth, normalizeOutreachBody } from './emailDispatcher';
 import { fetchPermitContractors } from './permitSources';
@@ -29,6 +29,43 @@ function assert(condition: boolean, message: string) {
     throw new Error(message);
   }
 }
+
+tests.push({
+  name: "Run finalization and AI draft metrics are idempotent across queue retries",
+  run: async () => {
+    const inserted = new Set<string>();
+    const updates: string[] = [];
+    const db: any = {
+      prepare(sql: string) {
+        return {
+          bind(...args: any[]) {
+            return {
+              async run() {
+                if (sql.includes("INSERT OR IGNORE INTO prospect_events")) {
+                  const id = String(args[0]);
+                  const changes = inserted.has(id) ? 0 : 1;
+                  inserted.add(id);
+                  return { meta: { changes } };
+                }
+                if (sql.includes("UPDATE runs SET finalized")) updates.push("finalized");
+                if (sql.includes("UPDATE runs SET ai_calls")) updates.push("ai_calls");
+                return { meta: { changes: 1 } };
+              }
+            };
+          }
+        };
+      }
+    };
+    const first = await recordRunFinalization(db, "run-1", "prospect-1", "whatsapp", "groq");
+    const retry = await recordRunFinalization(db, "run-1", "prospect-1", "whatsapp", "groq");
+    assert(first && !retry, "The first successful draft must count; a queue retry must not count it again");
+    assert(updates.filter(value => value === "finalized").length === 1, "Finalized count must increment once");
+    assert(updates.filter(value => value === "ai_calls").length === 1, "AI draft count must increment once");
+    await recordRunFinalization(db, "run-1", "prospect-2", "email", "template");
+    assert(updates.filter(value => value === "finalized").length === 2, "Template fallback still counts as a finalized draft");
+    assert(updates.filter(value => value === "ai_calls").length === 1, "Template fallback must not count as an AI-generated draft");
+  }
+});
 
 tests.push({
   name: "Hunter no-match responses are distinguished from missing/invalid contacts",
