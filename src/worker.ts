@@ -4550,6 +4550,13 @@ export function isOutreachPauseBlocking(mode: unknown, tenantId: unknown, pauseV
   return !isFounder;
 }
 
+/** Manual Founder approvals are owner-controlled; Tenant and automated sends retain the shared governor. */
+export function isFounderManualDispatch(mode: unknown, tenantId: unknown): boolean {
+  const normalizedMode = String(mode ?? "").trim().toLowerCase();
+  const normalizedTenant = String(tenantId ?? "").trim().toLowerCase();
+  return normalizedMode !== "tenant" && (!normalizedTenant || normalizedTenant === "founder");
+}
+
 export function buildProspectEvidenceContext(prospect: any): string {
   const parse = (value: any): any => {
     if (!value) return {};
@@ -4827,9 +4834,10 @@ async function handleDecision(
         }, { status: 400, headers });
       }
 
-      // Manual Telegram approval is still subject to the same sender governor
-      // and daily outreach budget as autonomous dispatch. Approval is not a cap bypass.
-      if (manualHasLiveProvider) {
+      // Owner-confirmed Founder sends are manual actions, not autonomous campaign volume.
+      // Tenant manual sends remain subject to the shared sender governor and tenant budget.
+      const founderManualDispatch = isFounderManualDispatch(prospect.mode, prospect.tenant_id);
+      if (manualHasLiveProvider && !founderManualDispatch) {
         const manualGovernor = await checkSenderGovernor(env);
         if (!manualGovernor.allowed) {
           await db.prepare("UPDATE prospects SET status = 'held', outcome = 'sender_governor_limit', updated_at = ? WHERE id = ?")
@@ -4947,6 +4955,8 @@ async function handleDecision(
     if (manualBudgetReserved) {
       await incrementSenderSends(db);
       await commitBudget(db, manualTenantId, 'outreach_units', 1);
+    }
+    if (manualHasLiveProvider) {
       try {
         await db.prepare("UPDATE daily_missions SET outreach_count = outreach_count + 1 WHERE tenant_id = ? AND day = ?")
           .bind(manualTenantId, new Date().toISOString().slice(0, 10)).run();
