@@ -1,7 +1,7 @@
 declare const process: any;
 import { resolveGithubActionsToken } from './research/githubActions';
 
-import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey, notifyOnce, isVerifiedDeliverableEmail, evaluateFounderOutreachEligibility, buildTechnicalAuditSnapshot, isEmailValidatedForOutreach, isCompletePostalAddress, sendTelegramWithRetry, extractEmailAddress, evaluateResearchEvidenceQuality, classifyReplyText, getTelegramApprovalFeedback, getManualSendPreflightError, hasAIGenerationProvider, WORKERS_AI_FALLBACK_MODEL, extractWorkersAiText, resolveProspectContactability, buildProspectEvidenceContext, buildScheduledRunId, getCurrentDaySenderCount, normalizeWhatsAppPhone, extractPhoneDigits, hasUsableContactChannel, hasEnrichableContactData, buildWhatsAppClickToChatUrl, buildWhatsAppOutreachBody, shouldUseManualWhatsAppFallback, isDiscoveryInfrastructureFailure, hasConfirmedWhatsAppOptIn, isValidWhatsAppConsentEvidenceRef, normalizeGeneratedMessage, selectHunterDomainEmail } from './worker';
+import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey, notifyOnce, isVerifiedDeliverableEmail, evaluateFounderOutreachEligibility, buildTechnicalAuditSnapshot, isEmailValidatedForOutreach, isCompletePostalAddress, sendTelegramWithRetry, extractEmailAddress, evaluateResearchEvidenceQuality, classifyReplyText, getTelegramApprovalFeedback, getManualSendPreflightError, hasAIGenerationProvider, WORKERS_AI_FALLBACK_MODEL, extractWorkersAiText, resolveProspectContactability, buildProspectEvidenceContext, buildScheduledRunId, getCurrentDaySenderCount, normalizeWhatsAppPhone, extractPhoneDigits, hasUsableContactChannel, hasEnrichableContactData, buildWhatsAppClickToChatUrl, buildWhatsAppOutreachBody, shouldUseManualWhatsAppFallback, isDiscoveryInfrastructureFailure, hasConfirmedWhatsAppOptIn, isValidWhatsAppConsentEvidenceRef, normalizeGeneratedMessage, selectHunterDomainEmail, resolveGeoapifyProfile } from './worker';
 import { DEFAULT_FOUNDER_MISSION, MissionConfig } from './worker';
 import { buildResendIdempotencyKey, buildBrandedEmailHtml, resolveBveltSender, inspectOutboundEmailAuth, normalizeOutreachBody } from './emailDispatcher';
 import { fetchPermitContractors } from './permitSources';
@@ -29,6 +29,21 @@ function assert(condition: boolean, message: string) {
     throw new Error(message);
   }
 }
+
+tests.push({
+  name: "Geoapify resolves normalized global commercial categories without cross-classifying storage",
+  run: () => {
+    const realEstate = resolveGeoapifyProfile("real_estate");
+    assert(Boolean(realEstate?.name?.test("Berman Realty")), "real_estate must use the property/realty profile");
+    const wealth = resolveGeoapifyProfile("wealth_management");
+    assert(Boolean(wealth?.name?.test("Baskin Wealth Management")), "wealth_management must map to a financial-services profile");
+    const legal = resolveGeoapifyProfile("law_firm");
+    assert(Boolean(legal?.name?.test("Los Angeles Truck Accident Lawyers")), "law_firm must retain legal-business discovery");
+    const storage = resolveGeoapifyProfile("storage_facility");
+    assert(Boolean(storage?.categories.includes("service")) && Boolean(storage?.name?.test("Bluebird Self Storage")), "storage_facility must map to storage, not property-management-only results");
+    assert(!resolveGeoapifyProfile("unmapped_custom_category"), "Unknown categories must remain explicit rather than silently querying unrelated POIs");
+  }
+});
 
 tests.push({
   name: "Hunter no-match responses are distinguished from missing/invalid contacts",
