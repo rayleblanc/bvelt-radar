@@ -6961,7 +6961,7 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
   let painHypothesis: any = {};
   const signalTags: string[] = [];
   let bveltAngle = "";
-  let variantId = "missed_calls";
+  let variantId = "general_intro";
 
   if (isTenant) {
     let tcRow: any = null;
@@ -7522,7 +7522,7 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
 
     let draft: { subject: string; body: string };
     try {
-      draft = await generateAICopy(prospect, prospect.variant_id || "missed_calls", env, missionConfig, "whatsapp");
+      draft = await generateAICopy(prospect, prospect.variant_id || "general_intro", env, missionConfig, "whatsapp");
       await commitBudget(env.RADAR_DB, "founder", "finalize_units", 1);
     } catch (error: any) {
       await releaseBudget(env.RADAR_DB, "founder", "finalize_units", 1);
@@ -11122,7 +11122,7 @@ export function buildAttackKit(p: any): {
     (angleHint === "missed_calls" && (signals.missed_call_verified || signals.unanswered_call))
   );
 
-  let selectedAngle: 'weather_surge' | 'stale_quotes' | 'no_sms' | 'missed_calls' | null = null;
+  let selectedAngle: 'weather_surge' | 'stale_quotes' | 'no_sms' | 'missed_calls' | 'general_intro' | null = null;
   if (hasWeatherSignal) {
     selectedAngle = 'weather_surge';
   } else if (hasQuoteSignal) {
@@ -11133,24 +11133,14 @@ export function buildAttackKit(p: any): {
     selectedAngle = 'missed_calls';
   }
 
-  if (!selectedAngle) {
-    return {
-      prospect_id: String(p.id || ""),
-      name,
-      why_this_lead: `DO NOT CONTACT: no verified friction or observable evidence for outreach angle`,
-      email: { subject: "", body: "" },
-      sms: "",
-      call_script: "- DO NOT CONTACT: No verified friction or observable evidence for outreach angle.",
-      next_action: "DO_NOT_CONTACT — no evidence for angle",
-      angle: "no_evidence"
-    };
-  }
+  if (!selectedAngle) selectedAngle = "general_intro";
 
   const reasons: string[] = [];
   if (selectedAngle === "weather_surge") reasons.push("señal climática/demanda: " + String(p.signal_event || "alerta meteorológica"));
   else if (selectedAngle === "stale_quotes") reasons.push("señal de solicitud de presupuesto/estimación");
   else if (selectedAngle === "no_sms") reasons.push("señal de limitación del canal escrito");
-  else reasons.push("señal verificada relacionada con atención de llamadas para " + tradeLabel + " en " + city);
+  else if (selectedAngle === "missed_calls") reasons.push("señal verificada relacionada con atención de llamadas para " + tradeLabel + " en " + city);
+  else reasons.push("presentación comercial neutral; no se ha observado un problema específico.");
 
   const why = name + " en " + city + " (" + tradeLabel + "): " + reasons.join("; ") + ".";
   const question = selectedAngle === "weather_surge" && p.signal_event
@@ -11159,7 +11149,9 @@ export function buildAttackKit(p: any): {
       ? "Preguntar cómo dan seguimiento a una solicitud de presupuesto concreta."
       : selectedAngle === "no_sms"
         ? "Preguntar qué canal escrito prefieren sus clientes."
-        : "Preguntar cómo retoman una consulta cuando el equipo no puede responder una llamada.";
+        : selectedAngle === "missed_calls"
+          ? "Preguntar cómo retoman una consulta cuando el equipo no puede responder una llamada."
+          : "Preguntar cómo reciben y organizan actualmente las consultas de nuevos clientes.";
 
   const call_script = "- Una sola pregunta: " + question + "\n- Explicar únicamente la capacidad verificada de Bvelt: organizar el seguimiento de consultas de clientes.\n- No solicitar listas de presupuestos, inventarios de cotizaciones ni auditorías en el primer contacto.";
   const next = "Generar y revisar un mensaje IA contextual antes de abrir un canal.";
