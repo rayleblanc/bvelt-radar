@@ -8752,7 +8752,7 @@ export interface StrategicScoreBreakdown {
   evidence_score: number;
   signal_freshness_score: number;
   strategic_score: number;
-  expected_value: number;
+  expected_value: number | null;
   decision_state: string;
   priority_tier: 'critical' | 'high' | 'medium' | 'low';
   why_now_json: string;
@@ -8875,7 +8875,7 @@ export function calculateStrategicScores(
   let timing_score = 0;
   if (item.signal_event) timing_score += 45;
   if (item.source === 'permits') timing_score += 35;
-  if (isPreferredTrade) timing_score += 20;
+  // Trade preference is fit, not timing. Timing uses dated/current demand signals only.
   timing_score = Math.min(100, Math.max(0, timing_score));
 
   // 7. EVIDENCE SCORE (0 - 100)
@@ -8940,9 +8940,13 @@ export function calculateStrategicScores(
 
   // EXPECTED VALUE: P(convert) × ticket — ticket by trade economics
   const avgJobValue = estimateTicketUsd(item.trade || "");
-  const estimatedMonthlyRecoveredValue = Math.round(avgJobValue * (pain_score / 100) * 2.2);
+  const estimatedMonthlyRecoveredValue = pain_score > 0
+    ? Math.round(avgJobValue * (pain_score / 100) * 2.2)
+    : null;
   const conversionProb = (strategic_score / 100) * (contactability_score / 100) * 0.32;
-  const expected_value = Math.round(estimatedMonthlyRecoveredValue * conversionProb);
+  const expected_value = estimatedMonthlyRecoveredValue === null
+    ? null
+    : Math.round(estimatedMonthlyRecoveredValue * conversionProb);
 
   // WHY NOW STRUCTURED REASONING
   const observed_facts: string[] = [];
@@ -8958,8 +8962,8 @@ export function calculateStrategicScores(
   if (signals.sms_gap) {
     inferences.push("High probability of dropping mobile visitors who prefer asynchronous messaging over voice calls");
   }
-  if (signals.emergency && !signals.booking) {
-    inferences.push("Technicians engaged in field jobs leave incoming calls to voicemail during surge hours");
+  if (signals.emergency) {
+    inferences.push("Emergency-service availability may create time-sensitive inbound demand; missed-call leakage is not yet verified.");
   }
   if (item.signal_event) {
     inferences.push("Elevated local call volume creates immediate backlog and customer leakage");
