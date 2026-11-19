@@ -9229,6 +9229,7 @@ export function calculateMultiFactorScore(
   // 4. Commercial Value (0 - 15 pts)
   let commercialValueScore = 0;
   if (isPriorityCity) commercialValueScore += 10;
+  if (isPriorityTrade) commercialValueScore += 1;
   const tradeKey = `trade:${tradeLower}`;
   const winRate = learningStats[tradeKey] || 0;
   if (winRate > 0.6) commercialValueScore += 5;
