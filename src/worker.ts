@@ -4504,16 +4504,23 @@ export function resolveProspectContactability(prospect: any): {
   const emailAvailable = Boolean(email.valid && email.email);
   const phoneAvailable = Boolean(phoneDigits);
   const status = String(prospect?.status || "").toLowerCase();
+  const outcome = String(prospect?.outcome || "").toLowerCase();
   const decisionState = String(prospect?.decision_state || "").toLowerCase();
-  const commercialProspect = !["disqualified", "discarded", "suppressed", "blocked", "off_icp", "rejected"].includes(status) && !["disqualified", "off_icp", "no_go", "do_not_contact", "suppressed", "blocked"].includes(decisionState);
+  // below_minimum_score is a ranking/review outcome, not a finding that the
+  // company is non-commercial or that its published email is unusable.
+  // Keep this soft-disqualified cohort reachable for an explicit owner review.
+  const scoreReviewOnly = status === "disqualified" && outcome === "below_minimum_score";
+  const hardExcludedStatus = ["discarded", "suppressed", "blocked", "off_icp", "rejected"].includes(status) ||
+    (status === "disqualified" && !scoreReviewOnly);
+  const commercialProspect = !hardExcludedStatus && !["disqualified", "off_icp", "no_go", "do_not_contact", "suppressed", "blocked"].includes(decisionState);
   const contactAvailable = emailAvailable || phoneAvailable;
-  const sendConfirmed = ["sent", "delivered", "opened", "clicked"].includes(status) || ["sent", "delivered", "whatsapp_manual_sent"].includes(String(prospect?.outcome || "").toLowerCase());
+  const sendConfirmed = ["sent", "delivered", "opened", "clicked"].includes(status) || ["sent", "delivered", "whatsapp_manual_sent"].includes(outcome);
   const sendAuthorized = commercialProspect && contactAvailable && status === "approved";
-  // This is a UI capability, not a legal authorization or delivery guarantee.
-  // The manual-send endpoint still enforces owner assertion, jurisdiction policy,
-  // Trust-Stack, suppression, sender readiness, cooldown, budget and idempotency.
+  // UI capability only: the owner must still explicitly confirm a lawful basis.
+  // The endpoint enforces suppression, Trust-Stack, sender readiness, cooldown,
+  // jurisdiction policy, sender governor, budget and idempotency.
   const manualEmailAvailable = commercialProspect && emailAvailable &&
-    !["sent", "delivered", "opened", "clicked", "bounced", "unsubscribed", "complained", "suppressed", "blocked", "discarded", "disqualified"].includes(status) &&
+    !["sent", "delivered", "opened", "clicked", "bounced", "unsubscribed", "complained", "suppressed", "blocked", "discarded", "rejected"].includes(status) &&
     !String(prospect?.last_reply_content || "").trim();
   return {
     commercial_prospect: commercialProspect,
