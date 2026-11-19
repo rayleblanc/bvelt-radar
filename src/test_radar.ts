@@ -200,7 +200,7 @@ tests.push({
   name: "A valid unverified email remains owner-reviewable; WhatsApp is fallback only without usable email",
   run: () => {
     assert(
-      !shouldUseManualWhatsAppFallback("info@example.com", "+1 416 555 0100", { is_email_validated: false }),
+      !shouldUseManualWhatsAppFallback("info@northstarplumbing.com", "+1 416 555 0100", { is_email_validated: false }),
       "Provider verification must not make a syntactically valid email disappear from the manual channel"
     );
     assert(
@@ -208,15 +208,15 @@ tests.push({
       "A direct international phone may be offered as an alternative when no usable email exists"
     );
     assert(
-      !shouldUseManualWhatsAppFallback("info@example.com", "416-555-0100", { is_email_validated: false }),
+      !shouldUseManualWhatsAppFallback("info@northstarplumbing.com", "416-555-0100", { is_email_validated: false }),
       "A national phone number without explicit country code must not produce a recipient-less WhatsApp handoff"
     );
     assert(
-      !shouldUseManualWhatsAppFallback("info@example.com", "+1 416 555 0100", { is_email_validated: true }),
+      !shouldUseManualWhatsAppFallback("info@northstarplumbing.com", "+1 416 555 0100", { is_email_validated: true }),
       "A provider-verified email remains the primary email path"
     );
     assert(
-      !shouldUseManualWhatsAppFallback("info@example.com", null, { is_email_validated: false }),
+      !shouldUseManualWhatsAppFallback("info@northstarplumbing.com", null, { is_email_validated: false }),
       "An email without a phone must remain available for owner review"
     );
   }
