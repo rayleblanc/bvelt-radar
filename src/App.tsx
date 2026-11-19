@@ -90,7 +90,8 @@ interface Prospect {
     contact_available: boolean;
     channels: { email: boolean; phone: boolean; whatsapp_direct: boolean; website: boolean };
     send_authorized: boolean;
-    send_state?: "authorized" | "confirmed" | "not_authorized";
+    manual_email_available?: boolean;
+    send_state?: "authorized" | "confirmed" | "owner_review" | "not_authorized";
   };
 }
 
@@ -874,7 +875,8 @@ const submitDecision = async (prospectId: string, action: string, ownerLawfulBas
     const s = String(p.status || '').toLowerCase();
     const outcome = String(p.outcome || '').toLowerCase();
     const cooldown = p.cooldown_until ? Date.parse(p.cooldown_until) : 0;
-    if (p.suppression_reason || ['suppressed','unsubscribed','blocked','discarded','disqualified','rejected','bounced','held','hold'].includes(s)) return 'BLOCKED';
+    const scoreReviewOnly = s === 'disqualified' && ['below_minimum_score', 'low_score_or_no_email'].includes(outcome);
+    if (p.suppression_reason || ['suppressed','unsubscribed','blocked','discarded','rejected','bounced','held','hold'].includes(s) || (s === 'disqualified' && !scoreReviewOnly)) return 'BLOCKED';
     if (cooldown > Date.now()) return 'BLOCKED';
     if (['replied','human_review','positive','question','booked','won','converted'].includes(s) || ['positive','replied','booked','won','converted'].includes(outcome)) return 'REPLIED';
     if (['sent','delivered','opened','clicked','contacted'].includes(s) || ['sent','delivered','whatsapp_manual_sent'].includes(outcome)) return 'SENT';
@@ -883,7 +885,8 @@ const submitDecision = async (prospectId: string, action: string, ownerLawfulBas
   };
   const getStatusBadge = (p: Prospect) => {
     const s = String(p.status || '').toLowerCase();
-    if (s === 'notified' && String(p.outcome || '').toLowerCase() === 'whatsapp_manual_ready') return { label: 'WA DRAFT · CONSENT REQUIRED', color: 'bg-amber-950/60 text-amber-200 border-amber-800/60' };
+    if (s === 'disqualified' && ['below_minimum_score', 'low_score_or_no_email'].includes(String(p.outcome || '').toLowerCase()) && p.contactability?.manual_email_available) return { label: 'EMAIL · OWNER REVIEW', color: 'bg-blue-950/60 text-blue-200 border-blue-800/60' };
+    if (s === 'notified' && String(p.outcome || '').toLowerCase() === 'whatsapp_manual_ready') return { label: 'WA DRAFT · ACCOUNT UNVERIFIED', color: 'bg-amber-950/60 text-amber-200 border-amber-800/60' };
     if (s === 'bounced' || s === 'bounce') return { label: 'BOUNCED', color: 'bg-rose-950/80 text-rose-300 border-rose-800' };
     if (s === 'out_of_office' || s === 'ooo') return { label: 'OUT OF OFFICE', color: 'bg-amber-950/80 text-amber-300 border-amber-800' };
     if (s === 'not_now') return { label: 'NOT NOW', color: 'bg-amber-950/50 text-amber-400 border-amber-800/40' };
@@ -1537,7 +1540,8 @@ const submitDecision = async (prospectId: string, action: string, ownerLawfulBas
                         ? activeKitForProspect?.angle === 'tenant_b2b_service'
                         : ['weather_surge', 'stale_quotes', 'no_sms', 'missed_calls', 'general_intro'].includes(activeKitForProspect?.angle);
                       const canOpenDirectChannel = Boolean(contactability?.commercial_prospect && contactability.contact_available && hasVerifiedOutreachAngle);
-      const canSendEmail = Boolean(contactability?.commercial_prospect && contactability.send_authorized && emailRecipient);
+                      const canUsePhoneChannel = Boolean(contactability?.commercial_prospect && contactability.channels?.phone && p.phone);
+                      const canSendEmail = Boolean(contactability?.commercial_prospect && contactability.manual_email_available && emailRecipient);
                       // A prepared Founder WhatsApp draft is already human-reviewed for this channel.
                       // Opening wa.me is still only a manual handoff; it does not prove account or opt-in.
                       const canOpenWhatsApp = canOpenDirectChannel || (isPreparedWhatsAppDraft && hasDirectWhatsAppRecipient(p.phone));
@@ -1654,7 +1658,7 @@ const submitDecision = async (prospectId: string, action: string, ownerLawfulBas
                                 }}
                               >
                                 <MessageSquare className="w-3.5 h-3.5 text-emerald-400" />
-                                WhatsApp <span className="text-[8px] opacity-70">· no verificado</span>
+                                WhatsApp <span className="text-[8px] opacity-70">· cuenta no comprobada</span>
                               </a>
                             )}
                             {currentMode === 'founder' && p.outcome === 'whatsapp_manual_ready' && (
@@ -1671,7 +1675,7 @@ const submitDecision = async (prospectId: string, action: string, ownerLawfulBas
                                 Confirmar envío
                               </button>
                             )}
-                            {canOpenDirectChannel && p.phone && toSmsUrl(p.phone, emailMessageBody) && (
+                            {canUsePhoneChannel && p.phone && toSmsUrl(p.phone, emailMessageBody) && (
                               <a
                                 href={toSmsUrl(p.phone, emailMessageBody)!}
                                 className="px-2.5 py-1 rounded-lg bg-sky-950/50 border border-sky-800/40 text-sky-300 hover:bg-sky-900/60 flex items-center gap-1 font-bold"
@@ -1685,7 +1689,7 @@ const submitDecision = async (prospectId: string, action: string, ownerLawfulBas
                                 SMS
                               </a>
                             )}
-                            {canOpenDirectChannel && p.phone && toTelUrl(p.phone) && (
+                            {canUsePhoneChannel && p.phone && toTelUrl(p.phone) && (
                               <a
                                 href={toTelUrl(p.phone)!}
                                 className="px-2.5 py-1 rounded-lg bg-indigo-950/50 border border-indigo-800/40 text-indigo-300 hover:bg-indigo-900/60 flex items-center gap-1 font-bold"
@@ -1830,7 +1834,7 @@ const submitDecision = async (prospectId: string, action: string, ownerLawfulBas
                                             rel="noreferrer"
                                             className="inline-block px-2 py-1 rounded bg-emerald-950/50 border border-emerald-800 text-emerald-300 font-bold"
                                           >
-                                            WhatsApp con texto del kit · no verificado
+                                            WhatsApp con texto del kit · cuenta no comprobada
                                           </a>
                                         )}
                                         {p.phone && toSmsUrl(p.phone, attackKits[p.id].sms || '') && (
@@ -1852,7 +1856,7 @@ const submitDecision = async (prospectId: string, action: string, ownerLawfulBas
                                 const activeKit = attackKits[p.id] || (p.attack_kit ? (typeof p.attack_kit === 'string' ? JSON.parse(p.attack_kit) : p.attack_kit) : null);
                                 const isDoNotContact =
                                   !activeKit ||
-                                  !["weather_surge", "stale_quotes", "no_sms", "missed_calls"].includes(activeKit.angle) ||
+                                  !["weather_surge", "stale_quotes", "no_sms", "missed_calls", "general_intro"].includes(activeKit.angle) ||
                                   activeKit?.next_action?.startsWith("DO_NOT_CONTACT") ||
                                   activeKit?.next_action?.includes("DO_NOT_CONTACT") ||
                                   p.outcome?.includes("off_icp") ||
