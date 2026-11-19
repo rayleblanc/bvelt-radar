@@ -3,7 +3,7 @@ import { resolveGithubActionsToken } from './research/githubActions';
 
 import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey, notifyOnce, isVerifiedDeliverableEmail, evaluateFounderOutreachEligibility, buildTechnicalAuditSnapshot, isEmailValidatedForOutreach, isCompletePostalAddress, sendTelegramWithRetry, extractEmailAddress, evaluateResearchEvidenceQuality, classifyReplyText, getTelegramApprovalFeedback, getManualSendPreflightError, hasAIGenerationProvider, WORKERS_AI_FALLBACK_MODEL, extractWorkersAiText, resolveProspectContactability, buildProspectEvidenceContext, buildScheduledRunId, getCurrentDaySenderCount, normalizeWhatsAppPhone, extractPhoneDigits, hasUsableContactChannel, hasEnrichableContactData, buildWhatsAppClickToChatUrl, buildWhatsAppOutreachBody, shouldUseManualWhatsAppFallback, isDiscoveryInfrastructureFailure, hasConfirmedWhatsAppOptIn, isValidWhatsAppConsentEvidenceRef, normalizeGeneratedMessage, selectHunterDomainEmail, recordRunFinalization, resolveGeoapifyProfile, ensureLegalFooter } from './worker';
 import { DEFAULT_FOUNDER_MISSION, MissionConfig } from './worker';
-import { buildResendIdempotencyKey, buildBrandedEmailHtml, resolveBveltSender, inspectOutboundEmailAuth, normalizeOutreachBody, buildListUnsubscribeHeader } from './emailDispatcher';
+import { buildResendIdempotencyKey, buildBrandedEmailHtml, resolveBveltSender, inspectOutboundEmailAuth, normalizeOutreachBody, buildListUnsubscribeHeader, dispatchEmail } from './emailDispatcher';
 import { fetchPermitContractors } from './permitSources';
 import { pickTargets, findPlace } from './geoFrontier';
 import { isOffIcpName, sanitizeEmail } from './emailSanitizer';
@@ -54,6 +54,40 @@ tests.push({
     const header = buildListUnsubscribeHeader("Bvelt <bvelt@bvelt.app>");
     assert(header === "<mailto:bvelt@bvelt.app?subject=unsubscribe&body=unsubscribe>", "List-Unsubscribe must point to a reply address that Radar receives");
     assert(buildListUnsubscribeHeader("attacker@example.org") === null, "External sender domains must not be used for unsubscribe headers");
+  }
+});
+
+tests.push({
+  name: "Resend dispatcher actually transmits the List-Unsubscribe header",
+  run: async () => {
+    const originalFetch = globalThis.fetch;
+    let resendPayload: any = null;
+    globalThis.fetch = (async (input: any, init?: any) => {
+      const url = String(input);
+      if (url.includes("cloudflare-dns.com")) {
+        return new Response(JSON.stringify({ Status: 0, Answer: [{ data: "10 mx.example.net" }] }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      if (url === "https://api.resend.com/emails") {
+        resendPayload = JSON.parse(String(init?.body || "{}"));
+        return new Response(JSON.stringify({ id: "resend_test_message" }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      throw new Error("Unexpected network request in dispatcher test: " + url);
+    }) as any;
+    try {
+      const result = await dispatchEmail({
+        to: "owner@northstarplumbing.com",
+        subject: "Test",
+        body: "Test body",
+        from: "Bvelt <bvelt@bvelt.app>",
+        prospectId: "prospect-test",
+        resendApiKey: "test-key",
+        plainTextOnly: true
+      });
+      assert(result.status === "dispatched", "Mock Resend should accept the test email");
+      assert(resendPayload?.headers?.["List-Unsubscribe"] === "<mailto:bvelt@bvelt.app?subject=unsubscribe&body=unsubscribe>", "The actual Resend payload must carry List-Unsubscribe");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   }
 });
 
