@@ -1325,9 +1325,16 @@ export default {
         params.push(parseInt(limit, 10));
 
         const results = await env.RADAR_DB.prepare(queryStr).bind(...params).all();
-        const prospects = (results.results || []).map((prospect: any) => ({
-          ...prospect,
-          contactability: resolveProspectContactability(prospect)
+        const prospects = await Promise.all((results.results || []).map(async (prospect: any) => {
+          const wasPaused = String(prospect.outcome || "").toLowerCase() === "radar_outreach_paused";
+          const suppression = wasPaused
+            ? await checkSuppressedComposite(env.RADAR_DB, prospect.email, prospect.website, prospect.phone, prospect.name, prospect.city, prospect.tenant_id || "founder")
+            : null;
+          return {
+            ...prospect,
+            outreach_suppressed: Boolean(suppression),
+            contactability: resolveProspectContactability(prospect)
+          };
         }));
         return Response.json(prospects, { headers: corsHeaders });
       }
@@ -3911,7 +3918,7 @@ async function handleHealth(env: Env, headers: Record<string, string>, tenantId:
   } catch (e) {}
 
   const globalPause = env.RADAR_GLOBAL_PAUSE === "true" || env.RADAR_GLOBAL_PAUSE === "1";
-  const outreachPause = env.RADAR_OUTREACH_PAUSE === "true" || env.RADAR_OUTREACH_PAUSE === "1";
+  const tenantOutreachPause = env.RADAR_OUTREACH_PAUSE === "true" || env.RADAR_OUTREACH_PAUSE === "1";
 
   let budgetRow = await db.prepare("SELECT * FROM daily_budgets WHERE tenant_id = 'founder' AND day = ?").bind(today).first() as any;
   if (!budgetRow) {
@@ -3949,7 +3956,8 @@ async function handleHealth(env: Env, headers: Record<string, string>, tenantId:
   return Response.json({
     status: globalPause ? "paused" : circuitBreakerActive ? "paused" : (failedJobs > 0 || staleJobs > 0 || lastTelegramOk === false) ? "degraded" : "healthy",
     global_pause: globalPause,
-    outreach_pause: outreachPause,
+    outreach_pause: false,
+    tenant_outreach_pause: tenantOutreachPause,
     circuit_breaker: circuitBreakerActive,
     circuit_breaker_reason: circuitBreakerReason,
     today: buildBudgetUsageSnapshot(budgetRow),
@@ -4413,7 +4421,7 @@ async function handleStats(env: Env, headers: Record<string, string>): Promise<R
   const circuitBreakerReason = cb ? cb.reason : null;
 
   const globalPause = env.RADAR_GLOBAL_PAUSE === "true" || env.RADAR_GLOBAL_PAUSE === "1";
-  const outreachPause = env.RADAR_OUTREACH_PAUSE === "true" || env.RADAR_OUTREACH_PAUSE === "1";
+  const tenantOutreachPause = env.RADAR_OUTREACH_PAUSE === "true" || env.RADAR_OUTREACH_PAUSE === "1";
 
   return Response.json({
     prospects_by_status: prospectStats.results,
@@ -4433,7 +4441,8 @@ async function handleStats(env: Env, headers: Record<string, string>): Promise<R
     learning_weights: learningStats,
     limits: LIMITS,
     global_pause: globalPause,
-    outreach_pause: outreachPause,
+    outreach_pause: false,
+    tenant_outreach_pause: tenantOutreachPause,
     circuit_breaker: circuitBreakerActive,
     circuit_breaker_reason: circuitBreakerReason,
     today: buildBudgetUsageSnapshot(budgetRow)
@@ -4530,6 +4539,15 @@ export function resolveProspectContactability(prospect: any): {
     manual_email_available: manualEmailAvailable,
     send_state: sendConfirmed ? "confirmed" : sendAuthorized ? "authorized" : manualEmailAvailable ? "owner_review" : "not_authorized"
   };
+}
+
+export function isOutreachPauseBlocking(mode: unknown, tenantId: unknown, pauseValue: unknown): boolean {
+  const paused = ["true", "1", "yes"].includes(String(pauseValue ?? "").trim().toLowerCase());
+  if (!paused) return false;
+  const normalizedMode = String(mode ?? "").trim().toLowerCase();
+  const normalizedTenant = String(tenantId ?? "").trim().toLowerCase();
+  const isFounder = normalizedMode === "founder" || (normalizedMode !== "tenant" && (!normalizedTenant || normalizedTenant === "founder"));
+  return !isFounder;
 }
 
 export function buildProspectEvidenceContext(prospect: any): string {
@@ -4755,7 +4773,7 @@ async function handleDecision(
       await db.prepare("UPDATE prospects SET status = 'held', outcome = 'RADAR_GLOBAL_PAUSED', updated_at = ? WHERE id = ?").bind(timestamp, id).run();
       return Response.json({ success: false, blocked: true, reason: "RADAR_GLOBAL_PAUSED", id }, { status: 423, headers });
     }
-    if (env.RADAR_OUTREACH_PAUSE === "true" || env.RADAR_OUTREACH_PAUSE === "1") {
+    if (isOutreachPauseBlocking(prospect.mode, prospect.tenant_id, env.RADAR_OUTREACH_PAUSE)) {
       await db.prepare("UPDATE prospects SET status = 'held', outcome = 'RADAR_OUTREACH_PAUSED', updated_at = ? WHERE id = ?").bind(timestamp, id).run();
       return Response.json({ success: false, blocked: true, reason: "RADAR_OUTREACH_PAUSED", id }, { status: 423, headers });
     }
@@ -7797,7 +7815,7 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
   const isElite = (scoreVal >= 80 && confVal >= 75) || (scoreVal >= 80 && !prospect.confidence_score);
   const isStrongAuto = scoreVal >= autoMinScore && Boolean(prospect.email);
   const autoFlag = String(env.FOUNDER_AUTO_OUTREACH !== undefined && env.FOUNDER_AUTO_OUTREACH !== "" ? env.FOUNDER_AUTO_OUTREACH : "true").toLowerCase();
-  const outreachPaused = ["true", "1", "yes"].includes(String(env.RADAR_OUTREACH_PAUSE || "").trim().toLowerCase());
+  const outreachPaused = isOutreachPauseBlocking(job.mode, prospect.tenant_id, env.RADAR_OUTREACH_PAUSE);
   const isAutoOutreachEnabled =
     job.mode === "founder" &&
     !outreachPaused &&
@@ -11495,14 +11513,12 @@ export async function collectRadarDigest(env: Env): Promise<RadarDigest> {
   const has = (v?: string) => !!(v && String(v).trim());
   const hasProvider = has(env.RESEND_API_KEY) || has(env.BREVO_API_KEY) || (has(env.HUNTER_API_KEY) && has(env.HUNTER_SEQUENCE_ID));
   const paused = env.RADAR_GLOBAL_PAUSE === "true" || env.RADAR_GLOBAL_PAUSE === "1";
-  const outPaused = env.RADAR_OUTREACH_PAUSE === "true" || env.RADAR_OUTREACH_PAUSE === "1";
   const autoFlag = String(env.FOUNDER_AUTO_OUTREACH !== undefined && env.FOUNDER_AUTO_OUTREACH !== "" ? env.FOUNDER_AUTO_OUTREACH : "true").toLowerCase();
   const autoOn = autoFlag === "true" || autoFlag === "1" || autoFlag === "yes";
 
   const blockers: string[] = [];
   if (!has(env.TELEGRAM_BOT_TOKEN) || !has(env.TELEGRAM_CHAT_ID)) blockers.push("Falta TELEGRAM_BOT_TOKEN o TELEGRAM_CHAT_ID");
   if (paused) blockers.push("RADAR_GLOBAL_PAUSE está activo (nada corre)");
-  if (outPaused) blockers.push("RADAR_OUTREACH_PAUSE está activo (no se envía)");
   if (cb.active) blockers.push(`Circuit breaker abierto: ${cb.reason || "sin motivo"} (requiere reset manual)`);
   if (!hasProvider) blockers.push("Sin proveedor de email (RESEND_API_KEY / BREVO_API_KEY / Hunter)");
   if (autoOn && !isCompletePostalAddress(env.SENDER_POSTAL_ADDRESS)) blockers.push("SENDER_POSTAL_ADDRESS ausente o incompleta: bloquea todo envío automático");
@@ -12615,8 +12631,9 @@ export async function sendOrQueueOutreach(
     return { success: false, reason: "RADAR_GLOBAL_PAUSED" };
   }
 
-  // 2. Outreach Kill Switch check
-  if (env.RADAR_OUTREACH_PAUSE === "true" || env.RADAR_OUTREACH_PAUSE === "1") {
+  // 2. Outreach pause applies to Tenant only. Founder owner-confirmed outreach
+  // remains available; global pause and sender safety controls still apply.
+  if (isOutreachPauseBlocking(prospect.mode, prospect.tenant_id, env.RADAR_OUTREACH_PAUSE)) {
     await env.RADAR_DB.prepare("UPDATE prospects SET status = 'held', outcome = 'RADAR_OUTREACH_PAUSED', updated_at = ? WHERE id = ?")
       .bind(new Date().toISOString(), prospect.id).run();
     return { success: false, reason: "RADAR_OUTREACH_PAUSED" };
