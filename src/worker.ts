@@ -7428,13 +7428,7 @@ async function handleApproveJob(job: RadarJobMessage, env: Env): Promise<void> {
     return;
   }
 
-  // Email prospects continue to the email path; valid phone-only prospects use
-  // the reviewed WhatsApp handoff below. Never discard a usable phone for lack of email.
-  if (Number(prospect.score || 0) < 45) {
-    await env.RADAR_DB.prepare("UPDATE prospects SET status = 'disqualified', outcome = 'below_outreach_score', updated_at = ? WHERE id = ?")
-      .bind(new Date().toISOString(), prospect_id).run();
-    return;
-  }
+  // Score ranks work; it is not a permission gate. An explicit owner may review/send any valid business prospect.
   if (!hasUsableContactChannel(prospect.email, prospect.phone)) {
     await env.RADAR_DB.prepare("UPDATE prospects SET status = 'disqualified', outcome = 'no_contact_channel', updated_at = ? WHERE id = ?")
       .bind(new Date().toISOString(), prospect_id).run();
@@ -7487,11 +7481,7 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
       .bind(isHardRejectedChain(prospect.name) ? "hard_rejected_chain" : "off_icp_name", new Date().toISOString(), prospect_id).run();
     return;
   }
-  if ((prospect.score || 0) < 45) {
-    await env.RADAR_DB.prepare("UPDATE prospects SET status = 'disqualified', outcome = 'below_outreach_score', updated_at = ? WHERE id = ?")
-      .bind(new Date().toISOString(), prospect_id).run();
-    return;
-  }
+  // Low score never deletes the prospect. It only prevents automatic send; owner review remains available.
   // If there is no provider-verified email, use a phone-based manual WhatsApp
   // fallback when possible. Never treat the unverified email as deliverable.
   if (!sanitizeEmail(String(prospect.email || "")).valid && shouldUseManualWhatsAppFallback(prospect.email, prospect.phone, prospect.signals_json || "{}")) {
