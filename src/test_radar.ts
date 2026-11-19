@@ -1,7 +1,7 @@
 declare const process: any;
 import { resolveGithubActionsToken } from './research/githubActions';
 
-import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey, notifyOnce, isVerifiedDeliverableEmail, evaluateFounderOutreachEligibility, buildTechnicalAuditSnapshot, isEmailValidatedForOutreach, isCompletePostalAddress, sendTelegramWithRetry, extractEmailAddress, evaluateResearchEvidenceQuality, classifyReplyText, getTelegramApprovalFeedback, getManualSendPreflightError, hasAIGenerationProvider, WORKERS_AI_FALLBACK_MODEL, extractWorkersAiText, resolveProspectContactability, buildProspectEvidenceContext, buildScheduledRunId, getCurrentDaySenderCount, normalizeWhatsAppPhone, extractPhoneDigits, hasUsableContactChannel, hasEnrichableContactData, buildWhatsAppClickToChatUrl, buildWhatsAppOutreachBody, shouldUseManualWhatsAppFallback, isDiscoveryInfrastructureFailure, hasConfirmedWhatsAppOptIn, isValidWhatsAppConsentEvidenceRef, normalizeGeneratedMessage } from './worker';
+import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey, notifyOnce, isVerifiedDeliverableEmail, evaluateFounderOutreachEligibility, buildTechnicalAuditSnapshot, isEmailValidatedForOutreach, isCompletePostalAddress, sendTelegramWithRetry, extractEmailAddress, evaluateResearchEvidenceQuality, classifyReplyText, getTelegramApprovalFeedback, getManualSendPreflightError, hasAIGenerationProvider, WORKERS_AI_FALLBACK_MODEL, extractWorkersAiText, resolveProspectContactability, buildProspectEvidenceContext, buildScheduledRunId, getCurrentDaySenderCount, normalizeWhatsAppPhone, extractPhoneDigits, hasUsableContactChannel, hasEnrichableContactData, buildWhatsAppClickToChatUrl, buildWhatsAppOutreachBody, shouldUseManualWhatsAppFallback, isDiscoveryInfrastructureFailure, hasConfirmedWhatsAppOptIn, isValidWhatsAppConsentEvidenceRef, normalizeGeneratedMessage, selectHunterDomainEmail } from './worker';
 import { DEFAULT_FOUNDER_MISSION, MissionConfig } from './worker';
 import { buildResendIdempotencyKey, buildBrandedEmailHtml, resolveBveltSender, inspectOutboundEmailAuth, normalizeOutreachBody } from './emailDispatcher';
 import { fetchPermitContractors } from './permitSources';
@@ -29,6 +29,19 @@ function assert(condition: boolean, message: string) {
     throw new Error(message);
   }
 }
+
+tests.push({
+  name: "Hunter no-match responses are distinguished from missing/invalid contacts",
+  run: () => {
+    assert(selectHunterDomainEmail([]) === null, "A successful Hunter response with no emails must be represented as no match");
+    assert(selectHunterDomainEmail([{ value: "info@example.com", confidence: 35, type: "generic" }]) === null, "Low-confidence generic addresses must not pass the existing quality floor");
+    const selected = selectHunterDomainEmail([
+      { value: "contact@northstar.example", confidence: 80, type: "generic" },
+      { value: "jane.doe@northstar.example", confidence: 70, type: "personal" }
+    ]);
+    assert(selected === "jane.doe@northstar.example", "Personal business contact should retain the existing preference over generic contact@");
+  }
+});
 
 tests.push({
   name: "Discovery infrastructure failures do not count toward empty-market cooldowns",
