@@ -263,6 +263,8 @@ export function isOffIcpName(
   if (!name || typeof name !== "string") return true;
   const clean = name.trim().toLowerCase();
   if (!clean) return true;
+  void allowTenantBuyer;
+  void categoryOrTrade;
 
   if (/\b(?:variation|variant)\s*#?\s*\d+\b/i.test(clean)) return true;
 
