@@ -40,6 +40,14 @@ export function resolveBveltSender(raw?: string): { email: string; from: string 
   return { email: parsed.email, from: `${displayName} <${parsed.email}>` };
 }
 
+export function buildListUnsubscribeHeader(rawFrom?: string): string | null {
+  const sender = resolveBveltSender(rawFrom);
+  if (!sender) return null;
+  // Replies are ingested by Resend Receiving and classified by Radar's
+  // inbound webhook; the explicit body token makes unsubscribe unambiguous.
+  return `<mailto:${sender.email}?subject=unsubscribe&body=unsubscribe>`;
+}
+
 export interface OutboundEmailAuthDiagnostics {
   sender: string | null;
   domain: string | null;
@@ -239,6 +247,11 @@ export async function dispatchEmail(options: EmailDispatchOptions): Promise<Emai
   const body = normalizeOutreachBody(options.body || '', options.includeSiteLink !== false);
   const senderName = options.senderName || 'Rainer — Bvelt';
   const html = options.plainTextOnly ? undefined : buildBrandedEmailHtml(body, options.logoUrl);
+  const providerHeaders: Record<string, string> = {
+    'X-Entity-Ref-ID': options.prospectId || `lead_${Date.now()}`,
+  };
+  const unsubscribeHeader = buildListUnsubscribeHeader(options.from);
+  if (unsubscribeHeader) providerHeaders['List-Unsubscribe'] = unsubscribeHeader;
 
   if (options.resendApiKey && options.resendApiKey.trim()) {
     try {
@@ -250,7 +263,7 @@ export async function dispatchEmail(options: EmailDispatchOptions): Promise<Emai
         subject,
         text: body,
         ...(html ? { html } : {}),
-        headers: { 'X-Entity-Ref-ID': options.prospectId || `lead_${Date.now()}` },
+        headers: providerHeaders,
       };
       if (options.replyTo && options.replyTo.includes('@')) {
         payload.reply_to = options.replyTo.trim();
@@ -314,6 +327,7 @@ export async function dispatchEmail(options: EmailDispatchOptions): Promise<Emai
           subject,
           textContent: body,
           ...(html ? { htmlContent: html } : {}),
+          headers: providerHeaders,
         }),
       });
       const data: any = await res.json().catch(() => ({}));
