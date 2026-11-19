@@ -13353,11 +13353,11 @@ export function checkTradeCoherence(
   }
 
   const inferred = inferTradeFromTextDetailed(name, tags || '', website || '');
-  if (inferred.isNonHomeService) {
+  if (inferred.isNonHomeService && mode === "tenant") {
     return {
       coherent: false,
       verifiedTrade: null,
-      reason: `non_home_service: clues indicate off-ICP`,
+      reason: `non_home_service: outside this tenant's configured buyer/service universe`,
       disqualified: true
     };
   }
