@@ -9330,7 +9330,6 @@ export function calculateMultiFactorScore(
   let legacyCommercial = 0;
   if (isPriorityCity) legacyCommercial += 5;
   if (isPriorityTrade || isPreferred) legacyCommercial += 5;
-  if (isIndependent) legacyCommercial += 2;
   if (winRate > 0.6) legacyCommercial += 3;
   else if (winRate > 0.3) legacyCommercial += 1;
 
@@ -9361,11 +9360,11 @@ export function calculateMultiFactorScore(
   if (signals.sms_gap) {
     painHypothesis.sms_gap = "The business has a prominent phone number but no option to text or SMS. Up to 60% of consumers prefer text over voice calls, leading to potential drop-off of mobile visitors.";
   }
-  if (!signals.booking) {
-    painHypothesis.booking_gap = "Lacks self-service online scheduling. Busy professionals are forced to call during business hours, resulting in missed appointment opportunities.";
+  if (signals.missed_calls || signals.missed_call_evidence) {
+    painHypothesis.missed_call_evidence = "Observed missed-call or unanswered-call evidence was recorded.";
   }
-  if (!signals.quote_request && !signals.estimate_language) {
-    painHypothesis.quote_gap = "Requires manual back-and-forth for estimates. 50% of consumers choose the speediest contractor; manual followups risk losing leads to instant-responders.";
+  if (signals.quote_request || signals.estimate_language) {
+    painHypothesis.quote_flow_observed = "An online quote or estimate workflow was observed; follow-up performance is not established.";
   }
 
   const strat = calculateStrategicScores(
