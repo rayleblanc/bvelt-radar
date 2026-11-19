@@ -3218,6 +3218,11 @@ export default {
 
             const quality = evaluateResearchEvidenceQuality(String(prospectRow.name || ""), incomingFacts, String(prospectRow.trade || ""), mode);
             mergedScrapling.quality_gate = { allowed: quality.allowed, reason: quality.reason || null, inferred_trade: quality.inferredTrade || null, checked_at: now };
+            if (quality.allowed && quality.inferredTrade && quality.inferredTrade !== String(prospectRow.trade || "")) {
+              await env.RADAR_DB.prepare("UPDATE prospects SET trade = ?, updated_at = ? WHERE id = ? AND mode = ? AND COALESCE(tenant_id, 'founder') = ?")
+                .bind(quality.inferredTrade, now, prospectId, mode, tenantId).run();
+              prospectRow.trade = quality.inferredTrade;
+            }
             signalsObj.scrapling = mergedScrapling;
             if (!signalsObj.signals) signalsObj.signals = {};
             signalsObj.signals.scrapling = mergedScrapling;
@@ -4484,7 +4489,8 @@ export function resolveProspectContactability(prospect: any): {
   contact_available: boolean;
   channels: { email: boolean; phone: boolean; whatsapp_direct: boolean; website: boolean };
   send_authorized: boolean;
-  send_state: "authorized" | "confirmed" | "not_authorized";
+  manual_email_available: boolean;
+  send_state: "authorized" | "confirmed" | "owner_review" | "not_authorized";
 } {
   const email = sanitizeEmail(prospect?.email);
   const phoneDigits = extractPhoneDigits(prospect?.phone);
@@ -4503,12 +4509,19 @@ export function resolveProspectContactability(prospect: any): {
   const contactAvailable = emailAvailable || phoneAvailable;
   const sendConfirmed = ["sent", "delivered", "opened", "clicked"].includes(status) || ["sent", "delivered", "whatsapp_manual_sent"].includes(String(prospect?.outcome || "").toLowerCase());
   const sendAuthorized = commercialProspect && contactAvailable && status === "approved";
+  // This is a UI capability, not a legal authorization or delivery guarantee.
+  // The manual-send endpoint still enforces owner assertion, jurisdiction policy,
+  // Trust-Stack, suppression, sender readiness, cooldown, budget and idempotency.
+  const manualEmailAvailable = commercialProspect && emailAvailable &&
+    !["sent", "delivered", "opened", "clicked", "bounced", "unsubscribed", "complained", "suppressed", "blocked", "discarded", "disqualified"].includes(status) &&
+    !String(prospect?.last_reply_content || "").trim();
   return {
     commercial_prospect: commercialProspect,
     contact_available: contactAvailable,
     channels: { email: emailAvailable, phone: phoneAvailable, whatsapp_direct: whatsappDirect, website },
     send_authorized: sendAuthorized,
-    send_state: sendConfirmed ? "confirmed" : sendAuthorized ? "authorized" : "not_authorized"
+    manual_email_available: manualEmailAvailable,
+    send_state: sendConfirmed ? "confirmed" : sendAuthorized ? "authorized" : manualEmailAvailable ? "owner_review" : "not_authorized"
   };
 }
 
@@ -9746,7 +9759,7 @@ export async function pruneRadarCache(env: Env): Promise<void> {
 // Se usan categorías PADRE (siempre válidas) y se filtra por nombre en el código para no traer ruido.
 // ---------------------------------------------------------------------------
 const GEOAPIFY_PROFILES: Array<{ match: RegExp; categories: string; name?: RegExp }> = [
-  { match: /property|real estate|hoa|apartment|facility|condo/, categories: "office", name: /property|management|realty|real estate|apartment|hoa|association|condo|leasing|rental|residential|communit/i },
+  { match: /property|real estate|hoa|apartment|condo/, categories: "office", name: /property|management|realty|real estate|apartment|hoa|association|condo|leasing|rental|residential|communit/i },
   { match: /hotel|vacation|rental|lodging|motel|resort/, categories: "accommodation" },
   { match: /restaurant|cafe|food|catering/, categories: "catering" },
   { match: /gym|fitness|aquatic|pool/, categories: "sport,leisure", name: /gym|fitness|crossfit|yoga|aquatic|swim|pool|athletic|health club/i },
@@ -9788,6 +9801,8 @@ export async function fetchGeoapifyBusinesses(
   if (!apiKey || !apiKey.trim()) return { businesses: [], status: "skipped (no GEOAPIFY_API_KEY)" };
   if (!geo || !geo.bbox || geo.bbox.length < 4) return { businesses: [], status: "skipped (no bbox)" };
   const t = trade.toLowerCase();
+  // Do not let the substring "facility" route storage_facility into the
+  // property-management profile; it mislabels real-estate and wealth firms.
   const profile = GEOAPIFY_PROFILES.find(p => p.match.test(t));
   if (!profile) return { businesses: [], status: "skipped (trade not mapped)" };
   try {
@@ -12221,9 +12236,13 @@ export function isEmailValidatedForOutreach(signals: unknown): boolean {
 }
 
 export function shouldUseManualWhatsAppFallback(email: unknown, phone: string | null | undefined, signals: unknown): boolean {
-  const hasDirectInternationalWhatsApp = Boolean(normalizeWhatsAppPhone(phone));
-  const hasVerifiedEmail = Boolean(String(email || "").trim()) && isEmailValidatedForOutreach(signals);
-  return hasDirectInternationalWhatsApp && !hasVerifiedEmail;
+  // Provider verification is required for automatic delivery, not for keeping a
+  // syntactically valid email available for owner-reviewed manual contact.
+  // WhatsApp is only a fallback when no usable email address exists.
+  void signals;
+  const hasDirectInternationalPhone = Boolean(normalizeWhatsAppPhone(phone));
+  const hasUsableEmail = sanitizeEmail(String(email || "")).valid;
+  return hasDirectInternationalPhone && !hasUsableEmail;
 }
 
 export async function verifyEmail(email: string, env: Env): Promise<EmailVerificationResult> {
@@ -13272,8 +13291,8 @@ export function evaluateResearchEvidenceQuality(businessName: string, facts: any
   const hasServiceIntent = serviceTerms.length > 0 || Boolean(capabilities.quote_or_estimate_language_observed || capabilities.booking_or_appointment_observed || capabilities.click_to_call_observed || capabilities.whatsapp_link_observed);
   if (governmentPage && !hasServiceIntent) return { allowed: false, reason: "government_or_public_program_website_without_service_intent" };
 
-  // Mandatory post-Scrapling identity/rubric gate. Never silently relabel a
-  // discovered prospect from a weak clue on its website.
+  // A strong identity signal corrects a stale discovery category; it does not
+  // disqualify an otherwise real commercial business.
   if (mode !== "tenant" && declaredTrade && String(declaredTrade).trim()) {
     const inferred = inferTradeFromTextDetailed(name, title, description, serviceTerms.join(" "));
     const declared = String(declaredTrade).toLowerCase().replace(/[\s-]+/g, "_");
@@ -13281,7 +13300,7 @@ export function evaluateResearchEvidenceQuality(businessName: string, facts: any
       || (inferred.trade === "lawn_care" && declared === "landscaping")
       || (inferred.trade === "landscaping" && declared === "lawn_care");
     if (inferred.confidence === "high" && inferred.trade !== "general" && !compatible) {
-      return { allowed: false, reason: "scrapling_category_mismatch", inferredTrade: inferred.trade };
+      return { allowed: true, reason: "category_mismatch_reclassified", inferredTrade: inferred.trade };
     }
   }
   return { allowed: true };
@@ -13310,6 +13329,34 @@ function inferTradeFromTextDetailed(...textParts: (string | undefined)[]): Trade
     ['cleaning', /\b(cleaning|maid|janitorial|pressure\s*wash|power\s*wash|carpet\s*clean|window\s*clean)\b/i],
     ['garage_door', /\b(garage\s*door|overhead\s*door)\b/i],
     ['handyman', /\b(handyman|general\s*contractor|remodel|renovation|home\s*repair)\b/i],
+    ['law_firm', /\b(law\s*firm|lawyer|attorney|solicitor|barrister|legal\s*services|law\s*office)\b/i],
+    ['accounting_firm', /\b(accountant|accounting|bookkeeping|tax\s*(?:preparation|advisory|consulting)|chartered\s*accountant|\bcpa\b)\b/i],
+    ['insurance_agency', /\b(insurance\s*(?:agency|broker|services)|insurance\s*agent)\b/i],
+    ['property_management', /\b(property\s*management|property\s*manager|community\s*management|condo\s*management|hoa\s*management|facilities\s*management)\b/i],
+    ['real_estate', /\b(real\s*estate|realty|realtor|estate\s*agent|residential\s*brokerage)\b/i],
+    ['financial_services', /\b(wealth\s*management|financial\s*(?:advisor|adviser|planning|services)|investment\s*management|asset\s*management)\b/i],
+    ['dental_clinic', /\b(dental|dentist|orthodont|endodont|periodont)\b/i],
+    ['medical_clinic', /\b(medical\s*clinic|health\s*clinic|physician|family\s*practice|urgent\s*care)\b/i],
+    ['optometry', /\b(optometrist|optometry|eye\s*care|vision\s*clinic)\b/i],
+    ['hotel', /\b(hotel|motel|resort|inn|lodging)\b/i],
+    ['school', /\b(school|academy|college|university|daycare|childcare)\b/i],
+    ['tutoring_center', /\b(tutor|tutoring|learning\s*center|test\s*prep)\b/i],
+    ['training_center', /\b(training\s*center|professional\s*training|certification\s*training)\b/i],
+    ['restaurant', /\b(restaurant|cafe|coffee\s*shop|bakery|catering|takeout|diner|bistro)\b/i],
+    ['event_venue', /\b(event\s*venue|banquet|wedding\s*venue|conference\s*center)\b/i],
+    ['hardware_store', /\b(hardware\s*store|building\s*supply|tool\s*supply)\b/i],
+    ['equipment_rental', /\b(equipment\s*rental|tool\s*rental|plant\s*hire)\b/i],
+    ['repair_shop', /\b(repair\s*shop|device\s*repair|phone\s*repair|computer\s*repair)\b/i],
+    ['moving', /\b(moving\s*(?:company|services)|movers?|relocation\s*services)\b/i],
+    ['storage_facility', /\b(self\s*storage|storage\s*facility|storage\s*units?)\b/i],
+    ['delivery_service', /\b(delivery\s*(?:service|company)|courier|logistics|freight)\b/i],
+    ['industrial_maintenance', /\b(industrial\s*maintenance|plant\s*maintenance)\b/i],
+    ['manufacturer', /\b(manufacturer|manufacturing|factory)\b/i],
+    ['machine_shop', /\b(machine\s*shop|machining|metal\s*fabrication)\b/i],
+    ['it_services', /\b(it\s*services|computer\s*services|it\s*support|technology\s*services)\b/i],
+    ['managed_it', /\b(managed\s*it|managed\s*services\s*provider|msp)\b/i],
+    ['travel_agency', /\b(travel\s*agency|travel\s*agent|tour\s*operator)\b/i],
+    ['sports_club', /\b(sports?\s*club|athletic\s*club|sports?\s*center)\b/i],
   ];
 
   for (const [t, regex] of tradePatterns) {
@@ -13410,7 +13457,7 @@ export function checkTradeCoherence(
     'hardware_store', 'equipment_rental', 'repair_shop', 'moving', 'storage_facility',
     'delivery_service', 'industrial_maintenance', 'manufacturer', 'machine_shop',
     'it_services', 'managed_it', 'irrigation', 'travel_agency', 'sports_club',
-    'local_service_business'
+    'financial_services', 'local_service_business'
   ]);
 
   if (validTrades.has(normDeclared)) {
