@@ -268,15 +268,6 @@ export function isOffIcpName(
 
   if (NON_BUSINESS_ENTITY_REGEX.test(clean)) return true;
 
-  if (isCategoryNameMismatch(name, categoryOrTrade)) {
-    // Food-service names are allowed through so checkTradeCoherence can
-    // reclassify a stale trade (test: Sun Garden Chinese + landscaping).
-    // Non-food mismatches (lighting retail as electrician) stay hard-blocked.
-    if (!FOOD_SERVICE_NAME_REGEX.test(clean)) {
-      return true;
-    }
-  }
-
   // Founder discovery is market-wide: excluded categories are prioritization hints,
   // not hard rejection rules. Keep only objective entity/category-integrity checks above.
   return false;
