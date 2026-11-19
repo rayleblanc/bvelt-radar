@@ -11563,7 +11563,7 @@ export async function collectRadarDigest(env: Env): Promise<RadarDigest> {
   lines.push(`<b>Corridas:</b> ${runs} · <b>Jobs discovery:</b> ${nJobs} (${nZero} con 0 resultados) · <b>Jobs fallidos:</b> ${nFailed}`);
   lines.push(`<b>Prospectos nuevos:</b> ${nCreated} · <b>con email:</b> ${nEmail}`);
   lines.push(`<b>Enviados/programados:</b> ${nSent} · <b>esperando tu aprobación:</b> ${nWaiting}`);
-  lines.push(`<b>Presupuesto hoy:</b> discovery restante ${remDisc} · outreach restante ${remOut}${gov ? ` · envíos hoy ${gov.sends_today ?? 0}` : ""}`);
+  lines.push(`<b>Presupuesto hoy:</b> discovery restante ${remDisc} · outreach automático/Tenant restante ${remOut}${gov ? ` · envíos automáticos/Tenant ${gov.sends_today ?? 0}/${gov.daily_limit ?? 0}` : ""}`);
   if (blockedRows.length > 0) {
     lines.push("");
     lines.push("<b>Dónde se frenan:</b>");
