@@ -8728,42 +8728,10 @@ export async function getPriorityTargets(
  * Hard Quality Gate: Rejected Retail and Banned Chains (Bvelt ICP)
  */
 export function isHardRejectedChain(name: string): boolean {
-  if (!name) return false;
-  const n = name.toLowerCase().trim();
-  const banned = [
-    "walmart", "lowe's", "lowes", "home depot", "costco", "target", "sam's club", "sams club",
-    "menards", "ace hardware", "true value", "harbor freight", "tractor supply", "best buy",
-    "kroger", "publix", "walgreens", "cvs", "dollar tree", "dollar general", "family dollar",
-    "autozone", "auto zone", "advance auto", "o'reilly", "sherwin-williams", "floor & decor",
-    "staples", "office depot", "target store"
-  ];
-  if (banned.some(b => n.includes(b))) return true;
-
-  // Hard-reject retail garden centers, nurseries, feed/garden stores, plant stores, supply houses
-  // (name~ search matches "Garden Store" / "Feed & Garden" which are NOT field operators)
-  if (
-    /garden cent(er|re)/i.test(n) ||
-    /\bgarden store\b/i.test(n) ||
-    /\bfeed\b.*\bgarden\b/i.test(n) ||
-    /\bgarden\b.*\bfeed\b/i.test(n) ||
-    /\bfeed store\b/i.test(n) ||
-    /\bagricultural supply\b/i.test(n) ||
-    /plant nursery/i.test(n) ||
-    /tree nursery/i.test(n) ||
-    /\bnursery\b/i.test(n) ||
-    /plant (shop|store|boutique)/i.test(n) ||
-    /greenhouse & (nursery|gifts|retail)/i.test(n) ||
-    /flower (shop|market|store)/i.test(n) ||
-    /\bflorist\b/i.test(n) ||
-    /building supplies/i.test(n) ||
-    /landscape supply/i.test(n) ||
-    /stone supply/i.test(n) ||
-    /mulch supply/i.test(n) ||
-    /\bpet store\b/i.test(n) ||
-    /\bgrocery\b/i.test(n)
-  ) {
-    return true;
-  }
+  // Large retailers and chains are not invalid entities. Keep them in the universe
+  // as lower-priority/referral/enterprise possibilities; never make a name blacklist
+  // the sole reason to erase a commercial prospect.
+  void name;
   return false;
 }
 
