@@ -7591,7 +7591,7 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
       return;
     }
 
-    let draft: { subject: string; body: string };
+    let draft: Awaited<ReturnType<typeof generateAICopy>>;
     try {
       draft = await generateAICopy(prospect, prospect.variant_id || "general_intro", env, missionConfig, "whatsapp");
       await commitBudget(env.RADAR_DB, "founder", "finalize_units", 1);
@@ -7726,7 +7726,7 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
     return;
   }
 
-  let draft: { subject: string; body: string };
+  let draft: Awaited<ReturnType<typeof generateAICopy>>;
   try {
     draft = await generateAICopy(prospect, prospect.variant_id || 'missed_calls', env, missionConfig);
     const lowerSub = (draft.subject || "").trim().toLowerCase();
