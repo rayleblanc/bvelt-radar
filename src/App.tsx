@@ -421,9 +421,12 @@ export default function App() {
 
       // Founder mode never sends tenant_id (backend defaults to founder).
       // Tenant mode always scopes to the selected tenant — isolation is strict.
-      const queryParam = isTenantMode
-        ? `?tenant_id=${encodeURIComponent(selectedTenantId)}`
-        : '';
+      const prospectQuery = new URLSearchParams();
+      if (isTenantMode) prospectQuery.set('tenant_id', selectedTenantId);
+      // READY is backed by the persisted approved queue, not merely the latest 100 records.
+      // The API already scopes this status by tenant and returns contactability per row.
+      if (activeFilter === 'READY') prospectQuery.set('status', 'approved');
+      const queryParam = prospectQuery.toString() ? `?${prospectQuery.toString()}` : '';
 
       // 3. GET /prospects
       let prospectsRes = await fetch(`${apiUrl}/prospects${queryParam}`, {
@@ -548,10 +551,10 @@ export default function App() {
     return () => window.removeEventListener('beforeinstallprompt', handleInstallPrompt);
   }, [apiUrl]);
 
-  // Refetch telemetry on mode or tenant change
+  // Refetch the prospect work queue when its server-side category scope changes.
   useEffect(() => {
     fetchTelemetry();
-  }, [currentMode, selectedTenantId]);
+  }, [currentMode, selectedTenantId, activeFilter]);
 
   // Handle manual API config updates
   const saveApiSettings = (urlVal: string) => {
