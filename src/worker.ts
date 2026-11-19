@@ -4752,9 +4752,9 @@ async function handleDecision(
       if (manualSuppression) {
         return Response.json({ success: false, blocked: true, reason: "suppressed: " + manualSuppression.reason, id }, { status: 409, headers });
       }
-      if (!isEmailValidatedForOutreach(prospect.signals_json || "{}")) {
-        return Response.json({ success: false, blocked: true, reason: "email_not_provider_verified", id }, { status: 409, headers });
-      }
+      // Explicit owner action may send a syntactically valid address without provider mailbox verification.
+      // Suppression, sender identity, lawful-basis acknowledgement, Trust-Stack and idempotency remain mandatory.
+      const providerVerified = isEmailValidatedForOutreach(prospect.signals_json || "{}");
       const manualSequenceId = env.RESEND_API_KEY?.trim() ? "resend_live" : env.BREVO_API_KEY?.trim() ? "brevo_live" : "manual_simulated";
       manualIdempotencyKey = buildOutreachIdempotencyKey(prospect.tenant_id || "founder", prospect.id, manualSequenceId, manualEligibility.nextTouch);
       const existingManual = await db.prepare("SELECT status FROM outreach_idempotency WHERE idempotency_key = ?").bind(manualIdempotencyKey).first() as any;
@@ -4817,7 +4817,13 @@ async function handleDecision(
 
       try {
         await db.prepare("INSERT INTO prospect_events (id, prospect_id, event_type, content, created_at) VALUES (?, ?, ?, ?, ?)")
-          .bind("msg_" + crypto.randomUUID(), id, "message_send_authorized", JSON.stringify({ channel: "email", authorization: "explicit_user_action", mode: prospect.mode || "founder", tenant_id: prospect.tenant_id || "founder" }), timestamp).run();
+          .bind("msg_" + crypto.randomUUID(), id, "message_send_authorized", JSON.stringify({
+            channel: "email", authorization: "explicit_user_action",
+            owner_lawful_basis_asserted: true,
+            deliverability_override: !providerVerified,
+            deliverability_state: providerVerified ? "provider_verified" : "syntax_and_mx_only",
+            mode: prospect.mode || "founder", tenant_id: prospect.tenant_id || "founder"
+          }), timestamp).run();
       } catch (eventError: any) { console.warn("[ManualEmail] send authorization log failed:", eventError?.message || eventError); }
 
       dispatchOutcome = await dispatchEmail({
@@ -7192,41 +7198,25 @@ async function handleScoreJob(job: RadarJobMessage, env: Env): Promise<void> {
   const contactable = hasUsableContactChannel(prospect.email, prospect.phone);
   const minScoreGate = isTenant
     ? (Number(overrides?.min_score) || Number(missionConfig?.min_score) || 40)
-    : 45;
-  const isDisqualified = finalScore < minScoreGate || !contactable;
+    : 35;
+  const needsEnrichment = !contactable;
+  const lowPriority = finalScore < minScoreGate;
 
-  if (isDisqualified) {
-    const disqualificationOutcome = finalScore < minScoreGate ? "below_minimum_score" : "no_contact_channel";
+  if (needsEnrichment || lowPriority) {
+    const nextOutcome = needsEnrichment ? "needs_contact_enrichment" : "low_priority_keep_visible";
     await env.RADAR_DB.prepare(`
       UPDATE prospects
       SET score = ?, opportunity_score = ?, confidence_score = ?, evidence_json = ?, commercial_value_band = ?, pain_hypothesis_json = ?, signals_json = ?, score_breakdown = ?, variant_id = ?, bvelt_angle = ?,
-          fit_score = ?, intent_score = ?, pain_score = ?, ability_to_pay_score = ?, contactability_score = ?, timing_score = ?, evidence_score = ?, signal_freshness_score = ?, expected_value = ?, decision_state = 'disqualified', why_now_json = ?,
-          status = 'disqualified', outcome = ?, updated_at = ?
+          fit_score = ?, intent_score = ?, pain_score = ?, ability_to_pay_score = ?, contactability_score = ?, timing_score = ?, evidence_score = ?, signal_freshness_score = ?, expected_value = ?, decision_state = 'identified', why_now_json = ?,
+          status = 'identified', outcome = ?, updated_at = ?
       WHERE id = ?
     `).bind(
-      finalScore,
-      finalScore,
-      confidence,
-      JSON.stringify(evidenceItems),
-      valueBand,
-      JSON.stringify(painHypothesis),
-      JSON.stringify(updatedMeta),
-      JSON.stringify(breakdown),
-      variantId,
-      bveltAngle,
-      strat.fit_score,
-      strat.intent_score,
-      strat.pain_score,
-      strat.ability_to_pay_score,
-      strat.contactability_score,
-      strat.timing_score,
-      strat.evidence_score,
-      strat.signal_freshness_score,
-      strat.expected_value,
-      strat.why_now_json,
-      disqualificationOutcome,
-      new Date().toISOString(),
-      prospect_id
+      finalScore, finalScore, confidence, JSON.stringify(evidenceItems), valueBand,
+      JSON.stringify(painHypothesis), JSON.stringify(updatedMeta), JSON.stringify(breakdown),
+      variantId, bveltAngle, strat.fit_score, strat.intent_score, strat.pain_score,
+      strat.ability_to_pay_score, strat.contactability_score, strat.timing_score,
+      strat.evidence_score, strat.signal_freshness_score, strat.expected_value,
+      strat.why_now_json, nextOutcome, new Date().toISOString(), prospect_id
     ).run();
     return;
   }
@@ -7440,14 +7430,14 @@ async function handleApproveJob(job: RadarJobMessage, env: Env): Promise<void> {
       .bind(new Date().toISOString(), prospect_id).run();
     return;
   }
-  const verifiedEmail = sanitizeEmail(String(prospect.email || "")).valid && isEmailValidatedForOutreach(prospect.signals_json || "{}");
+  const syntacticallyValidEmail = sanitizeEmail(String(prospect.email || "")).valid;
   const directWhatsApp = Boolean(normalizeWhatsAppPhone(prospect.phone));
-  if (!verifiedEmail && !directWhatsApp) {
+  if (!syntacticallyValidEmail && !directWhatsApp) {
     const holdAt = new Date().toISOString();
-    await env.RADAR_DB.prepare("UPDATE prospects SET status = 'hold', outcome = 'no_verified_direct_channel', updated_at = ? WHERE id = ?")
+    await env.RADAR_DB.prepare("UPDATE prospects SET status = 'hold', outcome = 'no_valid_direct_channel', updated_at = ? WHERE id = ?")
       .bind(holdAt, prospect_id).run();
-    await notifyOnce(env, `no_verified_direct_channel_${prospect.id}`,
-      `<b>⏸️ Prospecto en HOLD — falta destinatario verificable</b>\n<b>Negocio:</b> ${escapeHtml(String(prospect.name || ""))}\n<b>Motivo:</b> correo sin verificación de entregabilidad y teléfono sin código internacional explícito para WhatsApp. Se puede llamar desde Radar; no se abrirá un enlace de WhatsApp sin destinatario.`);
+    await notifyOnce(env, `no_valid_direct_channel_${prospect.id}`,
+      `<b>⏸️ Prospecto en HOLD — falta un canal utilizable</b>\n<b>Negocio:</b> ${escapeHtml(String(prospect.name || ""))}\n<b>Motivo:</b> no hay email con sintaxis válida ni teléfono internacional utilizable. El prospecto permanece guardado para enriquecimiento.`);
     return;
   }
 
@@ -7608,14 +7598,14 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
   prospect.email = emailCheck.email;
   let signalsMeta: any = {};
   try { signalsMeta = JSON.parse(prospect.signals_json || "{}"); } catch {}
-  // Role-based mailboxes (info@, contact@, admin@) are not inherently invalid.
-  // Keep the provider-verification gate, but do not reject them solely by local-part.
-  if (!isEmailValidatedForOutreach(signalsMeta)) {
-    console.warn(`[Outreach] Hold ${prospect.id} — email not provider-verified`);
-    await env.RADAR_DB.prepare("UPDATE prospects SET status = 'hold', outcome = 'skipped_unverified_email', updated_at = ? WHERE id = ?")
+  // Provider verification gates autonomous dispatch, not discovery or owner review.
+  const emailProviderVerified = isEmailValidatedForOutreach(signalsMeta);
+  const emailTrustPolicy = resolveFounderEmailPolicy(prospect);
+  if (!(await hasMxRecords(prospect.email))) {
+    await env.RADAR_DB.prepare("UPDATE prospects SET status = 'hold', outcome = 'recipient_domain_no_mx', updated_at = ? WHERE id = ?")
       .bind(new Date().toISOString(), prospect_id).run();
-    await notifyOnce(env, `unverified_email_${prospect.id}`,
-      `<b>⏸️ Prospecto en HOLD — correo sin verificar</b>\n<b>Negocio:</b> ${escapeHtml(String(prospect.name || ""))}\n<b>Correo:</b> ${escapeHtml(String(prospect.email || "No disponible"))}\n<i>Radar no enviará hasta confirmar que el buzón es entregable.</i>`);
+    await notifyOnce(env, `recipient_no_mx_${prospect.id}`,
+      `<b>⏸️ Email no utilizable</b>\n<b>Negocio:</b> ${escapeHtml(String(prospect.name || ""))}\n<b>Motivo:</b> el dominio no publica registros MX. El prospecto permanece disponible para otro canal o enriquecimiento.`);
     return;
   }
 
@@ -7741,6 +7731,8 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
     job.mode === "founder" &&
     !outreachPaused &&
     (autoFlag === "true" || autoFlag === "1" || autoFlag === "yes") &&
+    emailProviderVerified &&
+    emailTrustPolicy.status === "SEND_ALLOWED" &&
     (isElite || isStrongAuto);
 
   const todayDate = new Date().toISOString().split('T')[0];
@@ -8864,10 +8856,10 @@ export function calculateStrategicScores(
   else if (isPreferredTrade) fit_score += 35;
   else fit_score += 20;
 
-  const isIndependent = /brothers|sons|family|llc|services|pro|tech|contracting|group|co\b/i.test(nameLower);
-  if (isIndependent) fit_score += 25;
+  // Legal suffixes and generic words in a name are not proof of buyer fit.
   if (isPriorityCity) fit_score += 15;
   if (item.website && isRealWebsite(item.website)) fit_score += 15;
+  if (signals.multiple_areas) fit_score += 10;
   fit_score = Math.min(100, Math.max(0, fit_score));
 
   // 2. INTENT SCORE (0 - 100)
@@ -8881,25 +8873,22 @@ export function calculateStrategicScores(
 
   // 3. PAIN SCORE (0 - 100)
   let pain_score = 0;
-  if (signals.sms_gap) pain_score += 40;
-  if (!signals.booking) pain_score += 25;
-  if (signals.emergency) pain_score += 20;
-  if (!signals.quote_request && !signals.estimate_language) pain_score += 15;
+  // Only observed positive friction signals add pain. Missing booking/quote data is UNKNOWN.
+  if (signals.sms_gap) pain_score += 35;
+  if (signals.missed_calls) pain_score += 35;
+  if (signals.emergency) pain_score += 15;
+  if (signals.quote_request || signals.estimate_language) pain_score += 15;
   pain_score = Math.min(100, Math.max(0, pain_score));
 
   // 4. ABILITY TO PAY SCORE (0 - 100)
   let ability_to_pay_score = 0;
+  // Observable scale/complexity signals only; no legal suffix or email-host shortcut.
   const isHighTicketTrade = /hvac|roof|electr|plumb|builder|contractor|commercial/i.test(tradeLower);
-  if (isHighTicketTrade) ability_to_pay_score += 40;
-  else ability_to_pay_score += 25;
-
-  if (item.website && isRealWebsite(item.website)) {
-    ability_to_pay_score += 25;
-    if (email && !/@(gmail|yahoo|hotmail|outlook)\.com$/i.test(email)) {
-      ability_to_pay_score += 20;
-    }
-  }
-  if (signals.multiple_areas) ability_to_pay_score += 15;
+  if (isHighTicketTrade) ability_to_pay_score += 25;
+  if (item.website && isRealWebsite(item.website)) ability_to_pay_score += 15;
+  if (signals.multiple_areas) ability_to_pay_score += 25;
+  if (item.source === "permits" || item.signal_event) ability_to_pay_score += 20;
+  if (signals.quote_request || signals.estimate_language) ability_to_pay_score += 15;
   ability_to_pay_score = Math.min(100, Math.max(0, ability_to_pay_score));
 
   // 5. CONTACTABILITY SCORE (0 - 100)
@@ -8950,13 +8939,13 @@ export function calculateStrategicScores(
   // COMPOSITE STRATEGIC SCORE (0 - 100)
   const freshnessMultiplier = signal_freshness_score / 100;
   let strategic_score = Math.round(
-    (fit_score * 0.20) +
+    (fit_score * 0.25) +
     (pain_score * 0.20) +
-    (intent_score * 0.15) +
-    (timing_score * 0.15) +
-    (contactability_score * 0.15) +
+    (intent_score * 0.20) +
+    (timing_score * 0.10) +
     (ability_to_pay_score * 0.10) +
-    (evidence_score * freshnessMultiplier * 0.05)
+    (evidence_score * freshnessMultiplier * 0.10) +
+    (signal_freshness_score * 0.05)
   );
   strategic_score = Math.min(100, Math.max(0, strategic_score));
 
@@ -8978,7 +8967,7 @@ export function calculateStrategicScores(
   } else if (priority_tier === 'medium') {
     decision_state = 'analyzing';
   } else {
-    decision_state = 'closed';
+    decision_state = 'identified';
   }
 
   // EXPECTED VALUE: P(convert) × ticket — ticket by trade economics
@@ -12210,6 +12199,51 @@ export function isVerifiedDeliverableEmail(
     && Number(qualityScore) >= 0.7
     && !isDisposable
     && !isCatchall;
+}
+
+export type FounderEmailPolicyStatus = "SEND_ALLOWED" | "OWNER_REVIEW" | "CONSENT_REQUIRED" | "SUPPRESSED" | "POLICY_UNKNOWN";
+
+export function resolveFounderEmailPolicy(prospect: any): { status: FounderEmailPolicyStatus; country: string | null; reason: string } {
+  const meta = (() => {
+    try { return typeof prospect?.signals_json === "string" ? JSON.parse(prospect.signals_json || "{}") : (prospect?.signals_json || {}); }
+    catch { return {}; }
+  })();
+  const raw = String(prospect?.country_code || prospect?.country || meta.country_code || meta.country || "").trim().toUpperCase();
+  const location = String(prospect?.city || prospect?.location || "").trim().toUpperCase();
+  const tail = location.split(",").map((part: string) => part.trim()).filter(Boolean).slice(-1)[0] || "";
+  const usStates = new Set("AL AK AZ AR CA CO CT DE FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN MS MO MT NE NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY DC".split(" "));
+  const caProvinces = new Set("AB BC MB NB NL NS NT NU ON PE QC SK YT".split(" "));
+  const ukRegions = new Set(["ENGLAND", "SCOTLAND", "WALES", "NORTHERN IRELAND"]);
+  const auRegions = new Set("NSW VIC QLD SA WA TAS NT ACT".split(" "));
+  let country = raw;
+  if (!country) {
+    if (usStates.has(tail)) country = "US";
+    else if (caProvinces.has(tail)) country = "CA";
+    else if (ukRegions.has(tail)) country = "GB";
+    else if (auRegions.has(tail)) country = "AU";
+  }
+  if (["US", "USA", "UNITED STATES", "UNITED STATES OF AMERICA"].includes(country)) {
+    return { status: "SEND_ALLOWED", country: "US", reason: "US commercial email may be sent without prior opt-in when CAN-SPAM sender, content and opt-out requirements are met." };
+  }
+  const recipientType = String(prospect?.recipient_type || meta.recipient_type || "").toLowerCase();
+  const sourcePublished = Boolean(meta.email_source_url || meta.email_source || meta.email_published_publicly === true);
+  const roleRelevant = meta.email_role_relevant === true || meta.role_relevant === true;
+  const basis = String(meta.email_lawful_basis || meta.consent_basis || "").toLowerCase();
+  if (["GB", "UK", "UNITED KINGDOM"].includes(country)) {
+    if (["corporate", "company", "limited_company", "llp"].includes(recipientType)) {
+      return { status: "SEND_ALLOWED", country: "GB", reason: "Corporate subscriber classified; sender identity and working opt-out remain required." };
+    }
+    return { status: "OWNER_REVIEW", country: "GB", reason: "Subscriber type is not confirmed as corporate; sole traders and some partnerships have different PECR treatment." };
+  }
+  if (["CA", "CANADA", "AU", "AUSTRALIA", "NZ", "NEW ZEALAND"].includes(country)) {
+    const hasBasis = ["express_consent", "implied_consent", "existing_business_relationship", "published_business_contact"].includes(basis);
+    if (hasBasis && sourcePublished && roleRelevant) {
+      return { status: "SEND_ALLOWED", country: country.startsWith("A") ? "AU" : country.startsWith("N") ? "NZ" : "CA", reason: "Documented lawful basis and role-relevant public business contact recorded." };
+    }
+    return { status: "CONSENT_REQUIRED", country: country.startsWith("A") ? "AU" : country.startsWith("N") ? "NZ" : "CA", reason: "A valid consent or other applicable lawful basis must be recorded before dispatch." };
+  }
+  if (!country) return { status: "POLICY_UNKNOWN", country: null, reason: "Country is not established; owner review is required." };
+  return { status: "OWNER_REVIEW", country, reason: "Country-specific B2B electronic marketing rules are not yet classified in Radar." };
 }
 
 export function isEmailValidatedForOutreach(signals: unknown): boolean {
