@@ -2671,7 +2671,7 @@ tests.push({
 tests.push({
   name: "ICP policy follows market-universe and Tenant buyer scope",
   run: () => {
-    assert(isOffIcpName("Gentlemen's Barber & Shave Parlor") === true, "Founder must exclude hair/nail salon category");
+    assert(isOffIcpName("Gentlemen's Barber & Shave Parlor") === false, "Founder retains all real commercial categories; mismatches are corrected, not excluded");
     assert(isOffIcpName("Northside Auto Repair") === false, "Automotive businesses remain Founder-eligible");
     assert(isOffIcpName("Downtown Dental Clinic") === false, "Healthcare businesses remain Founder-eligible");
     assert(isOffIcpName("Harborview Hotel") === false, "Hospitality businesses remain Founder-eligible");
@@ -2800,8 +2800,8 @@ tests.push({
       signals_json: JSON.stringify({ missed_call_evidence: true })
     };
     const barberKit = buildAttackKit(offIcpProspect);
-    assert(barberKit.angle === "disqualified_off_icp", "Barbershop must be disqualified as off-ICP");
-    assert(barberKit.sms === "", "Disqualified prospect must get zero SMS");
+    assert(barberKit.angle !== "disqualified_off_icp", "A valid local business must remain reviewable despite a stale trade label");
+    assert(!/missed calls|unanswered calls|lost leads/i.test(barberKit.sms), "No unobserved pain may be asserted in outreach copy");
   }
 });
 
