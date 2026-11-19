@@ -13329,7 +13329,7 @@ function inferTradeFromTextDetailed(...textParts: (string | undefined)[]): Trade
     ['cleaning', /\b(cleaning|maid|janitorial|pressure\s*wash|power\s*wash|carpet\s*clean|window\s*clean)\b/i],
     ['garage_door', /\b(garage\s*door|overhead\s*door)\b/i],
     ['handyman', /\b(handyman|general\s*contractor|remodel|renovation|home\s*repair)\b/i],
-    ['law_firm', /\b(law\s*firm|lawyer|attorney|solicitor|barrister|legal\s*services|law\s*office)\b/i],
+    ['law_firm', /\b(law|law\s*firm|lawyer|attorney|solicitor|barrister|legal\s*services|law\s*office)\b/i],
     ['accounting_firm', /\b(accountant|accounting|bookkeeping|tax\s*(?:preparation|advisory|consulting)|chartered\s*accountant|\bcpa\b)\b/i],
     ['insurance_agency', /\b(insurance\s*(?:agency|broker|services)|insurance\s*agent)\b/i],
     ['property_management', /\b(property\s*management|property\s*manager|community\s*management|condo\s*management|hoa\s*management|facilities\s*management)\b/i],
