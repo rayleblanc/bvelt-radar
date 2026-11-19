@@ -1,7 +1,7 @@
 declare const process: any;
 import { resolveGithubActionsToken } from './research/githubActions';
 
-import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey, notifyOnce, isVerifiedDeliverableEmail, evaluateFounderOutreachEligibility, buildTechnicalAuditSnapshot, isEmailValidatedForOutreach, isCompletePostalAddress, sendTelegramWithRetry, extractEmailAddress, evaluateResearchEvidenceQuality, classifyReplyText, getTelegramApprovalFeedback, getManualSendPreflightError, hasAIGenerationProvider, WORKERS_AI_FALLBACK_MODEL, extractWorkersAiText, resolveProspectContactability, buildProspectEvidenceContext, buildScheduledRunId, getCurrentDaySenderCount, normalizeWhatsAppPhone, extractPhoneDigits, hasUsableContactChannel, hasEnrichableContactData, buildWhatsAppClickToChatUrl, buildWhatsAppOutreachBody, shouldUseManualWhatsAppFallback, isDiscoveryInfrastructureFailure, hasConfirmedWhatsAppOptIn, isValidWhatsAppConsentEvidenceRef, isOutreachPauseBlocking, normalizeGeneratedMessage, selectHunterDomainEmail, recordRunFinalization, resolveGeoapifyProfile, ensureLegalFooter } from './worker';
+import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey, notifyOnce, isVerifiedDeliverableEmail, evaluateFounderOutreachEligibility, buildTechnicalAuditSnapshot, isEmailValidatedForOutreach, isCompletePostalAddress, sendTelegramWithRetry, extractEmailAddress, evaluateResearchEvidenceQuality, classifyReplyText, getTelegramApprovalFeedback, getManualSendPreflightError, hasAIGenerationProvider, WORKERS_AI_FALLBACK_MODEL, extractWorkersAiText, resolveProspectContactability, buildProspectEvidenceContext, buildScheduledRunId, getCurrentDaySenderCount, normalizeWhatsAppPhone, extractPhoneDigits, hasUsableContactChannel, hasEnrichableContactData, buildWhatsAppClickToChatUrl, buildWhatsAppOutreachBody, shouldUseManualWhatsAppFallback, isDiscoveryInfrastructureFailure, hasConfirmedWhatsAppOptIn, isValidWhatsAppConsentEvidenceRef, isOutreachPauseBlocking, isFounderManualDispatch, normalizeGeneratedMessage, selectHunterDomainEmail, recordRunFinalization, resolveGeoapifyProfile, ensureLegalFooter } from './worker';
 import { DEFAULT_FOUNDER_MISSION, MissionConfig } from './worker';
 import { buildResendIdempotencyKey, buildBrandedEmailHtml, resolveBveltSender, inspectOutboundEmailAuth, normalizeOutreachBody, buildListUnsubscribeHeader, dispatchEmail } from './emailDispatcher';
 import { fetchPermitContractors } from './permitSources';
@@ -22,6 +22,17 @@ interface TestResult {
 }
 
 const tests: Array<{ name: string; run: () => void | Promise<void> }> = [];
+
+tests.push({
+  name: "Founder manual email approvals bypass shared daily caps while Tenant approvals do not",
+  run: () => {
+    assert(isFounderManualDispatch("founder", "founder") === true, "Founder manual approval must bypass the shared governor and budget");
+    assert(isFounderManualDispatch("founder", null) === true, "Legacy Founder records without tenant_id must retain manual approval");
+    assert(isFounderManualDispatch("tenant", "tenant_custom_01") === false, "Tenant manual sends must remain governed");
+    assert(isFounderManualDispatch("founder", "tenant_custom_01") === false, "Inconsistent Founder mode with a Tenant ID must not bypass Tenant controls");
+    assert(isFounderManualDispatch("tenant", "founder") === false, "Explicit Tenant mode must never bypass controls");
+  }
+});
 
 tests.push({
   name: "Founder outreach is not blocked by the Tenant-only outreach pause",
