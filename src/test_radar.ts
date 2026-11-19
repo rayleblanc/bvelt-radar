@@ -1,9 +1,9 @@
 declare const process: any;
 import { resolveGithubActionsToken } from './research/githubActions';
 
-import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey, notifyOnce, isVerifiedDeliverableEmail, evaluateFounderOutreachEligibility, buildTechnicalAuditSnapshot, isEmailValidatedForOutreach, isCompletePostalAddress, sendTelegramWithRetry, extractEmailAddress, evaluateResearchEvidenceQuality, classifyReplyText, getTelegramApprovalFeedback, getManualSendPreflightError, hasAIGenerationProvider, WORKERS_AI_FALLBACK_MODEL, extractWorkersAiText, resolveProspectContactability, buildProspectEvidenceContext, buildScheduledRunId, getCurrentDaySenderCount, normalizeWhatsAppPhone, extractPhoneDigits, hasUsableContactChannel, hasEnrichableContactData, buildWhatsAppClickToChatUrl, buildWhatsAppOutreachBody, shouldUseManualWhatsAppFallback, isDiscoveryInfrastructureFailure, hasConfirmedWhatsAppOptIn, isValidWhatsAppConsentEvidenceRef, normalizeGeneratedMessage, selectHunterDomainEmail, recordRunFinalization, resolveGeoapifyProfile } from './worker';
+import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey, notifyOnce, isVerifiedDeliverableEmail, evaluateFounderOutreachEligibility, buildTechnicalAuditSnapshot, isEmailValidatedForOutreach, isCompletePostalAddress, sendTelegramWithRetry, extractEmailAddress, evaluateResearchEvidenceQuality, classifyReplyText, getTelegramApprovalFeedback, getManualSendPreflightError, hasAIGenerationProvider, WORKERS_AI_FALLBACK_MODEL, extractWorkersAiText, resolveProspectContactability, buildProspectEvidenceContext, buildScheduledRunId, getCurrentDaySenderCount, normalizeWhatsAppPhone, extractPhoneDigits, hasUsableContactChannel, hasEnrichableContactData, buildWhatsAppClickToChatUrl, buildWhatsAppOutreachBody, shouldUseManualWhatsAppFallback, isDiscoveryInfrastructureFailure, hasConfirmedWhatsAppOptIn, isValidWhatsAppConsentEvidenceRef, normalizeGeneratedMessage, selectHunterDomainEmail, recordRunFinalization, resolveGeoapifyProfile, ensureLegalFooter } from './worker';
 import { DEFAULT_FOUNDER_MISSION, MissionConfig } from './worker';
-import { buildResendIdempotencyKey, buildBrandedEmailHtml, resolveBveltSender, inspectOutboundEmailAuth, normalizeOutreachBody } from './emailDispatcher';
+import { buildResendIdempotencyKey, buildBrandedEmailHtml, resolveBveltSender, inspectOutboundEmailAuth, normalizeOutreachBody, buildListUnsubscribeHeader, dispatchEmail } from './emailDispatcher';
 import { fetchPermitContractors } from './permitSources';
 import { pickTargets, findPlace } from './geoFrontier';
 import { isOffIcpName, sanitizeEmail } from './emailSanitizer';
@@ -29,6 +29,67 @@ function assert(condition: boolean, message: string) {
     throw new Error(message);
   }
 }
+
+tests.push({
+  name: "Manual and automatic email bodies share one complete legal footer",
+  run: () => {
+    const env: any = {
+      SENDER_NAME: "Bvelt",
+      SENDER_POSTAL_ADDRESS: "123 Main Street, Austin, TX 78701, United States"
+    };
+    const base = "Hello team, I wanted to ask how you handle new enquiries.";
+    const compliant = ensureLegalFooter(base, env);
+    assert(compliant.includes("123 Main Street, Austin, TX 78701, United States"), "The full sender postal address must be present");
+    assert(compliant.includes('reply "unsubscribe"'), "Email-specific reply unsubscribe instructions must be present");
+    assert(!compliant.includes("Reply STOP to opt out"), "Legacy SMS-style STOP footer must be removed");
+    assert(ensureLegalFooter(compliant, env) === compliant, "Retries must not duplicate the legal footer");
+    const stale = ensureLegalFooter(base + "\n\n--\nFounder\n25100\nLegacy footer", env);
+    assert(!stale.includes("25100") && stale.includes("123 Main Street"), "A stale partial address/footer must be replaced");
+  }
+});
+
+tests.push({
+  name: "Outbound email includes a valid List-Unsubscribe mailto header",
+  run: () => {
+    const header = buildListUnsubscribeHeader("Bvelt <bvelt@bvelt.app>");
+    assert(header === "<mailto:bvelt@bvelt.app?subject=unsubscribe&body=unsubscribe>", "List-Unsubscribe must point to a reply address that Radar receives");
+    assert(buildListUnsubscribeHeader("attacker@example.org") === null, "External sender domains must not be used for unsubscribe headers");
+  }
+});
+
+tests.push({
+  name: "Resend dispatcher actually transmits the List-Unsubscribe header",
+  run: async () => {
+    const originalFetch = globalThis.fetch;
+    let resendPayload: any = null;
+    globalThis.fetch = (async (input: any, init?: any) => {
+      const url = String(input);
+      if (url.includes("cloudflare-dns.com")) {
+        return new Response(JSON.stringify({ Status: 0, Answer: [{ data: "10 mx.example.net" }] }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      if (url === "https://api.resend.com/emails") {
+        resendPayload = JSON.parse(String(init?.body || "{}"));
+        return new Response(JSON.stringify({ id: "resend_test_message" }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      throw new Error("Unexpected network request in dispatcher test: " + url);
+    }) as any;
+    try {
+      const result = await dispatchEmail({
+        to: "owner@northstarplumbing.com",
+        subject: "Test",
+        body: "Test body",
+        from: "Bvelt <bvelt@bvelt.app>",
+        prospectId: "prospect-test",
+        resendApiKey: "test-key",
+        plainTextOnly: true
+      });
+      assert(result.status === "dispatched", "Mock Resend should accept the test email");
+      assert(resendPayload?.headers?.["List-Unsubscribe"] === "<mailto:bvelt@bvelt.app?subject=unsubscribe&body=unsubscribe>", "The actual Resend payload must carry List-Unsubscribe");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  }
+});
 
 tests.push({
   name: "Geoapify resolves normalized global commercial categories without cross-classifying storage",

@@ -4792,7 +4792,8 @@ async function handleDecision(
       }
       const draftSubject = prospect.draft_subject || `Bvelt - Pregunta sobre llamadas de clientes (${prospect.name || 'su negocio'})`;
       const draftBody = prospect.draft_body || `Hola equipo de ${prospect.name},\n\nSoy Rainer, fundador de Bvelt. Ayudo a negocios de servicios a dar seguimiento a consultas de clientes que necesitan seguimiento.\n\n¿Tienen hoy un proceso para contactar a esas personas después? Si le sirve, puedo enviarle un ejemplo breve.`;
-      const safeBody = typeof normalizeOutreachBody === 'function' ? normalizeOutreachBody(draftBody) : draftBody;
+      const normalizedBody = typeof normalizeOutreachBody === 'function' ? normalizeOutreachBody(draftBody) : draftBody;
+      const safeBody = ensureLegalFooter(normalizedBody, env);
 
       // Compliance Hard Gate: missing sender postal address MUST block outbound dispatch
       if (manualHasLiveProvider && !isCompletePostalAddress(env.SENDER_POSTAL_ADDRESS)) {
@@ -7747,9 +7748,9 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
     draft.subject = draft.subject.replace(/^(re:|fwd:)\s*/i, "").trim();
   }
 
-  // Strip any old legacy generic footer and append buildLegalFooter
-  draft.body = draft.body.replace(/\n\nReply STOP to opt out/gi, "").replace(/Reply STOP to opt out/gi, "").trim();
-  draft.body = draft.body + "\n\n" + buildLegalFooter(env);
+  // Apply the same complete postal-address and reply-to-unsubscribe footer
+  // to automatic and manually approved messages, without duplicating it.
+  draft.body = ensureLegalFooter(draft.body, env);
   try {
     await env.RADAR_DB.prepare("INSERT INTO prospect_events (id, prospect_id, event_type, content, created_at) VALUES (?, ?, ?, ?, ?)")
       .bind("msg_" + crypto.randomUUID(), prospect.id, "message_generated", JSON.stringify({ channel: "email", source: (draft as any).source || "fallback_template", subject: draft.subject || "", body_length: String(draft.body || "").length, mode: prospect.mode || "founder", tenant_id: prospect.tenant_id || "founder" }), new Date().toISOString()).run();
@@ -11366,6 +11367,19 @@ export function buildLegalFooter(env: Env): string {
   const senderName = env.SENDER_NAME || "Founder";
   const senderAddress = env.SENDER_POSTAL_ADDRESS || "";
   return `--\n${senderName}\n${senderAddress}\nThis is a commercial message. If you'd rather not hear from me, reply "unsubscribe" and I'll remove you right away.`;
+}
+
+export function ensureLegalFooter(body: string, env: Env): string {
+  const footer = buildLegalFooter(env).trim();
+  const original = String(body || "").trim();
+  if (original.endsWith(footer)) return original;
+  // Remove legacy STOP-only or stale signature blocks before applying the
+  // current complete postal address and email-specific unsubscribe instruction.
+  const withoutLegacy = original
+    .replace(/\n{2,}Reply STOP to opt out\s*$/i, "")
+    .replace(/\n{2,}--\s*\n[\s\S]*$/i, "")
+    .trim();
+  return [withoutLegacy, footer].filter(Boolean).join("\n\n");
 }
 
 /**
