@@ -88,8 +88,10 @@ tests.push({
   run: () => {
     const none = resolveProspectContactability({ name: "Lead", website: null, phone: null, email: null });
     assert(none.commercial_prospect && !none.contact_available && !none.send_authorized, "A commercial prospect can exist without a direct channel or send authorization");
-    const disqualified = resolveProspectContactability({ status: "disqualified", email: "owner@northstarplumbing.com" });
-    assert(!disqualified.commercial_prospect && disqualified.contact_available && !disqualified.send_authorized, "Disqualification must not erase the independent contactability fact");
+    const disqualified = resolveProspectContactability({ status: "disqualified", outcome: "rejected", email: "owner@northstarplumbing.com" });
+    assert(!disqualified.commercial_prospect && disqualified.contact_available && !disqualified.send_authorized && !disqualified.manual_email_available, "Hard disqualification must remain excluded without erasing the independent contactability fact");
+    const scoreReview = resolveProspectContactability({ status: "disqualified", outcome: "below_minimum_score", email: "owner@northstarplumbing.com", signals_json: JSON.stringify({ is_email_validated: false }) });
+    assert(scoreReview.commercial_prospect && scoreReview.manual_email_available && !scoreReview.send_authorized && scoreReview.send_state === "owner_review", "A low score is a review outcome, not a hard ban on owner-reviewed contact through a valid email");
     const offIcp = resolveProspectContactability({ decision_state: "off_icp", phone: "+1 416 234 5678" });
     assert(!offIcp.commercial_prospect && offIcp.contact_available && !offIcp.send_authorized, "Off-ICP status must remain distinct from available contact data");
     const approved = resolveProspectContactability({ status: "approved", email: "owner@northstarplumbing.com" });
@@ -97,6 +99,7 @@ tests.push({
     const sent = resolveProspectContactability({ status: "sent", email: "owner@northstarplumbing.com" });
     assert(!sent.send_authorized && !sent.manual_email_available && sent.send_state === "confirmed", "A provider-confirmed send must not reappear as a fresh manual email action");
     const notified = resolveProspectContactability({ status: "notified", outcome: "whatsapp_manual_ready", email: "owner@northstarplumbing.com", phone: "+1 416 234 5678", signals_json: JSON.stringify({ is_email_validated: false }) });
+    assert(!shouldUseManualWhatsAppFallback("owner@northstarplumbing.com", "+1 416 234 5678", {}), "A phone number must not force WhatsApp to become the primary fallback when a usable email also exists");
     assert(notified.manual_email_available && !notified.send_authorized && notified.channels.email && notified.channels.whatsapp_direct, "An unverified but syntactically valid email must remain available for explicit owner review alongside phone/WhatsApp");
     const heldEmail = resolveProspectContactability({ status: "hold", email: "owner@northstarplumbing.com" });
     assert(heldEmail.manual_email_available && !heldEmail.send_authorized, "Recoverable hold states must not hide a valid email from owner review");
