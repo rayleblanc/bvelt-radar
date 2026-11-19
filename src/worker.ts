@@ -5180,6 +5180,56 @@ export async function recordQueueJobStatus(
 }
 
 /**
+ * Counts a completed outreach draft once per run/prospect. Queue retries must
+ * not inflate run metrics. ai_calls records successful AI-generated drafts
+ * (not raw provider retry attempts); template fallbacks are excluded.
+ */
+export async function recordRunFinalization(
+  db: D1Database,
+  runId: string,
+  prospectId: string,
+  channel: "email" | "whatsapp",
+  source: "gemini" | "groq" | "workers_ai" | "template"
+): Promise<boolean> {
+  if (!runId || !prospectId) return false;
+  const timestamp = new Date().toISOString();
+  try {
+    const finalized = await db.prepare(`
+      INSERT OR IGNORE INTO prospect_events (id, prospect_id, event_type, content, created_at)
+      VALUES (?, ?, 'run_finalized', ?, ?)
+    `).bind(
+      `run_finalized_${runId}_${prospectId}`,
+      prospectId,
+      JSON.stringify({ run_id: runId, channel, source }),
+      timestamp
+    ).run();
+    const finalizedChanges = Number((finalized as any)?.meta?.changes || 0);
+    if (finalizedChanges > 0) {
+      await db.prepare("UPDATE runs SET finalized = finalized + 1 WHERE id = ?").bind(runId).run();
+    }
+
+    if (source !== "template") {
+      const aiDraft = await db.prepare(`
+        INSERT OR IGNORE INTO prospect_events (id, prospect_id, event_type, content, created_at)
+        VALUES (?, ?, 'ai_copy_generated', ?, ?)
+      `).bind(
+        `run_ai_copy_${runId}_${prospectId}`,
+        prospectId,
+        JSON.stringify({ run_id: runId, channel, source }),
+        timestamp
+      ).run();
+      if (Number((aiDraft as any)?.meta?.changes || 0) > 0) {
+        await db.prepare("UPDATE runs SET ai_calls = ai_calls + 1 WHERE id = ?").bind(runId).run();
+      }
+    }
+    return finalizedChanges > 0;
+  } catch (error) {
+    console.warn("[Run Observability] Finalization metric update failed:", error);
+    return false;
+  }
+}
+
+/**
  * Main Asynchronous Queue Consumer Router
  */
 export async function processQueueJob(job: RadarJobMessage, env: Env): Promise<void> {
@@ -7541,7 +7591,7 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
       return;
     }
 
-    let draft: { subject: string; body: string };
+    let draft: Awaited<ReturnType<typeof generateAICopy>>;
     try {
       draft = await generateAICopy(prospect, prospect.variant_id || "general_intro", env, missionConfig, "whatsapp");
       await commitBudget(env.RADAR_DB, "founder", "finalize_units", 1);
@@ -7586,6 +7636,7 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
           draft_subject = 'WhatsApp manual draft', draft_body = ?, signals_json = ?, updated_at = ?
       WHERE id = ?
     `).bind(whatsappBody, JSON.stringify(metadata), timestamp, prospect.id).run();
+    await recordRunFinalization(env.RADAR_DB, job.run_id, String(prospect.id), "whatsapp", draft.source || "template");
 
     const message =
       `<b>📲 BVELT RADAR · CONTACTO WHATSAPP</b>\n\n` +
@@ -7675,7 +7726,7 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
     return;
   }
 
-  let draft: { subject: string; body: string };
+  let draft: Awaited<ReturnType<typeof generateAICopy>>;
   try {
     draft = await generateAICopy(prospect, prospect.variant_id || 'missed_calls', env, missionConfig);
     const lowerSub = (draft.subject || "").trim().toLowerCase();
@@ -7711,9 +7762,7 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
     await bumpOutreachTouch(env.RADAR_DB, prospect, t);
   } catch { /* ok */ }
 
-  try {
-    await env.RADAR_DB.prepare("UPDATE runs SET finalized = finalized + 1 WHERE id = ?").bind(job.run_id).run();
-  } catch (e) {}
+  await recordRunFinalization(env.RADAR_DB, job.run_id, String(prospect.id), "email", draft.source || "template");
 
   // Trust-Stack Governor Gate Check IMMEDIATELY BEFORE SENDING/DISPATCHING
   const gate = await verifyTrustStackGate(prospect, job.run_id, env);
