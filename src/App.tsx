@@ -875,7 +875,7 @@ const submitDecision = async (prospectId: string, action: string, ownerLawfulBas
     const s = String(p.status || '').toLowerCase();
     const outcome = String(p.outcome || '').toLowerCase();
     const cooldown = p.cooldown_until ? Date.parse(p.cooldown_until) : 0;
-    const scoreReviewOnly = s === 'disqualified' && outcome === 'below_minimum_score';
+    const scoreReviewOnly = s === 'disqualified' && ['below_minimum_score', 'low_score_or_no_email'].includes(outcome);
     if (p.suppression_reason || ['suppressed','unsubscribed','blocked','discarded','rejected','bounced','held','hold'].includes(s) || (s === 'disqualified' && !scoreReviewOnly)) return 'BLOCKED';
     if (cooldown > Date.now()) return 'BLOCKED';
     if (['replied','human_review','positive','question','booked','won','converted'].includes(s) || ['positive','replied','booked','won','converted'].includes(outcome)) return 'REPLIED';
@@ -885,7 +885,7 @@ const submitDecision = async (prospectId: string, action: string, ownerLawfulBas
   };
   const getStatusBadge = (p: Prospect) => {
     const s = String(p.status || '').toLowerCase();
-    if (s === 'disqualified' && String(p.outcome || '').toLowerCase() === 'below_minimum_score' && p.contactability?.manual_email_available) return { label: 'EMAIL · OWNER REVIEW', color: 'bg-blue-950/60 text-blue-200 border-blue-800/60' };
+    if (s === 'disqualified' && ['below_minimum_score', 'low_score_or_no_email'].includes(String(p.outcome || '').toLowerCase()) && p.contactability?.manual_email_available) return { label: 'EMAIL · OWNER REVIEW', color: 'bg-blue-950/60 text-blue-200 border-blue-800/60' };
     if (s === 'notified' && String(p.outcome || '').toLowerCase() === 'whatsapp_manual_ready') return { label: 'WA DRAFT · ACCOUNT UNVERIFIED', color: 'bg-amber-950/60 text-amber-200 border-amber-800/60' };
     if (s === 'bounced' || s === 'bounce') return { label: 'BOUNCED', color: 'bg-rose-950/80 text-rose-300 border-rose-800' };
     if (s === 'out_of_office' || s === 'ooo') return { label: 'OUT OF OFFICE', color: 'bg-amber-950/80 text-amber-300 border-amber-800' };
