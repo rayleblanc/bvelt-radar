@@ -4509,7 +4509,7 @@ export function resolveProspectContactability(prospect: any): {
   // below_minimum_score is a ranking/review outcome, not a finding that the
   // company is non-commercial or that its published email is unusable.
   // Keep this soft-disqualified cohort reachable for an explicit owner review.
-  const scoreReviewOnly = status === "disqualified" && outcome === "below_minimum_score";
+  const scoreReviewOnly = status === "disqualified" && ["below_minimum_score", "low_score_or_no_email"].includes(outcome);
   const hardExcludedStatus = ["discarded", "suppressed", "blocked", "off_icp", "rejected"].includes(status) ||
     (status === "disqualified" && !scoreReviewOnly);
   const commercialProspect = !hardExcludedStatus && !["disqualified", "off_icp", "no_go", "do_not_contact", "suppressed", "blocked"].includes(decisionState);
