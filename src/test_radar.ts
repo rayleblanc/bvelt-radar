@@ -764,7 +764,16 @@ tests.push({
   name: "Founder uses bundled global market rotation without country environment variables",
   run: async () => {
     const envMock = {
-      RADAR_DB: { prepare: () => ({ bind: () => ({ first: () => Promise.resolve(null) }) }) } as any,
+      RADAR_DB: {
+        prepare: () => ({
+          run: () => Promise.resolve({ success: true }),
+          bind: () => ({
+            first: () => Promise.resolve(null),
+            all: () => Promise.resolve({ results: [] }),
+            run: () => Promise.resolve({ success: true })
+          })
+        })
+      } as any,
       FOUNDING_TRADES: "accounting;law_firm;dental_clinic",
       FOUNDER_SERVICE_KEY: "test_key",
       TELEGRAM_BOT_TOKEN: "",
@@ -1880,9 +1889,11 @@ tests.push({
     const envMock: any = {
       RADAR_DB: {
         prepare: (query: string) => ({
+          run: () => Promise.resolve({ success: true }),
           bind: () => ({
             first: () => Promise.resolve(tenantRow),
-            run: () => Promise.resolve()
+            all: () => Promise.resolve({ results: [] }),
+            run: () => Promise.resolve({ success: true })
           })
         })
       }
