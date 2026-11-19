@@ -961,39 +961,38 @@ tests.push({
   }
 });
 
-// Test 7: Hard Quality Gates (Banned retail chains & minimum actionable thresholds)
+// Test 7: market-wide discovery keeps valid commercial entities regardless of chain size.
 tests.push({
-  name: "Hard Quality Gates block retail chains and reject junk rows (score < 35 & no email)",
+  name: "Founder market discovery does not hard-reject chains; invalid entities remain separately filtered",
   run: async () => {
-    const { isHardRejectedChain, calculateMultiFactorScore } = await import('./worker');
-
-    // Banned retail chains
-    assert(isHardRejectedChain("Walmart Supercenter") === true, "Walmart must be hard-rejected");
-    assert(isHardRejectedChain("Lowe's Home Improvement") === true, "Lowe's must be hard-rejected");
-    assert(isHardRejectedChain("lowes plumbing supply") === true, "lowes must be hard-rejected");
-    assert(isHardRejectedChain("The Home Depot") === true, "Home Depot must be hard-rejected");
-    assert(isHardRejectedChain("Costco Wholesale") === true, "Costco must be hard-rejected");
-    assert(isHardRejectedChain("Target Store") === true, "Target must be hard-rejected");
-    assert(isHardRejectedChain("Sam's Club") === true, "Sam's Club must be hard-rejected");
-    assert(isHardRejectedChain("Menards Home Improvement") === true, "Menards must be hard-rejected");
-
-    // Real contractor operators NOT banned
-    assert(isHardRejectedChain("Apex Plumbing & Heating LLC") === false, "Contractor must not be banned");
-    assert(isHardRejectedChain("SunState HVAC Solutions") === false, "Contractor must not be banned");
-
-    // Scoring a retail chain returns 0
-    const walmartScore = calculateMultiFactorScore(
+    const { isHardRejectedChain, calculateMultiFactorScore, calculateStrategicScores, resolveFounderEmailPolicy } = await import('./worker');
+    for (const name of ["Walmart Supercenter", "Lowe's Home Improvement", "The Home Depot", "Costco Wholesale", "Target Store"]) {
+      assert(isHardRejectedChain(name) === false, `${name} must remain a possible enterprise/referral prospect`);
+    }
+    const score = calculateMultiFactorScore(
       { name: "Walmart Supercenter", trade: "retail", city: "Tampa, FL" },
-      "info@walmart.com",
-      true,
-      "+18135550000",
-      true,
-      false,
-      {},
-      {}
+      "info@walmart.com", true, "+18135550000", true, false, {}, {}
     );
-    assert(walmartScore.totalScore === 0, "Walmart score must be 0");
-    assert(walmartScore.breakdown.platform_fit === 0, "Platform fit for Walmart must be 0");
+    assert(score.totalScore > 0, "Large chains must not receive an artificial zero score");
+
+    const missing = calculateStrategicScores(
+      { name: "Northstar Services", city: "Austin, TX", trade: "plumbing", website: "northstar.example.org" },
+      null, false, null, false, false, {}, {}
+    );
+    assert(missing.pain_score === 0, "Missing booking/quote signals must not be interpreted as pain");
+    assert(missing.decision_state !== "closed", "Low evidence should remain identified, not closed");
+
+    const withEmail = calculateStrategicScores(
+      { name: "Northstar Services", city: "Austin, TX", trade: "plumbing", website: "northstar.example.org" },
+      "owner@northstar.example.org", false, null, false, false, {}, {}
+    );
+    assert(withEmail.strategic_score === missing.strategic_score, "Email availability must not inflate opportunity score");
+
+    assert(resolveFounderEmailPolicy({ city: "Austin, TX" }).status === "SEND_ALLOWED", "US B2B first-touch may auto-send subject to sender and CAN-SPAM controls");
+    assert(resolveFounderEmailPolicy({ city: "Toronto, ON" }).status === "CONSENT_REQUIRED", "Canada requires a recorded lawful basis before automatic dispatch");
+    assert(resolveFounderEmailPolicy({ city: "London, England", recipient_type: "corporate" }).status === "SEND_ALLOWED", "UK corporate subscriber can use the B2B route");
+    assert(resolveFounderEmailPolicy({ city: "London, England" }).status === "OWNER_REVIEW", "Unknown UK subscriber type must remain owner review");
+    assert(resolveFounderEmailPolicy({ city: "Unknown City" }).status === "POLICY_UNKNOWN", "Unknown jurisdiction must not auto-send");
   }
 });
 
