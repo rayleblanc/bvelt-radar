@@ -43,7 +43,7 @@ tests.push({
     assert(compliant.includes('reply "unsubscribe"'), "Email-specific reply unsubscribe instructions must be present");
     assert(!compliant.includes("Reply STOP to opt out"), "Legacy SMS-style STOP footer must be removed");
     assert(ensureLegalFooter(compliant, env) === compliant, "Retries must not duplicate the legal footer");
-    const stale = ensureLegalFooter(base + "\\n\\n--\\nFounder\\n25100\\nLegacy footer", env);
+    const stale = ensureLegalFooter(base + "\n\n--\nFounder\n25100\nLegacy footer", env);
     assert(!stale.includes("25100") && stale.includes("123 Main Street"), "A stale partial address/footer must be replaced");
   }
 });
