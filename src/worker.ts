@@ -6706,21 +6706,33 @@ async function handleEnrichJob(job: RadarJobMessage, env: Env): Promise<void> {
 
   // Step c: Hunter Domain Search BEFORE guessing patterns (bounce killer)
   // Prefer Hunter / scrape over inventing contact@
+  let hunterSearchOutcome: "not_attempted" | "found" | "no_match" | "unavailable" = "not_attempted";
   if (domain && env.HUNTER_API_KEY) {
-    try {
-      const reserved = await reserveBudget(env.RADAR_DB, tenantId, 'hunter_units', 1);
-      if (reserved) {
-        const hunterEmail = await fetchHunterEmail(domain, env.HUNTER_API_KEY);
-        if (hunterEmail) {
-          const hunterEmailCheck = sanitizeEmail(String(hunterEmail || ""));
-          emailCandidate = hunterEmailCheck.valid ? hunterEmailCheck.email : emailCandidate;
+    const reserved = await reserveBudget(env.RADAR_DB, tenantId, 'hunter_units', 1);
+    if (reserved) {
+      try {
+        const hunterResult = await fetchHunterEmail(domain, env.HUNTER_API_KEY);
+        if (hunterResult.requestSucceeded) {
+          hunterSearchOutcome = hunterResult.email ? "found" : "no_match";
+          if (hunterResult.email) {
+            const hunterEmailCheck = sanitizeEmail(hunterResult.email);
+            emailCandidate = hunterEmailCheck.valid ? hunterEmailCheck.email : emailCandidate;
+          }
+          // Count and commit every successful HTTP request, even when Hunter finds no usable address.
           await env.RADAR_DB.prepare("UPDATE runs SET hunter_calls = hunter_calls + 1 WHERE id = ?").bind(job.run_id).run();
           await commitBudget(env.RADAR_DB, tenantId, 'hunter_units', 1);
         } else {
+          hunterSearchOutcome = "unavailable";
           await releaseBudget(env.RADAR_DB, tenantId, 'hunter_units', 1);
         }
+      } catch (e: any) {
+        hunterSearchOutcome = "unavailable";
+        await releaseBudget(env.RADAR_DB, tenantId, 'hunter_units', 1);
+        console.warn("[Hunter] Domain search unavailable; budget reservation released:", String(e?.message || e).slice(0, 120));
       }
-    } catch (e: any) {}
+    } else {
+      hunterSearchOutcome = "unavailable";
+    }
   }
 
   // Step d: NEVER invent contact@ (primary bounce driver in Resend metrics).
@@ -6755,6 +6767,7 @@ async function handleEnrichJob(job: RadarJobMessage, env: Env): Promise<void> {
     is_email_validated: isEmailValidated,
     email_source: emailSource,
     email_quality: emailQuality,
+    hunter_search_outcome: hunterSearchOutcome,
     permits_90d: effectivePermits,
     signals,
     technical_audits: buildTechnicalAuditSnapshot(null, null, null)
@@ -12141,37 +12154,37 @@ async function scrapeWebsiteContact(url: string): Promise<{
 /**
  * Hunter.io Domain Search (Email finder)
  */
-async function fetchHunterEmail(domain: string, apiKey: string): Promise<string | null> {
-  const url = `https://api.hunter.io/v2/domain-search?domain=${encodeURIComponent(domain)}&api_key=${apiKey}`;
-  const res = await fetch(url, { signal: AbortSignal.timeout(6000) });
-  if (!res.ok) return null;
-  const body: any = await res.json();
-  const emails: any[] = body.data?.emails || [];
-  if (!emails.length) return null;
-
+export function selectHunterDomainEmail(emails: any[]): string | null {
+  if (!Array.isArray(emails) || !emails.length) return null;
   // Prefer higher confidence; prefer personal over generic contact@
   const scored = emails
     .map((e: any) => {
-      const value = String(e.value || "").toLowerCase();
-      const conf = typeof e.confidence === "number" ? e.confidence : 0;
+      const value = String(e?.value || "").toLowerCase();
+      const conf = typeof e?.confidence === "number" ? e.confidence : 0;
       const local = value.split("@")[0] || "";
       const isContact = /^(contact|admin|office|mail|webmaster)$/i.test(local);
       const isInfo = /^(info|hello|hi|support|sales)$/i.test(local);
-      const isPersonal = e.type === "personal" || (local.includes(".") && !isContact);
+      const isPersonal = e?.type === "personal" || (local.includes(".") && !isContact);
       let rank = conf;
       if (isPersonal) rank += 15;
       if (isInfo) rank += 5;
-      if (isContact) rank -= 25; // contact@ drives permanent bounces
-      return { value: e.value as string, conf, rank };
+      if (isContact) rank -= 25;
+      return { value: e?.value as string, conf, rank };
     })
-    .filter((e: any) => e.conf >= 40 || e.rank >= 50)
+    .filter((e: any) => e.value && (e.conf >= 40 || e.rank >= 50))
     .sort((a: any, b: any) => b.rank - a.rank);
-
   if (!scored.length) return null;
-  // Absolute floor: confidence 50+ preferred; allow 40+ only if personal-shaped
   const pick = scored.find((e: any) => e.conf >= 50) || scored[0];
-  if (pick.conf < 40) return null;
-  return pick.value;
+  return pick.conf >= 40 ? pick.value : null;
+}
+
+async function fetchHunterEmail(domain: string, apiKey: string): Promise<{ email: string | null; requestSucceeded: boolean }> {
+  const url = `https://api.hunter.io/v2/domain-search?domain=${encodeURIComponent(domain)}&api_key=${apiKey}`;
+  const res = await fetch(url, { signal: AbortSignal.timeout(6000) });
+  if (!res.ok) return { email: null, requestSucceeded: false };
+  const body: any = await res.json();
+  // A successful no-match response still consumed a provider request/credit.
+  return { email: selectHunterDomainEmail(body.data?.emails || []), requestSucceeded: true };
 }
 
 /**
