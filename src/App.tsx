@@ -92,8 +92,8 @@ interface Prospect {
     send_authorized: boolean;
     manual_email_available?: boolean;
     send_state?: "authorized" | "confirmed" | "owner_review" | "not_authorized";
-    outreach_suppressed?: boolean;
   };
+  outreach_suppressed?: boolean;
 }
 
 interface TenantConfig {
