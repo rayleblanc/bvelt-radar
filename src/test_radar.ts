@@ -95,11 +95,15 @@ tests.push({
     const approved = resolveProspectContactability({ status: "approved", email: "owner@northstarplumbing.com" });
     assert(approved.send_authorized && approved.send_state === "authorized", "An explicitly approved prospect with a usable recipient must be marked authorized");
     const sent = resolveProspectContactability({ status: "sent", email: "owner@northstarplumbing.com" });
-    assert(!sent.send_authorized && sent.send_state === "confirmed", "A provider-confirmed send must not be mislabelled as pending authorization");
+    assert(!sent.send_authorized && !sent.manual_email_available && sent.send_state === "confirmed", "A provider-confirmed send must not reappear as a fresh manual email action");
+    const notified = resolveProspectContactability({ status: "notified", outcome: "whatsapp_manual_ready", email: "owner@northstarplumbing.com", phone: "+1 416 234 5678", signals_json: JSON.stringify({ is_email_validated: false }) });
+    assert(notified.manual_email_available && !notified.send_authorized && notified.channels.email && notified.channels.whatsapp_direct, "An unverified but syntactically valid email must remain available for explicit owner review alongside phone/WhatsApp");
+    const heldEmail = resolveProspectContactability({ status: "hold", email: "owner@northstarplumbing.com" });
+    assert(heldEmail.manual_email_available && !heldEmail.send_authorized, "Recoverable hold states must not hide a valid email from owner review");
     const webOnly = resolveProspectContactability({ website: "https://northstarplumbing.com" });
     assert(webOnly.channels.website && !webOnly.contact_available && !webOnly.channels.email && !webOnly.channels.phone, "A website is research context, not a message recipient");
     const emailOnly = resolveProspectContactability({ email: "owner@northstarplumbing.com" });
-    assert(emailOnly.contact_available && emailOnly.channels.email && !emailOnly.channels.phone && !emailOnly.send_authorized, "Email availability is not permission to send");
+    assert(emailOnly.contact_available && emailOnly.channels.email && !emailOnly.channels.phone && !emailOnly.send_authorized && emailOnly.manual_email_available, "Email availability enables owner review but is not automatic send authorization");
     const phoneOnly = resolveProspectContactability({ phone: "+1 416 234 5678" });
     assert(phoneOnly.contact_available && phoneOnly.channels.phone && phoneOnly.channels.whatsapp_direct && !phoneOnly.send_authorized, "Phone availability is distinct from authorization");
     const combined = resolveProspectContactability({ email: "owner@northstarplumbing.com", phone: "+1 416 234 5678", website: "northstarplumbing.com" });
@@ -188,11 +192,15 @@ tests.push({
 });
 
 tests.push({
-  name: "Unverified email with a usable phone falls back to manual WhatsApp",
+  name: "A valid unverified email remains owner-reviewable; WhatsApp is fallback only without usable email",
   run: () => {
     assert(
-      shouldUseManualWhatsAppFallback("info@example.com", "+1 416 555 0100", { is_email_validated: false }),
-      "A phone must remain usable when the email is not provider-verified"
+      !shouldUseManualWhatsAppFallback("info@example.com", "+1 416 555 0100", { is_email_validated: false }),
+      "Provider verification must not make a syntactically valid email disappear from the manual channel"
+    );
+    assert(
+      shouldUseManualWhatsAppFallback(null, "+1 416 555 0100", {}),
+      "A direct international phone may be offered as an alternative when no usable email exists"
     );
     assert(
       !shouldUseManualWhatsAppFallback("info@example.com", "416-555-0100", { is_email_validated: false }),
@@ -200,11 +208,11 @@ tests.push({
     );
     assert(
       !shouldUseManualWhatsAppFallback("info@example.com", "+1 416 555 0100", { is_email_validated: true }),
-      "A provider-verified email keeps the email outreach path"
+      "A provider-verified email remains the primary email path"
     );
     assert(
       !shouldUseManualWhatsAppFallback("info@example.com", null, { is_email_validated: false }),
-      "An unverified email without a phone must remain held"
+      "An email without a phone must remain available for owner review"
     );
   }
 });
@@ -3153,6 +3161,12 @@ tests.push({
       "founder"
     );
     assert(result.coherent && result.verifiedTrade === "restaurant", "Restaurant evidence must correct a stale landscaping label");
+    const lawFirm = checkTradeCoherence("Duncan Family Law", "storage_facility", "https://duncanfamilylaw.example", "", "founder");
+    assert(lawFirm.coherent && lawFirm.verifiedTrade === "law_firm", "Clear legal-services identity must correct a stale storage category");
+    const wealthFirm = checkTradeCoherence("Baskin Wealth Management", "storage_facility", "https://baskinwealth.example", "", "founder");
+    assert(wealthFirm.coherent && wealthFirm.verifiedTrade === "financial_services", "Wealth management must not inherit the storage category");
+    const propertyFirm = checkTradeCoherence("RE/MAX Hallmark Realty", "storage_facility", "https://hallmarkrealty.example", "", "founder");
+    assert(propertyFirm.coherent && propertyFirm.verifiedTrade === "real_estate", "Real-estate identity must correct the stale storage category");
     assert(classifyReplyText("delivery_delayed", "") === "delivery_delayed", "Transient bounce must remain distinct from permanent bounce");
     assert(classifyReplyText("email.failed", "") === "failed", "Provider failure must have its own classification");
   }
@@ -3174,8 +3188,8 @@ tests.push({
       meta_description: "Chinese restaurant and takeout",
       service_terms_observed: ["restaurant", "takeout"]
     }, "landscaping");
-    assert(!restaurant.allowed && restaurant.reason === "scrapling_category_mismatch", "Restaurant evidence must veto a landscaping label");
-    assert(restaurant.inferredTrade === "restaurant", "The contradictory observed category must be retained for audit");
+    assert(restaurant.allowed && restaurant.reason === "category_mismatch_reclassified", "A clear restaurant identity must correct a stale landscaping label instead of discarding the business");
+    assert(restaurant.inferredTrade === "restaurant", "The corrected observed category must be retained for persistence and audit");
     const synthetic = evaluateResearchEvidenceQuality("California Landscape, Variation 1", {
       page_title: "LA County Department of Arts and Culture",
       meta_description: "Civic Art Program"
