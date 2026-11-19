@@ -92,6 +92,7 @@ interface Prospect {
     send_authorized: boolean;
     manual_email_available?: boolean;
     send_state?: "authorized" | "confirmed" | "owner_review" | "not_authorized";
+    outreach_suppressed?: boolean;
   };
 }
 
@@ -876,6 +877,7 @@ const submitDecision = async (prospectId: string, action: string, ownerLawfulBas
     const outcome = String(p.outcome || '').toLowerCase();
     const cooldown = p.cooldown_until ? Date.parse(p.cooldown_until) : 0;
     const scoreReviewOnly = s === 'disqualified' && ['below_minimum_score', 'low_score_or_no_email'].includes(outcome);
+    if (s === 'held' && outcome === 'radar_outreach_paused' && p.contactability?.manual_email_available && !p.outreach_suppressed) return 'READY';
     if (p.suppression_reason || ['suppressed','unsubscribed','blocked','discarded','rejected','bounced','held','hold'].includes(s) || (s === 'disqualified' && !scoreReviewOnly)) return 'BLOCKED';
     if (cooldown > Date.now()) return 'BLOCKED';
     if (['replied','human_review','positive','question','booked','won','converted'].includes(s) || ['positive','replied','booked','won','converted'].includes(outcome)) return 'REPLIED';
@@ -885,7 +887,7 @@ const submitDecision = async (prospectId: string, action: string, ownerLawfulBas
   };
   const getStatusBadge = (p: Prospect) => {
     const s = String(p.status || '').toLowerCase();
-    if (s === 'disqualified' && ['below_minimum_score', 'low_score_or_no_email'].includes(String(p.outcome || '').toLowerCase()) && p.contactability?.manual_email_available) return { label: 'EMAIL · OWNER REVIEW', color: 'bg-blue-950/60 text-blue-200 border-blue-800/60' };
+    if (((s === 'disqualified' && ['below_minimum_score', 'low_score_or_no_email'].includes(String(p.outcome || '').toLowerCase()) || s === 'held' && String(p.outcome || '').toLowerCase() === 'radar_outreach_paused') && p.contactability?.manual_email_available && !p.outreach_suppressed)) return { label: 'EMAIL · OWNER REVIEW', color: 'bg-blue-950/60 text-blue-200 border-blue-800/60' };
     if (s === 'notified' && String(p.outcome || '').toLowerCase() === 'whatsapp_manual_ready') return { label: 'WA DRAFT · ACCOUNT UNVERIFIED', color: 'bg-amber-950/60 text-amber-200 border-amber-800/60' };
     if (s === 'bounced' || s === 'bounce') return { label: 'BOUNCED', color: 'bg-rose-950/80 text-rose-300 border-rose-800' };
     if (s === 'out_of_office' || s === 'ooo') return { label: 'OUT OF OFFICE', color: 'bg-amber-950/80 text-amber-300 border-amber-800' };
@@ -1638,7 +1640,7 @@ const submitDecision = async (prospectId: string, action: string, ownerLawfulBas
                                 className="px-2.5 py-1 rounded-lg bg-blue-950/50 border border-blue-800/40 text-blue-300 hover:bg-blue-900/60 flex items-center gap-1 font-bold"
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  if (window.confirm(`¿Enviar el correo a ${emailRecipient}? Confirma que tienes una base legal aplicable para este destinatario. Si el buzón no está verificado por proveedor, el riesgo de rebote es mayor.`)) void submitDecision(p.id, 'approve', true);
+                                  if (window.confirm(`Vas a enviar un correo real a ${emailRecipient}. Revisa que el destinatario y el mensaje sean correctos. Si el buzón no está verificado, puede rebotar y afectar la reputación del remitente. Confirma que tienes una base válida para contactar y que no existe una baja o solicitud de no contacto. ¿Enviar ahora?`)) void submitDecision(p.id, 'approve', true);
                                 }}
                               >
                                 <Mail className="w-3.5 h-3.5 text-blue-400" />
