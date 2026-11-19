@@ -8978,14 +8978,14 @@ export function calculateStrategicScores(
   const why_now = {
     what_is_happening: item.signal_event 
       ? `Active demand surge in ${item.city} driven by ${item.signal_event} with high contractor need`
-      : `${item.name} is actively advertising ${item.trade} in ${item.city} with evident lead response gaps`,
+      : `${item.name} is a discovered ${item.trade} business in ${item.city}; lead-response pain is not yet established`,
     what_evidence_exists: observed_facts,
-    why_it_matters: "Every missed call or slow estimate follow-up redirects high-margin jobs to prompt competitors.",
+    why_it_matters: "Unanswered inquiries can cost service businesses opportunities, but this prospect's loss volume has not been verified.",
     why_now: item.signal_event 
       ? `Event window is live right now; immediate automated outreach produces peak response rates.`
-      : `High contactability and verifiable pain signal create an optimal window for high-relevance outreach.`,
-    recommended_action: "Dispatch personalized outreach with interactive demo illustrating automated instant-response recovery.",
-    potential_economic_result: `$${estimatedMonthlyRecoveredValue} estimated monthly recovered jobs (${expected_value} EV)`,
+      : `No time-sensitive pain has been verified; qualify the business before making a recovery claim.`,
+    recommended_action: "Keep visible, enrich contact details and qualify potential fit without asserting a problem.",
+    potential_economic_result: expected_value === null ? "N/D — no observed loss signal to model yet" : `Modeled opportunity: ${expected_value}; not verified revenue`,
     distinctions: {
       observed_facts,
       inferences,
