@@ -8970,9 +8970,8 @@ export function calculateStrategicScores(
   }
 
   const estimations: string[] = [
-    `Estimated average contractor ticket for ${item.trade}: $${avgJobValue}`,
-    `Estimated monthly revenue at risk from dropped leads: $${estimatedMonthlyRecoveredValue}`,
-    `Calculated expected value under current timing window: $${expected_value}`
+    `Estimated average ticket benchmark for ${item.trade}: ${avgJobValue}`,
+    ...(expected_value === null ? [] : [`Modeled opportunity value: ${expected_value}; not verified revenue`])
   ];
 
   const why_now = {
@@ -9358,7 +9357,7 @@ export function calculateMultiFactorScore(
 
   const painHypothesis: Record<string, string> = {};
   if (signals.sms_gap) {
-    painHypothesis.sms_gap = "The business has a prominent phone number but no option to text or SMS. Up to 60% of consumers prefer text over voice calls, leading to potential drop-off of mobile visitors.";
+    painHypothesis.sms_gap = "A phone-first contact path was observed without a corresponding text/SMS option on the reviewed page; customer preference and lost-lead impact are not verified.";
   }
   if (signals.missed_calls || signals.missed_call_evidence) {
     painHypothesis.missed_call_evidence = "Observed missed-call or unanswered-call evidence was recorded.";
@@ -11037,7 +11036,7 @@ export function buildAttackKit(p: any): {
   const city = String(p.city || "");
   const isTenantLead = p.mode === 'tenant' || (p.tenant_id && p.tenant_id !== 'founder');
 
-  // 1. Off-ICP and Trade Coherence Hard Gate (Barbers, Salons, etc. CANNOT get SMS)
+  // 1. Preserve valid businesses; correct stale category labels instead of excluding them.
   const coherence = checkTradeCoherence(
     name,
     String(p.trade || ''),
