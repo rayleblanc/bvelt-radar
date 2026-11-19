@@ -7458,7 +7458,7 @@ async function handleApproveJob(job: RadarJobMessage, env: Env): Promise<void> {
     UPDATE prospects SET status = 'approved', updated_at = ? WHERE id = ?
   `).bind(approvalTimestamp, prospect_id).run();
   try {
-    const approvedChannel = shouldUseManualWhatsAppFallback(prospect.email, prospect.phone, prospect.signals_json || "{}") ? "whatsapp" : "email";
+    const approvedChannel = sanitizeEmail(String(prospect.email || "")).valid ? "email" : "whatsapp";
     await env.RADAR_DB.prepare("INSERT INTO prospect_events (id, prospect_id, event_type, content, created_at) VALUES (?, ?, ?, ?, ?)")
       .bind("msg_" + crypto.randomUUID(), prospect_id, "message_send_authorized", JSON.stringify({ channel: approvedChannel, authorization: "telegram_human_approval", mode: "founder", tenant_id: "founder" }), approvalTimestamp).run();
   } catch (eventError: any) { console.warn("[ApproveJob] send authorization event log failed:", eventError?.message || eventError); }
@@ -7494,7 +7494,7 @@ async function handleOutreachJob(job: RadarJobMessage, env: Env): Promise<void> 
   }
   // If there is no provider-verified email, use a phone-based manual WhatsApp
   // fallback when possible. Never treat the unverified email as deliverable.
-  if (shouldUseManualWhatsAppFallback(prospect.email, prospect.phone, prospect.signals_json || "{}")) {
+  if (!sanitizeEmail(String(prospect.email || "")).valid && shouldUseManualWhatsAppFallback(prospect.email, prospect.phone, prospect.signals_json || "{}")) {
     const phoneDigits = extractPhoneDigits(prospect.phone);
     const waPhone = normalizeWhatsAppPhone(prospect.phone);
     if (!phoneDigits) {
