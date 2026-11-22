@@ -69,3 +69,31 @@ export function toTelUrl(
   const e164 = normalizePhoneE164(raw, defaultCountry);
   return e164 ? `tel:${e164}` : null;
 }
+
+
+/**
+ * Prefer the installed WhatsApp app on mobile. Android's intent URL targets the
+ * WhatsApp package and carries a browser fallback; iOS uses the registered
+ * whatsapp:// scheme. Desktop keeps the universal wa.me URL.
+ */
+export function toWhatsAppLaunchUrl(
+  raw: unknown,
+  message = "",
+  userAgent = ""
+): string | null {
+  const webUrl = toWhatsAppUrl(raw, message);
+  if (!webUrl) return null;
+  const value = String(raw).trim();
+  const e164 = normalizePhoneE164(value);
+  if (!e164) return null;
+  const phone = e164.slice(1);
+  const text = message ? `&text=${encodeURIComponent(message)}` : "";
+  const ua = String(userAgent).toLowerCase();
+  if (/android/.test(ua)) {
+    return `intent://send?phone=${phone}${text}#Intent;scheme=whatsapp;package=com.whatsapp;S.browser_fallback_url=${encodeURIComponent(webUrl)};end`;
+  }
+  if (/iphone|ipad|ipod/.test(ua)) {
+    return `whatsapp://send?phone=${phone}${text}`;
+  }
+  return webUrl;
+}
