@@ -241,3 +241,13 @@ Not yet validated or deployed:
 - PR #63 was merged at 2026-11-22T00:25:23Z. Merge commit `6ea2e446ab8f28fdb56d792c9fcd4792fc52cfee`; current main includes all Founder inbox UI code. Confirmed by fetching main `src/App.tsx`.
 - The CI failures are corrected; no outstanding failing run on this feature branch was observed. Older unrelated historical failures exist in repository Actions history.
 - This merge changes the PWA bundle source, not production deployment. Cloudflare production rollout/runtime verification remains separate and has not been claimed.
+
+
+### WhatsApp PWA handoff fix — 22-11-2026
+
+- Root cause: PWA used only the universal `https://wa.me/{number}?text=...` link, opened in a new browser tab. On mobile/browser configurations this can land on WhatsApp's web/official handoff page instead of preferring the installed app.
+- Added `toWhatsAppLaunchUrl` in `src/phoneUtils.ts`: Android uses an explicit WhatsApp package intent with wa.me browser fallback; iOS uses the registered `whatsapp://send` scheme; desktop/other clients retain the universal wa.me link.
+- Updated the primary Founder/Tenant PWA WhatsApp action to use the platform-aware launch URL and same-tab handoff.
+- Commits: `b0252ff8828dbf5acd3208c70020bb9493ea9cbb` (helper), `56fe743d00750a5151229c31f1779397836cad3c` (PWA action).
+- No changes to prospect phone data, score, send authorization, WhatsApp consent, automation, or outbound dispatch. This opens a manual chat only; it does not send.
+- Validation: source edits confirmed on main. GitHub Actions run for these two commits has not yet appeared in Actions history; Android/iOS device smoke tests and production Cloudflare deployment are still outstanding. Do not claim the live PWA has changed until deployed.
