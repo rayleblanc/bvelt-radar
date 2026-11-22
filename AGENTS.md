@@ -179,3 +179,16 @@ The owner requests a simpler, mobile-first commercial workbench. This section is
 5. Prove Telegram/PWA parity for identical scope/window; label budgets and approval backlog separately.
 6. Verify outbound actions remain explicit and safe: no WhatsApp/SMS send from a deep link, no send recorded on open, no auto-send enablement, no cross-mode/tenant leakage.
 7. After Actions hold release (2026-12-01T00:00:00Z), implement on a fresh branch from then-current main, run CI and inspect full diff. Do not bypass the hold or deploy before checks and operational gates pass.
+
+### P7 operational finding — 22-11-2026
+
+Live Resend + D1 inspection found a delivery-state regression that is more urgent than the PWA redesign:
+
+- Resend domain bvelt.app is verified; sending/receiving enabled.
+- Resend account lists 76 recent email records: 50 delivered, 23 bounced, 3 other statuses. Webhook delivery itself reports success for all 65 returned events (43 delivered, 20 bounced, 2 received); this means Resend successfully posted events to Radar, not that all emails were delivered.
+- D1 email_dispatch_logs has 157 rows but only 127 distinct provider message IDs, so status-history rows must not be counted as unique emails.
+- Confirmed sample: Florida Plumbing HVAC received a Resend event with bounce.type=Transient and DNS lookup timeout (temporary). Radar webhook correctly recorded delivery_delayed, but scheduled reconciliation later overwrote prospect and dispatch status to bounced and inserted resend_bounced suppression. This is a confirmed permanent-vs-transient classification bug in reconcileResendDeliveries: it treats last_event='bounced' as permanent without checking data.bounce.type.
+- Current suppression table has 48 entries reason resend_bounced. Do not assume all are permanent until audited.
+- Webhook route currently authenticates using a query-string token; code does not verify Svix signature/timestamp. It also lacks provider-event idempotency and can overwrite later states with older events. Unknown event types default to replied. These are P7 security/state-integrity defects.
+- Current Resend webhook subscribes to email.received, delivered, complained and bounced; it does not subscribe to delivery_delayed, failed or suppressed. Bounce payloads still carry transient/permanent classification.
+- No data was changed; no emails sent/replayed; no webhook or secret altered.
