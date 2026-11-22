@@ -192,3 +192,10 @@ Live Resend + D1 inspection found a delivery-state regression that is more urgen
 - Webhook route currently authenticates using a query-string token; code does not verify Svix signature/timestamp. It also lacks provider-event idempotency and can overwrite later states with older events. Unknown event types default to replied. These are P7 security/state-integrity defects.
 - Current Resend webhook subscribes to email.received, delivered, complained and bounced; it does not subscribe to delivery_delayed, failed or suppressed. Bounce payloads still carry transient/permanent classification.
 - No data was changed; no emails sent/replayed; no webhook or secret altered.
+
+
+### Log/source isolation check — 22-11-2026
+- GitHub default-branch code search for both "remesa" and "remittance" returned no matches in rayleblanc/bvelt-radar or rayleblanc/LocalFlowPro.
+- Cloudflare Workers Observability lists the active services bvelt and bvelt-radar; full-text needle "remit" returned zero events over the inspected 7-day window. This only rules out matching events in that Worker dataset/window, not other external notification systems.
+- Datadog log search was unavailable because the connected account returned "No valid indexes specified"; no claim is made about Datadog logs.
+- Do not import, add or process remittance logs as Bvelt/Radar project work unless a future requirement explicitly makes them relevant.
