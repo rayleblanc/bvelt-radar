@@ -145,3 +145,37 @@ Archivos, diff, commit/SHA, PR/merge, tests realmente ejecutados, logs completos
 - Founder manual sends still require an explicit owner action and acknowledgement, a syntactically valid email, authenticated sender/domain and complete postal footer for live dispatch, suppression/opt-out/bounce/complaint checks, per-recipient idempotency/cooldown, sender governor and available budget. Global kill switch and circuit breaker remain effective.
 - Paused Founder records are surfaced as `EMAIL · OWNER REVIEW` only when their email is usable and the composite suppression check is clear. Suppressed/cooldown records remain blocked.
 - `FOUNDER_AUTO_OUTREACH=false` remains unchanged. This change restores owner-directed manual outreach; it does not enable autonomous Founder sending or relax Tenant controls.
+
+## Founder PWA action inbox — requested UX contract (21-11-2026)
+
+The owner requests a simpler, mobile-first commercial workbench. This section is a future implementation contract, not a claim that the UI is already changed.
+
+- Keep primary navigation limited to Contactar and Configuración Tenant. Contactar opens one canonical Centro de acción / Para actuar inbox. Its tabs are Todos, Para actuar, Nuevos, Enviados, Respuestas and Bloqueados. Labels map to explicit lifecycle states.
+- Para actuar is one unified ranked list, not separate email and WhatsApp pages. Each row shows one primary next action, strategic opportunity score, evidence/confidence, reason for priority, channel availability, policy/readiness and whether owner approval is required. A high score is not permission to send.
+- Separate axes: (1) opportunity_score / strategic_score = commercial potential; (2) evidence confidence = observed facts vs inferred/unknown; (3) channel readiness = authentic contact data, provider verification/deliverability, policy, suppression and sender readiness. Never substitute legacy prospects.score for strategic score without an explicit compatibility contract. Do not silently mix prospects.opportunity_score with opportunities.strategic_score; select one canonical score per API response and expose provenance/version.
+- Initial Para actuar priority threshold may be 65/100, configurable and tested. It is work-queue prioritization only, never a legal, consent, suppression or auto-send gate. Include lower-score valid prospects in Todos with a reasoned next step.
+- Never show 0/100 when scoring is pending, missing, stale or failed. Render distinct states: Evaluación pendiente, Sin datos suficientes, Evaluación no disponible, Evaluado (score), and error/retry. Only a completed numeric score may render as a score. Expose queue state and last evaluation time; revalidate after async jobs finish and when the PWA resumes. Use bounded backoff plus explicit refresh, not unbounded polling.
+- Channel badges must be truthful and orthogonal: EMAIL · OWNER REVIEW, EMAIL · SEND ALLOWED, EMAIL · PROVIDER VERIFIED, EMAIL · INVALID/BOUNCED/SUPPRESSED, WHATSAPP · NUMBER ONLY, WHATSAPP · ACCOUNT UNVERIFIED, WHATSAPP · CONSENT REQUIRED, PHONE, SMS · REVIEW, NO CHANNEL. An email field only means an address is stored; it does not prove mailbox/person identity or legal send permission. E.164 phone does not prove WhatsApp registration or consent. Never label phone-only as WhatsApp.
+- Cards show email presence and verification/policy state; phone presence; WhatsApp account verification and consent independently; SMS/voice separately. Next action must be explicit: review draft, owner-confirm email, open WhatsApp (manual; opening is not sending), call, SMS review, enrich contact, or no safe channel.
+- Distinguish discovered, scored, owner review/notified, owner-approved, dispatch attempted, provider accepted, delivered, replied, bounced, complained, suppressed, blocked, discarded and terminal outcomes. Never call notified/queued/approved/scheduled a sent email, or provider accepted delivered/received.
+- Telegram digest and PWA metrics use one server-side aggregation contract and identical time windows/definitions. Label discovery budget separately from owner-approval backlog and send budget. State scope/window and avoid channel double-counting.
+- Replace fallback Missed Calls with evidence-backed angle labels. Unknown angle becomes Por calificar / Hipótesis por validar; never claim missed calls without an observation.
+- Founder auto-send remains disabled (FOUNDER_AUTO_OUTREACH=false). Keep owner-confirmed manual sends and Tenant controls isolated. This UX request does not authorize changing auto-send, sender governor, suppression, consent, legal policy, budgets, webhook subscriptions or secrets.
+- Keep scoring formula/weights unchanged until golden fixtures validate the full pipeline and score provenance. Show compact expandable breakdown with actual dimensions and evidence; unknown remains unknown, not zero.
+
+### Live D1 baseline — read-only, 21-11-2026
+- Founder cohort: 675 prospect rows; 275 have a non-empty email field; 431 have a non-empty phone field; 422 have a non-empty website field. These are field-presence counts, not verified or send-ready channels.
+- Active/non-terminal cohort (excluding lowercase disqualified, blocked and discarded): 329 rows. opportunity_score is positive for 300; 30 have decision_state=unscored; score_breakdown was populated for the inspected cohort.
+- Same cohort contact fields: 191 email+phone, 4 email-only, 117 phone-only, 17 no channel. Phone-only must not be labelled WhatsApp without separate account verification and consent evidence.
+- opportunities contains 142 Founder rows with strategic_score 0–90. This differs in coverage from 329 prospect rows and must be reconciled before selecting canonical display score; never average or silently substitute them.
+- All Founder statuses: disqualified 336, identified 72, scored 63, hold 48, notified 40, bounced 37, sent 32, delivered 25, discarded 8, held 7, qualified 4, blocked 2, human_review 1. Status counts are not available-action counts without eligibility joins.
+- No D1 data/schema was changed.
+
+### Acceptance gates after Actions hold
+1. Trace /prospects, /health, scoring queue consumer, Telegram digest and UI mapping end-to-end. Define a versioned response contract for score provenance, evidence, evaluation state, channel readiness and next action.
+2. Reconcile prospects.opportunity_score, opportunities.strategic_score, decision_state and score dimensions with production D1 reads; no schema migration until live schema/ledger comparison and rollback plan.
+3. Add pure/golden tests for score source selection, null/unknown/pending/error rendering, 65-point prioritization, channel truth table, policy/suppression precedence and lifecycle counts; include them in test:radar.
+4. Add endpoint/UI tests for mobile layout, single inbox, all history tabs, search/filter, sorting, pagination, PWA resume/revalidation and async queue completion.
+5. Prove Telegram/PWA parity for identical scope/window; label budgets and approval backlog separately.
+6. Verify outbound actions remain explicit and safe: no WhatsApp/SMS send from a deep link, no send recorded on open, no auto-send enablement, no cross-mode/tenant leakage.
+7. After Actions hold release (2026-12-01T00:00:00Z), implement on a fresh branch from then-current main, run CI and inspect full diff. Do not bypass the hold or deploy before checks and operational gates pass.
