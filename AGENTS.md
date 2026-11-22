@@ -225,3 +225,10 @@ Not yet validated or deployed:
 - No auto-send flags, secrets, webhooks or provider settings changed.
 - Full TypeScript/Vite build and mobile/browser regression tests still required before merge/deploy.
 - Follow-up: show action queue count and improve metric strip; add tests for score-source precedence and channel truth table. Confirm whether `opportunity_score` is populated by current scoring pipeline for all current prospects before declaring score reconciliation complete.
+
+
+### Founder PWA action inbox — CI and merge result (22-11-2026)
+- Fixed the initial JSX wrapper regression found by CI; final PR head `de0891e2e63278a22eed919a41cd63e906822fb4`.
+- Radar CI run #860 passed: TypeScript/Vite build, `test:radar`, and Python sidecar tests.
+- PR #63 merged to main as `6ea2e446ab8f28fdb56d792c9fcd4792fc52cfee`.
+- Production deployment is NOT yet confirmed. Cloudflare's latest observed Worker deployment remains the pre-change version from 2026-11-22 00:15:36Z. Do not claim the PWA UI is live until a new Worker version with the merged assets is deployed and verified.
