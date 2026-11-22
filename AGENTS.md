@@ -232,3 +232,12 @@ Not yet validated or deployed:
 - Radar CI run #860 passed: TypeScript/Vite build, `test:radar`, and Python sidecar tests.
 - PR #63 merged to main as `6ea2e446ab8f28fdb56d792c9fcd4792fc52cfee`.
 - Production deployment is NOT yet confirmed. Cloudflare's latest observed Worker deployment remains the pre-change version from 2026-11-22 00:15:36Z. Do not claim the PWA UI is live until a new Worker version with the merged assets is deployed and verified.
+
+
+### GitHub Actions follow-up — Founder inbox merge verified (22-11-2026)
+
+- The two earlier failed Radar CI runs (#858/#859; run IDs 44966430112 and 44966459558) failed only at `npm run build` due to the JSX wrapper placement in the new prospect card channel badges. The signal-container wrapper was restored in commit `de0891e2e63278a22eed919a41cd63e906822fb4`.
+- Latest run #860 (ID 44966486972) is GREEN: `typescript-build` passed (includes `tsc && vite build` and `npm run test:radar`); `sidecar-tests` passed; `worker-bundle` was skipped by workflow conditions.
+- PR #63 was merged at 2026-11-22T00:25:23Z. Merge commit `6ea2e446ab8f28fdb56d792c9fcd4792fc52cfee`; current main includes all Founder inbox UI code. Confirmed by fetching main `src/App.tsx`.
+- The CI failures are corrected; no outstanding failing run on this feature branch was observed. Older unrelated historical failures exist in repository Actions history.
+- This merge changes the PWA bundle source, not production deployment. Cloudflare production rollout/runtime verification remains separate and has not been claimed.
