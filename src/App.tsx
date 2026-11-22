@@ -6,7 +6,7 @@
  */
 
 import React, { useState, useEffect, useMemo } from 'react';
-import { toWhatsAppUrl, toSmsUrl, toTelUrl } from './phoneUtils';
+import { toWhatsAppUrl, toWhatsAppLaunchUrl, toSmsUrl, toTelUrl } from './phoneUtils';
 import { 
   BarChart, Bar, AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid
 } from 'recharts';
@@ -1690,14 +1690,13 @@ const submitDecision = async (prospectId: string, action: string, ownerManualApp
                             )}
                             {canOpenWhatsApp && p.phone && hasDirectWhatsAppRecipient(p.phone) && toWhatsAppUrl(p.phone, whatsappMessageBody) && (
                               <a 
-                                href={toWhatsAppUrl(p.phone, whatsappMessageBody)!}
-                                target="_blank" 
-                                rel="noreferrer" 
+                                href={toWhatsAppLaunchUrl(p.phone, whatsappMessageBody, window.navigator.userAgent) || toWhatsAppUrl(p.phone, whatsappMessageBody)!}
+                                target="_self" 
                                 className="px-2.5 py-1 rounded-lg bg-emerald-950/50 border border-emerald-800/40 text-emerald-300 hover:bg-emerald-900/60 flex items-center gap-1 font-bold"
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   setShowOutcomeControls(prev => ({ ...prev, [p.id]: true }));
-                                   void recordProspectMessageEvent(p.id, 'message_channel_opened', 'whatsapp');
+                                  void recordProspectMessageEvent(p.id, 'message_channel_opened', 'whatsapp');
                                 }}
                               >
                                 <MessageSquare className="w-3.5 h-3.5 text-emerald-400" />
