@@ -1628,6 +1628,7 @@ const submitDecision = async (prospectId: string, action: string, ownerManualApp
                               : null}
                           </div>
 
+                          <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
                             {currentMode === 'tenant' ? (
                               <>
                                 {signalsList.length > 0 ? (
