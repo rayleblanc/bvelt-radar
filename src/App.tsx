@@ -57,6 +57,9 @@ interface Prospect {
   phone: string | null;
   email: string | null;
   score: number;
+  opportunity_score?: number | null;
+  strategic_score?: number | null;
+  scoreEvaluated?: boolean;
   signals_json: string;
   score_breakdown: string;
   draft_subject: string;
@@ -427,7 +430,8 @@ export default function App() {
       if (isTenantMode) prospectQuery.set('tenant_id', selectedTenantId);
       // READY is backed by the persisted approved queue, not merely the latest 100 records.
       // The API already scopes this status by tenant and returns contactability per row.
-      if (activeFilter === 'READY') prospectQuery.set('status', 'approved');
+      prospectQuery.set('limit', '1000');
+      // Filter in the client after loading the complete bounded tenant-scoped workbench.
       const queryParam = prospectQuery.toString() ? `?${prospectQuery.toString()}` : '';
 
       // 3. GET /prospects
@@ -461,7 +465,11 @@ export default function App() {
           website: p.website || p.website_url || null,
           phone: p.phone || null,
           email: p.email || null,
-          score: typeof p.score === 'number' ? p.score : (typeof p.overall_score === 'number' ? p.overall_score : (typeof p.total_score === 'number' ? p.total_score : 0)),
+          opportunity_score: typeof p.opportunity_score === 'number' ? p.opportunity_score : null,
+          strategic_score: typeof p.strategic_score === 'number' ? p.strategic_score : null,
+          scoreEvaluated: [p.opportunity_score, p.score, p.overall_score, p.total_score].some(v => typeof v === 'number' && Number.isFinite(v)),
+          // The per-prospect opportunity_score is the canonical score. Do not let a missing legacy score mask it.
+          score: typeof p.opportunity_score === 'number' ? p.opportunity_score : (typeof p.score === 'number' ? p.score : (typeof p.overall_score === 'number' ? p.overall_score : (typeof p.total_score === 'number' ? p.total_score : 0))),
           signals_json: typeof p.signals_json === 'string' ? p.signals_json : JSON.stringify(p.signals || p.signals_json || {}),
           score_breakdown: p.score_breakdown || p.breakdown || (typeof p.score_details === 'string' ? p.score_details : ''),
           draft_subject: p.draft_subject || p.subject || '',
@@ -882,7 +890,11 @@ const submitDecision = async (prospectId: string, action: string, ownerManualApp
     if (cooldown > Date.now()) return 'BLOCKED';
     if (['replied','human_review','positive','question','booked','won','converted'].includes(s) || ['positive','replied','booked','won','converted'].includes(outcome)) return 'REPLIED';
     if (['sent','delivered','opened','clicked','contacted'].includes(s) || ['sent','delivered','whatsapp_manual_sent'].includes(outcome)) return 'SENT';
-    if (s === 'approved' && p.contactability?.send_authorized && p.contactability.contact_available) return 'READY';
+    // READY is the single human action inbox: strong score + a real contact field + no suppression.
+    // This is prioritization only, never send authorization or consent.
+    const scoreReady = p.scoreEvaluated !== false && p.score >= 65;
+    const hasChannel = Boolean((p.email && isValidEmailRecipient(p.email)) || p.phone || p.website);
+    if (scoreReady && hasChannel && !p.outreach_suppressed && !p.suppression_reason) return 'READY';
     return 'NEW';
   };
   const getStatusBadge = (p: Prospect) => {
@@ -909,7 +921,11 @@ const submitDecision = async (prospectId: string, action: string, ownerManualApp
   };
 
   // Filter prospects list based on active pill filter
-  const filteredProspects = prospects.filter(p => activeFilter === 'ALL' || getCategory(p) === activeFilter);
+  const filteredProspects = prospects
+    .filter(p => activeFilter === 'ALL' || getCategory(p) === activeFilter)
+    .sort((a, b) => activeFilter === 'READY'
+      ? (b.score - a.score) || (new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+      : new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
 
   // Parse evidence/signals from JSON
   const parseSignals = (prospect: Prospect): string[] => {
@@ -1476,11 +1492,14 @@ const submitDecision = async (prospectId: string, action: string, ownerManualApp
                 {/* Metric Scoreboard */}
                 {(() => {
                 const m: any = currentMode === 'founder' ? stats?.workbench : roiStats;
+                const actionCount = prospects.filter(p => getCategory(p) === 'READY').length;
+                const emailCount = prospects.filter(p => Boolean(p.email && isValidEmailRecipient(p.email))).length;
+                const phoneOnlyCount = prospects.filter(p => Boolean(!p.email && p.phone)).length;
                 const metrics: [string, unknown][] = [
-                  ['Empresas encontradas', m?.total_found],
-                  ['Correo listo', m?.pending_email],
-                  ['Borradores WhatsApp', m?.whatsapp_drafts],
-                  ['Contactados', m?.contacted]
+                  ['Empresas cargadas', m?.total_found ?? prospects.length],
+                  ['Para actuar · ≥65', actionCount],
+                  ['Con correo registrado', emailCount],
+                  ['Solo teléfono', phoneOnlyCount]
                 ];
                 return <div className="grid grid-cols-2 gap-2.5 font-mono text-slate-200">
                   {metrics.map(([label, value]) => <div key={label} className="bg-slate-900/40 p-3.5 rounded-2xl border border-slate-900">
@@ -1488,7 +1507,7 @@ const submitDecision = async (prospectId: string, action: string, ownerManualApp
                     <span className="text-xl font-bold tracking-tight text-slate-100 tabular-nums">{typeof value === 'number' ? value : 'N/D'}</span>
                   </div>)}
                   <div className="col-span-2 text-[10px] text-slate-500 flex items-center justify-between gap-2">
-                    <span>Respuestas registradas: {typeof m?.replied === 'number' ? m.replied : 'N/D'}</span>
+                    <span>Enviados: {typeof m?.contacted === 'number' ? m.contacted : 'N/D'} · Respuestas: {typeof m?.replied === 'number' ? m.replied : 'N/D'}</span>
                     <span>WhatsApp requiere consentimiento explícito; borrador ≠ envío.</span>
                   </div>
                 </div>;
@@ -1511,7 +1530,7 @@ const submitDecision = async (prospectId: string, action: string, ownerManualApp
                           : 'bg-slate-900/60 border-slate-800 text-slate-400 hover:text-white'
                       }`}
                     >
-                      {{ ALL: 'TODOS', NEW: 'NUEVOS', READY: 'LISTOS', SENT: 'CONTACTADOS', REPLIED: 'RESPUESTAS', BLOCKED: 'BLOQUEADOS' }[cat]}
+                      {{ ALL: 'TODOS', NEW: 'NUEVOS', READY: 'PARA ACTUAR', SENT: 'ENVIADOS', REPLIED: 'RESPUESTAS', BLOCKED: 'BLOQUEADOS' }[cat]}
                     </button>
                   ))}
                 </div>
@@ -1587,8 +1606,26 @@ const submitDecision = async (prospectId: string, action: string, ownerManualApp
                               )}
                             </div>
                             <span className="text-xs font-mono font-bold text-emerald-400 shrink-0">
-                              {p.score}/100
+                              {p.scoreEvaluated === false ? 'PENDIENTE' : `${Math.round(p.score)}/100`}
                             </span>
+                          </div>
+
+                          <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+                            {p.email && isValidEmailRecipient(p.email)
+                              ? <span className="px-2 py-1 rounded-md bg-sky-950/50 border border-sky-800/50 text-[9px] text-sky-300 font-bold">✉ CORREO · {p.contactability?.manual_email_available ? 'REVISIÓN' : 'REGISTRADO'}</span>
+                              : null}
+                            {p.phone
+                              ? <span className="px-2 py-1 rounded-md bg-emerald-950/40 border border-emerald-800/40 text-[9px] text-emerald-300 font-bold">☎ TELÉFONO · WHATSAPP NO VERIFICADO</span>
+                              : null}
+                            {!p.email && !p.phone && p.website
+                              ? <span className="px-2 py-1 rounded-md bg-slate-800 border border-slate-700 text-[9px] text-slate-300 font-bold">WEB · SIN CONTACTO DIRECTO</span>
+                              : null}
+                            {!p.email && !p.phone && !p.website
+                              ? <span className="px-2 py-1 rounded-md bg-slate-800 border border-slate-700 text-[9px] text-slate-400 font-bold">SIN CANAL</span>
+                              : null}
+                            {p.scoreEvaluated === false
+                              ? <span className="px-2 py-1 rounded-md bg-amber-950/40 border border-amber-800/40 text-[9px] text-amber-300 font-bold">EVALUACIÓN PENDIENTE</span>
+                              : null}
                           </div>
 
                           <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
