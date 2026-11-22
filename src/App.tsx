@@ -1492,11 +1492,14 @@ const submitDecision = async (prospectId: string, action: string, ownerManualApp
                 {/* Metric Scoreboard */}
                 {(() => {
                 const m: any = currentMode === 'founder' ? stats?.workbench : roiStats;
+                const actionCount = prospects.filter(p => getCategory(p) === 'READY').length;
+                const emailCount = prospects.filter(p => Boolean(p.email && isValidEmailRecipient(p.email))).length;
+                const phoneOnlyCount = prospects.filter(p => Boolean(!p.email && p.phone)).length;
                 const metrics: [string, unknown][] = [
-                  ['Empresas encontradas', m?.total_found],
-                  ['Correo listo', m?.pending_email],
-                  ['Borradores WhatsApp', m?.whatsapp_drafts],
-                  ['Contactados', m?.contacted]
+                  ['Empresas cargadas', m?.total_found ?? prospects.length],
+                  ['Para actuar · ≥65', actionCount],
+                  ['Con correo registrado', emailCount],
+                  ['Solo teléfono', phoneOnlyCount]
                 ];
                 return <div className="grid grid-cols-2 gap-2.5 font-mono text-slate-200">
                   {metrics.map(([label, value]) => <div key={label} className="bg-slate-900/40 p-3.5 rounded-2xl border border-slate-900">
@@ -1504,7 +1507,7 @@ const submitDecision = async (prospectId: string, action: string, ownerManualApp
                     <span className="text-xl font-bold tracking-tight text-slate-100 tabular-nums">{typeof value === 'number' ? value : 'N/D'}</span>
                   </div>)}
                   <div className="col-span-2 text-[10px] text-slate-500 flex items-center justify-between gap-2">
-                    <span>Respuestas registradas: {typeof m?.replied === 'number' ? m.replied : 'N/D'}</span>
+                    <span>Enviados: {typeof m?.contacted === 'number' ? m.contacted : 'N/D'} · Respuestas: {typeof m?.replied === 'number' ? m.replied : 'N/D'}</span>
                     <span>WhatsApp requiere consentimiento explícito; borrador ≠ envío.</span>
                   </div>
                 </div>;
