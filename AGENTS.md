@@ -205,3 +205,23 @@ Live Resend + D1 inspection found a delivery-state regression that is more urgen
 - The canonical Resend GET email record for the confirmed sample reports status=bounced, while the webhook event payload contains bounce.type=Transient and a temporary DNS lookup timeout. Therefore the email GET/last_event alone does not preserve bounce permanence. Persist the verified webhook event subtype and make reconciliation consume that stored provider evidence. If subtype is missing/unknown, keep the prospect in HOLD/DELIVERY_UNCERTAIN and do not add suppression or count it as a permanent bounce.
 - The webhook's email.bounced event is a provider event, but a transient bounce is operationally delivery_delayed, not a terminal bounce. Only permanent bounce or complaint should create hard suppression.
 - Observability warnings in the inspected seven-day window include repeated Abstract API 401 and 429 responses, Overpass zero results across mirrors, Geoapify and BizData timeouts, and one Groq cascade 400 on the attack-kit endpoint. These are provider/degraded-source warnings; D1 discovery/enrich/score/technical-audit jobs in the inspected period completed. Preserve source-level degradation diagnostics and do not convert them into false zero-market conclusions. Do not change Gemini/Groq model cascade or identifiers as part of this repair.
+
+
+### Founder PWA action inbox — implementation started (22-11-2026)
+
+Branch: `feat/founder-action-center-2026-11-22`
+Commit: `253f2c034780eae0d1872c89673db79f48f9f1d5`
+
+Implemented in `src/App.tsx`:
+- Prospect fetch now requests up to 1,000 rows, retaining strict tenant scoping; it no longer requests only status=approved for the READY tab.
+- Canonical per-prospect UI score now prefers `prospects.opportunity_score`, then legacy `score`, `overall_score`, `total_score`. Missing evaluation is represented as PENDIENTE instead of 0/100.
+- READY is now the single human-priority inbox (score >=65, at least one contact path, no known suppression), sorted highest score first. This is not send authorization, consent, or automation.
+- Contact channel chips explicitly distinguish registered email / owner review, phone with WhatsApp unverified, website-only and no channel.
+- Tab labels now read Todos, Nuevos, Para actuar, Enviados, Respuestas and Bloqueados.
+
+Not yet validated or deployed:
+- No production Worker/D1 data or schema changed.
+- No emails, WhatsApp messages or Telegram messages sent.
+- No auto-send flags, secrets, webhooks or provider settings changed.
+- Full TypeScript/Vite build and mobile/browser regression tests still required before merge/deploy.
+- Follow-up: show action queue count and improve metric strip; add tests for score-source precedence and channel truth table. Confirm whether `opportunity_score` is populated by current scoring pipeline for all current prospects before declaring score reconciliation complete.
