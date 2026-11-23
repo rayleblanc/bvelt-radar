@@ -230,8 +230,8 @@ describe("provider/model cooldown policy", () => {
 
     try {
       const env: any = { RADAR_DB: db, ABSTRACT_API_KEY: "unit-test-invalid-key" };
-      const first = await verifyEmail("first@example.org", env);
-      const second = await verifyEmail("second@example.org", env);
+      const first = await verifyEmail("jordan@acmeplumbing.com", env);
+      const second = await verifyEmail("alex@acmeplumbing.com", env);
       const stored = rows.get(providerCooldownKey("abstract", "email-validation"));
 
       assert.equal(first.deliverability, "UNVERIFIED");
