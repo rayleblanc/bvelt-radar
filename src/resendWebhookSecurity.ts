@@ -57,3 +57,14 @@ export async function verifySvixWebhookSignature(
     return false;
   }
 }
+
+/** Keep a previously verified transient event distinct from an ambiguous provider last_event. */
+export function resolveAmbiguousResendBounce(hasTransientEvidence: boolean): {
+  logStatus: "delayed" | "delivery_uncertain";
+  dispatchStatus: "delivery_delayed" | "delivery_uncertain";
+  outcome: "delivery_delayed" | "delivery_uncertain";
+} {
+  return hasTransientEvidence
+    ? { logStatus: "delayed", dispatchStatus: "delivery_delayed", outcome: "delivery_delayed" }
+    : { logStatus: "delivery_uncertain", dispatchStatus: "delivery_uncertain", outcome: "delivery_uncertain" };
+}
