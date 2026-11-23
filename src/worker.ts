@@ -12483,6 +12483,21 @@ export async function verifyEmail(email: string, env: Env): Promise<EmailVerific
     }
   } catch (e) {}
 
+  // Abstract verification is a shared provider dependency: stop retrying an invalid or rate-limited key
+  // for every prospect. The global provider cooldown is independent from per-email result caching.
+  const abstractCooldown = await getProviderCooldown(env.RADAR_DB, "abstract_email", "emailvalidation");
+  if (abstractCooldown) {
+    const retrySeconds = Math.max(1, Math.ceil((abstractCooldown.cooldownUntil - Date.now()) / 1000));
+    return {
+      valid: false,
+      deliverability: "UNVERIFIED",
+      is_disposable: false,
+      is_catchall: false,
+      quality_score: 0,
+      reason: `Abstract API temporarily unavailable (${abstractCooldown.failureClass}); retry in ${retrySeconds}s; outbound send held`
+    };
+  }
+
   // 4. Abstract API verification using exact variable ABSTRACT_API_KEY
   let providerFailure = env.ABSTRACT_API_KEY ? "Abstract API verification unavailable" : "ABSTRACT_API_KEY missing";
   if (env.ABSTRACT_API_KEY) {
@@ -12535,11 +12550,28 @@ export async function verifyEmail(email: string, env: Env): Promise<EmailVerific
 
         return result;
       }
+      const failureClass = classifyProviderHttpStatus(res.status);
+      const cooldown = await recordProviderCooldownFailure(env.RADAR_DB, "abstract_email", "emailvalidation", {
+        failureClass,
+        status: res.status,
+        retryAfter: res.headers.get("retry-after")
+      });
       providerFailure = `Abstract API HTTP ${res.status}`;
-      console.warn(`[Abstract API Verification Warning] ${providerFailure}`);
+      console.warn("[Abstract API Verification Warning] provider cooldown recorded", {
+        status: res.status,
+        failure_class: failureClass,
+        cooldown_until: cooldown?.cooldownUntil || null
+      });
     } catch (e: any) {
+      const failureClass = classifyProviderError(e);
+      const cooldown = await recordProviderCooldownFailure(env.RADAR_DB, "abstract_email", "emailvalidation", {
+        failureClass
+      });
       providerFailure = "Abstract API request failed";
-      console.warn("[Abstract API Verification Warning]", e?.message || e);
+      console.warn("[Abstract API Verification Warning] provider cooldown recorded", {
+        failure_class: failureClass,
+        cooldown_until: cooldown?.cooldownUntil || null
+      });
     }
   }
 
