@@ -230,8 +230,8 @@ describe("provider/model cooldown policy", () => {
 
     const env: any = { RADAR_DB: db, ABSTRACT_API_KEY: "unit-test-invalid-key" };
     try {
-      const first = await verifyEmail("prospect@example.com", env);
-      const second = await verifyEmail("another@example.com", env);
+      const first = await verifyEmail("contact@acmeplumbing.com", env);
+      const second = await verifyEmail("owner@otherplumbing.com", env);
       assert.equal(first.deliverability, "UNVERIFIED");
       assert.equal(second.deliverability, "UNVERIFIED");
       assert.equal(calls, 1, "shared provider cooldown prevents a second request for another prospect");
