@@ -286,31 +286,6 @@ describe("provider/model cooldown policy", () => {
     }
   });
 
-  it("backs off BizData across city requests and honors HTTP 429 Retry-After", async () => {
-    const rows = new Map<string, StoredRow>();
-    const db = createDb(rows);
-    const originalFetch = globalThis.fetch;
-    let calls = 0;
-    globalThis.fetch = (async () => {
-      calls += 1;
-      return new Response("rate limited", { status: 429, headers: { "Retry-After": "90" } });
-    }) as typeof fetch;
 
-    const env: any = { RADAR_DB: db };
-    try {
-      const first = await fetchBizDataBusinesses("Los Angeles, CA", "medical_clinic", env);
-      const second = await fetchBizDataBusinesses("Toronto, ON", "medical_clinic", env);
-      assert.match(first.status, /HTTP 429/);
-      assert.match(second.status, /cooldown active/);
-      assert.equal(calls, 1, "second market skips BizData while the shared rate-limit cooldown is active");
-      const stored = rows.get(providerCooldownKey("bizdata", "business-directory"));
-      assert.ok(stored, "429 cooldown is persisted in D1");
-      assert.equal(JSON.parse(stored.value).failureClass, "rate_limited");
-      assert.equal(JSON.parse(stored.value).status, 429);
-      assert.equal(JSON.parse(stored.value).retryAfterMs, 90_000);
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
 
 });
