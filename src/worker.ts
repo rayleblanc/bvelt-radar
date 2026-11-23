@@ -12,7 +12,7 @@
  */
 
 import { buildRadarEvidenceProvenance } from './evidenceProvenance.js';
-import { normalizeResendDeliveryEvent, verifySvixWebhookSignature } from './resendWebhookSecurity.js';
+import { normalizeResendDeliveryEvent, resolveAmbiguousResendBounce, verifySvixWebhookSignature } from './resendWebhookSecurity.js';
 import { TENANT_TARGET_MAP, resolveTenantBuyerSegmentsForProfile } from "./tenantBuyerSegments.js";
 import { validateTenantProfileContract } from './tenantProfileContract.js';
 import { getAlerts, tradeForEvent, eventAppliesToTrade, WeatherAlert } from './weatherSignals';
@@ -6246,12 +6246,16 @@ export async function reconcileResendDeliveries(env: Env): Promise<{ checked: nu
 
       if (ev === "bounced") {
         // GET /emails exposes last_event but not the verified bounce subtype.
-        // Never turn that ambiguous status into a permanent bounce or suppression.
-        await env.RADAR_DB.prepare("UPDATE email_dispatch_logs SET status = 'delivery_uncertain' WHERE message_id = ?")
-          .bind(p.dispatch_message_id).run();
+        // Preserve explicit transient evidence already stored by the signed/webhook event path.
+        const transientEvidence = await env.RADAR_DB.prepare(
+          "SELECT id FROM prospect_events WHERE prospect_id = ? AND event_type = 'delivery_delayed' LIMIT 1"
+        ).bind(p.id).first();
+        const bounceState = resolveAmbiguousResendBounce(!!transientEvidence);
+        await env.RADAR_DB.prepare("UPDATE email_dispatch_logs SET status = ? WHERE message_id = ?")
+          .bind(bounceState.logStatus, p.dispatch_message_id).run();
         await env.RADAR_DB.prepare(
-          "UPDATE prospects SET status = 'hold', outcome = 'delivery_uncertain', dispatch_status = 'delivery_uncertain', updated_at = ? WHERE id = ?"
-        ).bind(now, p.id).run();
+          "UPDATE prospects SET status = 'hold', outcome = ?, dispatch_status = ?, updated_at = ? WHERE id = ?"
+        ).bind(bounceState.outcome, bounceState.dispatchStatus, now, p.id).run();
       } else if (ev === "complained") {
         const email = String(p.email || "").trim().toLowerCase();
         await env.RADAR_DB.prepare("UPDATE email_dispatch_logs SET status = 'complained' WHERE message_id = ?")
