@@ -1907,7 +1907,7 @@ export default {
             else if (resendType.includes("failed")) eventType = "failed";
             else if (resendType.includes("suppressed")) eventType = "suppressed";
             else if (resendType.includes("delivered")) eventType = "delivered";
-            else if (resendType.includes("complained") || resendType.includes("spam")) eventType = "negative";
+            else if (resendType.includes("complained") || resendType.includes("spam")) eventType = "complained";
             else if (resendType.includes("received")) {
               // Resend inbound (email.received): el webhook trae solo metadatos (data.from = remitente, data.email_id).
               // El cuerpo se obtiene con GET /emails/{id} (Received emails API).
@@ -1998,7 +1998,7 @@ export default {
           }, env);
 
           if (providerMessageId && eventType !== "replied") {
-            const logStatus = eventType === "negative" ? "complained" : eventType === "delivery_delayed" ? "delayed" : eventType;
+            const logStatus = eventType === "delivery_delayed" ? "delayed" : eventType;
             try {
               await env.RADAR_DB.prepare("UPDATE email_dispatch_logs SET status = ? WHERE message_id = ?")
                 .bind(logStatus, providerMessageId).run();
@@ -7999,6 +7999,7 @@ export type ReplyClassificationType =
   | 'delivery_delayed'
   | 'failed'
   | 'suppressed'
+  | 'complained'
   | 'replied'
   | 'positive'
   | 'negative'
@@ -8027,6 +8028,7 @@ export function classifyReplyText(rawType?: string, content?: string): ReplyClas
   if (typeLower === 'delivery_delayed' || typeLower === 'delayed' || typeLower === 'email.delivery_delayed') return 'delivery_delayed';
   if (typeLower === 'failed' || typeLower === 'email.failed') return 'failed';
   if (typeLower === 'suppressed' || typeLower === 'email.suppressed') return 'suppressed';
+  if (typeLower === 'complained' || typeLower === 'email.complained') return 'complained';
   if (typeLower === 'unsubscribe' || typeLower === 'stop' || typeLower === 'opt_out') return 'unsubscribe';
   if (typeLower === 'out_of_office' || typeLower === 'ooo' || typeLower === 'vacation') return 'out_of_office';
   if (typeLower === 'not_now' || typeLower === 'later') return 'not_now';
@@ -8228,6 +8230,17 @@ export async function handleProspectEvent(
       }
       break;
 
+    case 'complained':
+      autoStopped = true;
+      newStatus = 'suppressed';
+      newOutcome = 'complained';
+      await recordNegativeSignal(db, 'complaint', `Provider complaint for ${prospect.id}`);
+      if (prospect.email) {
+        await db.prepare("INSERT OR REPLACE INTO suppression (key, reason, created_at) VALUES (?, ?, ?)")
+          .bind(prospect.email.toLowerCase(), `Provider complaint on ${timestamp}`, timestamp).run();
+      }
+      break;
+
     case 'unsubscribe':
       autoStopped = true;
       newStatus = 'unsubscribed';
@@ -8299,7 +8312,6 @@ export async function handleProspectEvent(
       autoStopped = true;
       newStatus = 'discarded';
       newOutcome = 'negative';
-      await recordNegativeSignal(db, 'complaint', `Complaint/negative response for ${prospect.name}`);
       if (prospect.email) {
         await db.prepare("INSERT OR REPLACE INTO suppression (key, reason, created_at) VALUES (?, ?, ?)")
           .bind(prospect.email.toLowerCase(), `Negative response on ${timestamp}`, timestamp).run();
