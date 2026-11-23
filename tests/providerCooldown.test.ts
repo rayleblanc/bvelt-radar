@@ -8,7 +8,7 @@ import {
   providerCooldownKey,
   type ProviderCooldownDatabase
 } from "../src/providerCooldown";
-import { generateAICopy, verifyEmail, WORKERS_AI_FALLBACK_MODEL } from "../src/worker";
+import { fetchBizDataBusinesses, generateAICopy, verifyEmail, WORKERS_AI_FALLBACK_MODEL } from "../src/worker";
 
 type StoredRow = { value: string; expires_at: number };
 
@@ -258,6 +258,32 @@ describe("provider/model cooldown policy", () => {
     });
     assert.equal(record?.cooldownUntil, now + 120_000);
     assert.ok(rows.has(providerCooldownKey("abstract", "email-validation")));
+  });
+
+  it("backs off BizData across city/trade requests after an upstream 502", async () => {
+    const rows = new Map<string, StoredRow>();
+    const db = createDb(rows);
+    const originalFetch = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      return new Response("upstream unavailable", { status: 502 });
+    }) as typeof fetch;
+
+    const env: any = { RADAR_DB: db };
+    try {
+      const first = await fetchBizDataBusinesses("Los Angeles, CA", "medical_clinic", env);
+      const second = await fetchBizDataBusinesses("Toronto, ON", "medical_clinic", env);
+      assert.match(first.status, /HTTP 502/);
+      assert.match(second.status, /cooldown active/);
+      assert.equal(calls, 1, "shared provider cooldown prevents a retry for another city");
+      const stored = rows.get(providerCooldownKey("bizdata", "business-directory"));
+      assert.ok(stored, "BizData failure is persisted in shared D1 cache");
+      assert.equal(JSON.parse(stored.value).failureClass, "server_error");
+      assert.equal(JSON.parse(stored.value).status, 502);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
 });
