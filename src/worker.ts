@@ -3526,7 +3526,7 @@ export default {
         // Execute job router safely
         await processQueueJob(body, env);
 
-        // Mark completed in radar_jobs & acknowledge (protecting completed_zero_prospects status)
+        // Mark completed & acknowledge, preserving terminal zero/degraded discovery outcomes.
         if (env.RADAR_DB) {
           try {
             await env.RADAR_DB.prepare(
@@ -6297,6 +6297,10 @@ export function isDiscoveryInfrastructureFailure(reason: unknown): boolean {
     value.includes("network") ||
     value.includes("fetch failed") ||
     value.includes("econn") ||
+    value.includes("cooldown active") ||
+    value.includes("rate_limited") ||
+    value.includes("auth_error") ||
+    value.includes("server_error") ||
     (value.includes("overpass") && value.includes("fail"));
 }
 
@@ -11601,6 +11605,7 @@ export async function collectRadarDigest(env: Env): Promise<RadarDigest> {
   const runsRow = await q<any>("SELECT COUNT(*) AS runs, COALESCE(SUM(discovered),0) AS discovered FROM runs WHERE mode = 'founder' AND COALESCE(NULLIF(TRIM(tenant_id),''),'founder') = 'founder' AND created_at >= ?", since);
   const discJobs = await q<any>("SELECT COUNT(*) AS c FROM queue_jobs q INNER JOIN runs r ON r.id = q.run_id WHERE r.mode = 'founder' AND COALESCE(NULLIF(TRIM(r.tenant_id),''),'founder') = 'founder' AND q.job_type = 'discovery' AND q.created_at >= ?", since);
   const zeroJobs = await q<any>("SELECT COUNT(*) AS c FROM queue_jobs q INNER JOIN runs r ON r.id = q.run_id WHERE r.mode = 'founder' AND COALESCE(NULLIF(TRIM(r.tenant_id),''),'founder') = 'founder' AND q.status = 'completed_zero_prospects' AND q.job_type = 'discovery' AND q.created_at >= ?", since);
+  const degradedJobs = await q<any>("SELECT COUNT(*) AS c FROM queue_jobs q INNER JOIN runs r ON r.id = q.run_id WHERE r.mode = 'founder' AND COALESCE(NULLIF(TRIM(r.tenant_id),''),'founder') = 'founder' AND q.status = 'completed_source_degraded' AND q.job_type = 'discovery' AND q.created_at >= ?", since);
   const failedJobs = await q<any>("SELECT COUNT(*) AS c FROM queue_jobs q INNER JOIN runs r ON r.id = q.run_id WHERE r.mode = 'founder' AND COALESCE(NULLIF(TRIM(r.tenant_id),''),'founder') = 'founder' AND q.status = 'failed' AND q.created_at >= ?", since);
   const lastFail = await q<any>("SELECT q.error FROM queue_jobs q INNER JOIN runs r ON r.id = q.run_id WHERE r.mode = 'founder' AND COALESCE(NULLIF(TRIM(r.tenant_id),''),'founder') = 'founder' AND q.status = 'failed' AND q.error IS NOT NULL AND q.created_at >= ? ORDER BY q.created_at DESC LIMIT 1", since);
   const zeroRows = await qAll("SELECT q.error FROM queue_jobs q INNER JOIN runs r ON r.id = q.run_id WHERE r.mode = 'founder' AND COALESCE(NULLIF(TRIM(r.tenant_id),''),'founder') = 'founder' AND q.job_type = 'discovery' AND q.status = 'completed_zero_prospects' AND q.error IS NOT NULL AND q.created_at >= ? LIMIT 40", since);
@@ -11637,6 +11642,7 @@ export async function collectRadarDigest(env: Env): Promise<RadarDigest> {
   const runs = Number(runsRow?.runs || 0);
   const nJobs = Number(discJobs?.c || 0);
   const nZero = Number(zeroJobs?.c || 0);
+  const nDegraded = Number(degradedJobs?.c || 0);
   const nFailed = Number(failedJobs?.c || 0);
   const nCreated = Number(created?.c || 0);
   const nEmail = Number(withEmail?.c || 0);
@@ -11668,9 +11674,11 @@ export async function collectRadarDigest(env: Env): Promise<RadarDigest> {
     headline = "🔴 El cron no creó ninguna corrida en 24 h";
   } else if (nCreated === 0) {
     verdict = "idle";
-    headline = nZero >= nJobs && nJobs > 0
-      ? "🟡 Corre, pero las fuentes devuelven 0 negocios (Overpass/BizData/Geoapify)"
-      : "🟡 Corre, pero no encuentra prospectos NUEVOS (todo lo que halla ya existe)";
+    headline = nDegraded > 0
+      ? `🟡 Fuentes degradadas en ${nDegraded} jobs; los ceros no prueban que el mercado esté vacío`
+      : nZero >= nJobs && nJobs > 0
+        ? "🟡 Corre, pero las fuentes devuelven 0 negocios (Overpass/BizData/Geoapify)"
+        : "🟡 Corre, pero no encuentra prospectos NUEVOS (todo lo que halla ya existe)";
   } else if (nEmail === 0) {
     verdict = "idle";
     headline = "🟡 Encuentra negocios, pero ninguno llega con email válido (no pasan a Telegram)";
@@ -11683,7 +11691,7 @@ export async function collectRadarDigest(env: Env): Promise<RadarDigest> {
   lines.push(`<b>📡 Radar · estado (24 h)</b>`);
   lines.push(headline);
   lines.push("");
-  lines.push(`<b>Corridas:</b> ${runs} · <b>Jobs discovery:</b> ${nJobs} (${nZero} con 0 resultados) · <b>Jobs fallidos:</b> ${nFailed}`);
+  lines.push(`<b>Corridas:</b> ${runs} · <b>Jobs discovery:</b> ${nJobs} (${nZero} vacíos confirmados · ${nDegraded} degradados) · <b>Jobs fallidos:</b> ${nFailed}`);
   lines.push(`<b>Prospectos nuevos:</b> ${nCreated} · <b>con email:</b> ${nEmail}`);
   lines.push(`<b>Enviados/programados:</b> ${nSent} · <b>esperando tu aprobación:</b> ${nWaiting}`);
   lines.push(`<b>Presupuesto hoy:</b> discovery restante ${remDisc} · outreach automático/Tenant restante ${remOut}${gov ? ` · envíos automáticos/Tenant ${gov.sends_today ?? 0}/${gov.daily_limit ?? 0}` : ""}`);
@@ -11714,7 +11722,7 @@ export async function collectRadarDigest(env: Env): Promise<RadarDigest> {
     headline,
     text: lines.join("\n").slice(0, 3900),
     data: {
-      runs, discovery_jobs: nJobs, zero_result_jobs: nZero, failed_jobs: nFailed,
+      runs, discovery_jobs: nJobs, zero_result_jobs: nZero, source_degraded_jobs: nDegraded, failed_jobs: nFailed,
       new_prospects: nCreated, with_email: nEmail, sent: nSent, waiting_approval: nWaiting,
       blocked_by: blockedRows, blockers, remaining: { discovery: remDisc, outreach: remOut },
       circuit_breaker: cb, last_job_error: lastFail?.error || null
