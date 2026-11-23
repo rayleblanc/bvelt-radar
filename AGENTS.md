@@ -316,3 +316,13 @@ Not yet validated or deployed:
 - Last 60-minute Radar telemetry: 0 errors/0 warnings; last 24h contains 23 external provider/source warnings (Abstract 401/429; BizData 502/timeouts). D1: 3,298 completed, 1,152 completed_zero_prospects, one historical failed Naples discovery job; no active backlog.
 - Datadog log/metric/monitor connectors return no usable project data; use Cloudflare telemetry + D1.
 - No D1, secrets, suppressions, outbound email, or auto-outreach mutation was made.
+
+
+### Live handoff — 23-11-2026 14:23 UTC
+- Canonical plan: LocalFlowPro `docs/MASTER_PLAN_BVELT_ECOSYSTEM_2026-12-10.md`, latest section **Continuation checkpoint — 23-11-2026 14:23 UTC**.
+- Radar main SHA `1b7c6da1cf6f44b33a0e5447f7beae65b11994d3`; PR #70 BizData cooldown and PR #74 Vite/esbuild security fix are merged; PR #73 adds npm audit reporting. Final PR #74 CI run `45193387788` passed full Radar and Sidecar tests; npm audit is zero vulnerabilities. Cloudflare build for this exact main SHA was queued at 14:22:42Z; wait for deployment read-back.
+- Production currently includes BizData cooldown commit `9b58597e...` as version `a5c23f67-149c-4c4f-b6a2-80d400300038` at 100%. Last 30m telemetry 0 errors/0 warnings, but no discovery work was active, so provider recovery is unproven.
+- D1 suppressions remain 45 `resend_bounced` (16 permanent / 29 unknown) + 4 `resend_transient_hold`. No active queue backlog. Keep all blocked.
+- Resend webhook has seven event subscriptions; `RESEND_WEBHOOK_SIGNING_SECRET` absent, legacy query-token compatibility remains. Do not claim Svix active or bypass Cloudflare secret-write safety.
+- Datadog currently provides no usable logs/metrics/monitors/service entities; Cloudflare telemetry is authoritative.
+- `FOUNDER_AUTO_OUTREACH=false`; no emails, D1 mutations, suppression changes or credentials changed.
