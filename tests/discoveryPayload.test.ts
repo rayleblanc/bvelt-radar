@@ -26,6 +26,10 @@ describe("discovery job payload validation", () => {
       resolveDiscoveryCompletionStatus("Zero businesses discovered. Nominatim: 0 matches, Overpass: 0 elements, BizData: 0 matches"),
       "completed_zero_prospects"
     );
+    assert.equal(
+      resolveDiscoveryCompletionStatus("Zero businesses discovered. Nominatim: 0 matches, Overpass: 0 elements, BizData: cooldown active (rate_limited)"),
+      "completed_source_degraded"
+    );
   });
 
 });
