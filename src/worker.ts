@@ -3915,7 +3915,9 @@ async function handleHealth(env: Env, headers: Record<string, string>, tenantId:
         if (r.status === 'failed') failedJobs += r.count;
       }
     }
-    const lastErrRow = await db.prepare("SELECT error FROM queue_jobs WHERE error IS NOT NULL AND status IN ('failed','completed_source_degraded') AND created_at >= datetime('now', '-7 days') ORDER BY created_at DESC LIMIT 1").first() as any;
+    const legacyDegraded = await db.prepare(`SELECT COUNT(*) AS count FROM queue_jobs WHERE status = 'completed_zero_prospects' AND created_at >= datetime('now', '-24 hours') AND ${DISCOVERY_INFRA_ERROR_SQL}`).first() as any;
+    if (legacyDegraded) degradedJobs += Number(legacyDegraded.count || 0);
+    const lastErrRow = await db.prepare(`SELECT error FROM queue_jobs WHERE error IS NOT NULL AND created_at >= datetime('now', '-7 days') AND (status IN ('failed','completed_source_degraded') OR (status = 'completed_zero_prospects' AND ${DISCOVERY_INFRA_ERROR_SQL})) ORDER BY created_at DESC LIMIT 1`).first() as any;
     if (lastErrRow) lastError = lastErrRow.error;
     const staleRow = await db.prepare("SELECT COUNT(*) AS count FROM queue_jobs WHERE status IN ('pending','processing') AND created_at < datetime('now', '-24 hours')").first() as any;
     if (staleRow) staleJobs = Number(staleRow.count || 0);
@@ -6303,6 +6305,21 @@ export function isDiscoveryInfrastructureFailure(reason: unknown): boolean {
     value.includes("server_error") ||
     (value.includes("overpass") && value.includes("fail"));
 }
+
+const DISCOVERY_INFRA_ERROR_SQL = `(
+  lower(COALESCE(error,'')) LIKE '%timeout%' OR
+  lower(COALESCE(error,'')) LIKE '%aborted%' OR
+  lower(COALESCE(error,'')) LIKE '%http 4%' OR
+  lower(COALESCE(error,'')) LIKE '%http 5%' OR
+  lower(COALESCE(error,'')) LIKE '%network%' OR
+  lower(COALESCE(error,'')) LIKE '%fetch failed%' OR
+  lower(COALESCE(error,'')) LIKE '%econn%' OR
+  lower(COALESCE(error,'')) LIKE '%cooldown active%' OR
+  lower(COALESCE(error,'')) LIKE '%rate_limited%' OR
+  lower(COALESCE(error,'')) LIKE '%auth_error%' OR
+  lower(COALESCE(error,'')) LIKE '%server_error%' OR
+  (lower(COALESCE(error,'')) LIKE '%overpass%' AND lower(COALESCE(error,'')) LIKE '%fail%')
+)`;
 
 export type DiscoveryCompletionStatus = "completed_zero_prospects" | "completed_source_degraded";
 
@@ -11604,11 +11621,11 @@ export async function collectRadarDigest(env: Env): Promise<RadarDigest> {
 
   const runsRow = await q<any>("SELECT COUNT(*) AS runs, COALESCE(SUM(discovered),0) AS discovered FROM runs WHERE mode = 'founder' AND COALESCE(NULLIF(TRIM(tenant_id),''),'founder') = 'founder' AND created_at >= ?", since);
   const discJobs = await q<any>("SELECT COUNT(*) AS c FROM queue_jobs q INNER JOIN runs r ON r.id = q.run_id WHERE r.mode = 'founder' AND COALESCE(NULLIF(TRIM(r.tenant_id),''),'founder') = 'founder' AND q.job_type = 'discovery' AND q.created_at >= ?", since);
-  const zeroJobs = await q<any>("SELECT COUNT(*) AS c FROM queue_jobs q INNER JOIN runs r ON r.id = q.run_id WHERE r.mode = 'founder' AND COALESCE(NULLIF(TRIM(r.tenant_id),''),'founder') = 'founder' AND q.status = 'completed_zero_prospects' AND q.job_type = 'discovery' AND q.created_at >= ?", since);
-  const degradedJobs = await q<any>("SELECT COUNT(*) AS c FROM queue_jobs q INNER JOIN runs r ON r.id = q.run_id WHERE r.mode = 'founder' AND COALESCE(NULLIF(TRIM(r.tenant_id),''),'founder') = 'founder' AND q.status = 'completed_source_degraded' AND q.job_type = 'discovery' AND q.created_at >= ?", since);
+  const zeroJobs = await q<any>(`SELECT COUNT(*) AS c FROM queue_jobs q INNER JOIN runs r ON r.id = q.run_id WHERE r.mode = 'founder' AND COALESCE(NULLIF(TRIM(r.tenant_id),''),'founder') = 'founder' AND q.status = 'completed_zero_prospects' AND q.job_type = 'discovery' AND q.created_at >= ? AND NOT ${DISCOVERY_INFRA_ERROR_SQL}`, since);
+  const degradedJobs = await q<any>(`SELECT COUNT(*) AS c FROM queue_jobs q INNER JOIN runs r ON r.id = q.run_id WHERE r.mode = 'founder' AND COALESCE(NULLIF(TRIM(r.tenant_id),''),'founder') = 'founder' AND q.job_type = 'discovery' AND q.created_at >= ? AND (q.status = 'completed_source_degraded' OR (q.status = 'completed_zero_prospects' AND ${DISCOVERY_INFRA_ERROR_SQL}))`, since);
   const failedJobs = await q<any>("SELECT COUNT(*) AS c FROM queue_jobs q INNER JOIN runs r ON r.id = q.run_id WHERE r.mode = 'founder' AND COALESCE(NULLIF(TRIM(r.tenant_id),''),'founder') = 'founder' AND q.status = 'failed' AND q.created_at >= ?", since);
   const lastFail = await q<any>("SELECT q.error FROM queue_jobs q INNER JOIN runs r ON r.id = q.run_id WHERE r.mode = 'founder' AND COALESCE(NULLIF(TRIM(r.tenant_id),''),'founder') = 'founder' AND q.status = 'failed' AND q.error IS NOT NULL AND q.created_at >= ? ORDER BY q.created_at DESC LIMIT 1", since);
-  const zeroRows = await qAll("SELECT q.error FROM queue_jobs q INNER JOIN runs r ON r.id = q.run_id WHERE r.mode = 'founder' AND COALESCE(NULLIF(TRIM(r.tenant_id),''),'founder') = 'founder' AND q.job_type = 'discovery' AND q.status = 'completed_zero_prospects' AND q.error IS NOT NULL AND q.created_at >= ? LIMIT 40", since);
+  const zeroRows = await qAll(`SELECT q.error FROM queue_jobs q INNER JOIN runs r ON r.id = q.run_id WHERE r.mode = 'founder' AND COALESCE(NULLIF(TRIM(r.tenant_id),''),'founder') = 'founder' AND q.job_type = 'discovery' AND q.status = 'completed_zero_prospects' AND q.error IS NOT NULL AND q.created_at >= ? AND NOT ${DISCOVERY_INFRA_ERROR_SQL} LIMIT 40`, since);
   const zeroReasonCounts = new Map<string, number>();
   for (const zr of zeroRows) {
     const txt = String(zr.error || "");
