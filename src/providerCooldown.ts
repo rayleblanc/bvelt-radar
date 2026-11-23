@@ -1,4 +1,4 @@
-export type AIProviderName = "groq" | "gemini" | "workers_ai" | "abstract";
+export type AIProviderName = "groq" | "gemini" | "workers_ai" | "abstract" | "bizdata";
 
 export type ProviderFailureClass =
   | "rate_limited"
