@@ -326,3 +326,12 @@ Not yet validated or deployed:
 - Resend webhook has seven event subscriptions; `RESEND_WEBHOOK_SIGNING_SECRET` absent, legacy query-token compatibility remains. Do not claim Svix active or bypass Cloudflare secret-write safety.
 - Datadog currently provides no usable logs/metrics/monitors/service entities; Cloudflare telemetry is authoritative.
 - `FOUNDER_AUTO_OUTREACH=false`; no emails, D1 mutations, suppression changes or credentials changed.
+
+
+### Live handoff — 23-11-2026 14:30 UTC
+- Canonical plan: LocalFlowPro `docs/MASTER_PLAN_BVELT_ECOSYSTEM_2026-12-10.md`, latest section **Continuation checkpoint — 23-11-2026 14:30 UTC**.
+- Radar main SHA `4315bdc6298d4e305cb633f5026e0bfd47c41612`; PR #77 separates source-degraded jobs from honest empty-market jobs and updates health/Telegram digest. CI run `45194498525` green including npm audit, Radar tests and Sidecar tests.
+- Historical D1 read-only audit: 705/1,152 `completed_zero_prospects` rows contain infra/provider failure markers. New code writes `completed_source_degraded`; health/digest classify legacy rows read-only. No D1 backfill.
+- Latest production deployment is version `a91badb5-6317-46e2-8755-62b255da3f41` from PR #74 at 100%. PR #77 commit build `125ae673-754f-4a11-8732-2e3c50b57c32` was queued at 14:28:59Z; await success and deployment read-back.
+- Resend: 45 bounced rows (16 permanent, 29 unverified) + 4 transient holds; all remain blocked. Seven webhook subscriptions active. Svix signing secret absent; query-token fallback remains.
+- No open PRs. `FOUNDER_AUTO_OUTREACH=false`. No production D1 mutation, email send, suppression change or secret update.
