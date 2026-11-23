@@ -298,3 +298,11 @@ Not yet validated or deployed:
 - Latest 100% Radar deployment is version `bb91b6c3-5f50-4feb-8c81-fc8c23a3e098` from 2026-11-23 10:27:54 UTC; exact Git SHA parity is not exposed and this deployment predates PR #67.
 - `RESEND_WEBHOOK_SIGNING_SECRET` is not listed in current Worker bindings; Svix enforcement is not active in production. Existing query-token fallback remains. `GITHUB_ACTIONS_TOKEN_SECRET` is not listed; the empty legacy plain-text binding is not a usable credential, so optional Sidecar remains unavailable.
 - Do not change provider/model IDs or enable Founder auto-outreach. No production deploy, secret/webhook change, D1 mutation, or email send occurred in this continuation.
+
+
+### Post-merge deployment / webhook update — 23-11-2026 14:05 UTC
+- PR #67 merge SHA `8cbee655ce66391554b4f28913000423f3a25535` passed Cloudflare Workers Builds; active production version `838e088d-ee60-4c43-af28-8da1b3ac1f41` serves 100% traffic from 2026-11-23 13:56:28Z.
+- Last 60 minutes exact Radar Worker telemetry: 0 errors/0 warnings.
+- Resend webhook subscriptions now include `email.delivery_delayed`, `email.failed`, `email.suppressed` in addition to received/delivered/complained/bounced. Endpoint remains enabled.
+- `RESEND_WEBHOOK_SIGNING_SECRET` is still absent from Cloudflare Worker secrets. Cloudflare secret-write was blocked by tool safety; do not bypass. Production still uses query-token compatibility auth; Svix enforcement is not active.
+- No D1 data, suppression, outbound email, or auto-outreach changes were made. Four transient contacts remain blocked; 45 `resend_bounced` remain blocked (16 permanent evidence, 29 unverified).
