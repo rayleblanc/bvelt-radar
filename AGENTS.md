@@ -272,3 +272,9 @@ Not yet validated or deployed:
 - When the provider event idempotency receipt cannot be persisted to D1, webhook returns HTTP 503 so Resend retries. No side effects are applied before receipt persistence.
 - Both PR #64 and PR #65 are merged; no open PR remains. Production is still not deployed and the dedicated Svix secret remains unconfigured.
 - See the canonical plan's 23-11-2026 live audit checkpoint for exact evidence and remaining production gates.
+
+
+### Resend suppression audit result — 23-11-2026
+- A read-only reconciliation of original Resend bounce payloads against D1 confirmed **4 transient bounces are incorrectly marked as permanent `resend_bounced` suppressions**. Sixteen other matched events were explicitly permanent. Of 49 unique historical suppression keys, 29 remain unverified against the current webhook history.
+- All 49 keys match a prospect; 48 match a dispatch log. Do not bulk-unsuppress. Keep the 29 unknown keys suppressed. Any correction must be a per-key, evidence-backed change to HOLD/DELIVERY_DELAYED, not automatic send eligibility, and must preserve consent/jurisdiction/cooldown gates.
+- No D1 or contact state was changed during the audit. Full counts and evidence are in the canonical Bvelt plan section **Resend suppression dry-run — original payload reconciliation (23-11-2026)**.
