@@ -12,6 +12,7 @@
  */
 
 import { buildRadarEvidenceProvenance } from './evidenceProvenance.js';
+import { normalizeResendDeliveryEvent, verifySvixWebhookSignature } from './resendWebhookSecurity.js';
 import { TENANT_TARGET_MAP, resolveTenantBuyerSegmentsForProfile } from "./tenantBuyerSegments.js";
 import { validateTenantProfileContract } from './tenantProfileContract.js';
 import { getAlerts, tradeForEvent, eventAppliesToTrade, WeatherAlert } from './weatherSignals';
@@ -1129,7 +1130,15 @@ export default {
       // Opcional (tiempo real): registra el webhook como https://TU-WORKER/webhook/resend?token=<TELEGRAM_WEBHOOK_SECRET>. Sin esto, el cron consulta a Resend igualmente.
       const isWebhookPath = method === "POST" && ["/api/events", "/events", "/api/reply", "/webhook/events", "/webhook/resend", "/webhook/brevo"].includes(path);
       const webhookSecret = (((env as any).WEBHOOK_SECRET || env.TELEGRAM_WEBHOOK_SECRET || "") as string).trim() || undefined;
-      const webhookOk = isWebhookPath && !!webhookSecret && url.searchParams.get("token") === webhookSecret;
+      const resendSigningSecret = String((env as any).RESEND_WEBHOOK_SIGNING_SECRET || "").trim();
+      const resendSignatureOk = isWebhookPath && path === "/webhook/resend" && !!resendSigningSecret
+        ? await verifySvixWebhookSignature(await request.clone().text(), request.headers, resendSigningSecret)
+        : false;
+      // Once the dedicated Svix secret is configured, Resend must use its signed raw-body contract.
+      // Until then, retain the existing token path so configuration can be staged without outage.
+      const webhookOk = isWebhookPath && (path === "/webhook/resend" && resendSigningSecret
+        ? resendSignatureOk
+        : !!webhookSecret && url.searchParams.get("token") === webhookSecret);
       const isResearchCallbackPath = path.startsWith("/api/research/") || path.startsWith("/research/");
       // These routes authenticate again with resolveTenantAuthContext and enforce
       // exact tenant ownership before reading or mutating tenant data. They must
@@ -1863,8 +1872,15 @@ export default {
 
       // 13. Events & Reply Webhook Endpoint (/api/events, /events, /api/reply, /webhook/events, /webhook/resend, /webhook/brevo)
       if ((path === "/api/events" || path === "/events" || path === "/api/reply" || path === "/webhook/events" || path === "/webhook/resend" || path === "/webhook/brevo") && method === "POST") {
-        const rawBody: any = await request.json().catch(() => ({}));
+        let rawBody: any = {};
+        try {
+          const rawText = path === "/webhook/resend" ? await request.text() : "";
+          rawBody = path === "/webhook/resend" ? JSON.parse(rawText) : await request.json();
+        } catch {
+          return Response.json({ success: false, error: "invalid_webhook_payload" }, { status: 400, headers: corsHeaders });
+        }
         const rawEvents = Array.isArray(rawBody) ? rawBody : [rawBody];
+        const providerEventId = path === "/webhook/resend" ? request.headers.get("svix-id") : null;
         const results = [];
 
         for (const body of rawEvents) {
@@ -1885,14 +1901,13 @@ export default {
             if (resendType.includes("opened") || resendType.includes("open")) eventType = "opened";
             else if (resendType.includes("clicked") || resendType.includes("click")) eventType = "clicked";
             else if (resendType.includes("bounced") || resendType.includes("bounce")) {
-              const bounceType = String(data.bounce?.type || "").toLowerCase();
-              eventType = bounceType === "permanent" ? "bounced" : "delivery_delayed";
+              eventType = normalizeResendDeliveryEvent(resendType, data.bounce?.type);
             }
             else if (resendType.includes("delivery_delayed") || resendType.includes("delayed")) eventType = "delivery_delayed";
             else if (resendType.includes("failed")) eventType = "failed";
             else if (resendType.includes("suppressed")) eventType = "suppressed";
             else if (resendType.includes("delivered")) eventType = "delivered";
-            else if (resendType.includes("complained") || resendType.includes("spam")) eventType = "negative";
+            else if (resendType.includes("complained") || resendType.includes("spam")) eventType = "complained";
             else if (resendType.includes("received")) {
               // Resend inbound (email.received): el webhook trae solo metadatos (data.from = remitente, data.email_id).
               // El cuerpo se obtiene con GET /emails/{id} (Received emails API).
@@ -1968,17 +1983,22 @@ export default {
             if (body.email) email = email || body.email;
           }
 
+          if (!eventType && path === "/webhook/resend" && body.type) {
+            results.push({ success: true, ignored: true, reason: "unsupported_resend_event" });
+            continue;
+          }
           if (!eventType) eventType = "replied";
 
           const eventResult = await handleProspectEvent({
             prospect_id: prospectId,
             email,
             event_type: eventType,
-            content
+            content,
+            provider_event_id: providerEventId
           }, env);
 
           if (providerMessageId && eventType !== "replied") {
-            const logStatus = eventType === "negative" ? "complained" : eventType === "delivery_delayed" ? "delayed" : eventType;
+            const logStatus = eventType === "delivery_delayed" ? "delayed" : eventType;
             try {
               await env.RADAR_DB.prepare("UPDATE email_dispatch_logs SET status = ? WHERE message_id = ?")
                 .bind(logStatus, providerMessageId).run();
@@ -6220,21 +6240,27 @@ export async function reconcileResendDeliveries(env: Env): Promise<{ checked: nu
       out.checked++;
       const now = new Date().toISOString();
 
-      if (ev === "bounced" || ev === "complained") {
-        const email = String(p.email || "").trim().toLowerCase();
-        const logStatus = ev === "complained" ? "complained" : "bounced";
-        await env.RADAR_DB.prepare("UPDATE email_dispatch_logs SET status = ? WHERE message_id = ?")
-          .bind(logStatus, p.dispatch_message_id).run();
-        await recordNegativeSignal(env.RADAR_DB, ev === "complained" ? "complaint" : "bounce",
-          `Resend reconciliation: ${ev} for ${p.id}`);
+      if (ev === "bounced") {
+        // GET /emails exposes last_event but not the verified bounce subtype.
+        // Never turn that ambiguous status into a permanent bounce or suppression.
+        await env.RADAR_DB.prepare("UPDATE email_dispatch_logs SET status = 'delivery_uncertain' WHERE message_id = ?")
+          .bind(p.dispatch_message_id).run();
         await env.RADAR_DB.prepare(
-          "UPDATE prospects SET status = ?, outcome = ?, dispatch_status = ?, updated_at = ? WHERE id = ?"
-        ).bind(ev === "complained" ? "suppressed" : "bounced", ev, ev, now, p.id).run();
+          "UPDATE prospects SET status = 'hold', outcome = 'delivery_uncertain', dispatch_status = 'delivery_uncertain', updated_at = ? WHERE id = ?"
+        ).bind(now, p.id).run();
+      } else if (ev === "complained") {
+        const email = String(p.email || "").trim().toLowerCase();
+        await env.RADAR_DB.prepare("UPDATE email_dispatch_logs SET status = 'complained' WHERE message_id = ?")
+          .bind(p.dispatch_message_id).run();
+        await recordNegativeSignal(env.RADAR_DB, "complaint", `Resend reconciliation: complaint for ${p.id}`);
+        await env.RADAR_DB.prepare(
+          "UPDATE prospects SET status = 'suppressed', outcome = 'complained', dispatch_status = 'complained', updated_at = ? WHERE id = ?"
+        ).bind(now, p.id).run();
         if (email) {
-          await env.RADAR_DB.prepare("INSERT OR REPLACE INTO suppression (key, reason, created_at) VALUES (?, ?, ?)")
-            .bind(email, `resend_${ev}`, now).run();
+          await env.RADAR_DB.prepare("INSERT OR REPLACE INTO suppression (key, reason, created_at) VALUES (?, 'resend_complained', ?)")
+            .bind(email, now).run();
         }
-        if (ev === "bounced") out.bounced++; else out.complained++;
+        out.complained++;
       } else if (["delivered", "opened", "clicked"].includes(ev)) {
         await env.RADAR_DB.prepare("UPDATE email_dispatch_logs SET status = ? WHERE message_id = ?")
           .bind(ev, p.dispatch_message_id).run();
@@ -7973,6 +7999,7 @@ export type ReplyClassificationType =
   | 'delivery_delayed'
   | 'failed'
   | 'suppressed'
+  | 'complained'
   | 'replied'
   | 'positive'
   | 'negative'
@@ -8001,6 +8028,7 @@ export function classifyReplyText(rawType?: string, content?: string): ReplyClas
   if (typeLower === 'delivery_delayed' || typeLower === 'delayed' || typeLower === 'email.delivery_delayed') return 'delivery_delayed';
   if (typeLower === 'failed' || typeLower === 'email.failed') return 'failed';
   if (typeLower === 'suppressed' || typeLower === 'email.suppressed') return 'suppressed';
+  if (typeLower === 'complained' || typeLower === 'email.complained') return 'complained';
   if (typeLower === 'unsubscribe' || typeLower === 'stop' || typeLower === 'opt_out') return 'unsubscribe';
   if (typeLower === 'out_of_office' || typeLower === 'ooo' || typeLower === 'vacation') return 'out_of_office';
   if (typeLower === 'not_now' || typeLower === 'later') return 'not_now';
@@ -8070,6 +8098,7 @@ export async function handleProspectEvent(
     email?: string | null;
     event_type: string;
     content?: string | null;
+    provider_event_id?: string | null;
   },
   env: Env
 ): Promise<{ success: boolean; prospect_id: string; classification: ReplyClassificationType; auto_stopped: boolean; message: string }> {
@@ -8098,14 +8127,32 @@ export async function handleProspectEvent(
   const classification = classifyReplyText(params.event_type, params.content || undefined);
 
   // Record event log in prospect_events
-  const eventId = crypto.randomUUID();
+  const eventId = String(params.provider_event_id || "").trim() || crypto.randomUUID();
   try {
-    await db.prepare(`
-      INSERT INTO prospect_events (id, prospect_id, event_type, response_type, content, created_at)
+    const inserted = await db.prepare(`
+      INSERT OR IGNORE INTO prospect_events (id, prospect_id, event_type, response_type, content, created_at)
       VALUES (?, ?, ?, ?, ?, ?)
     `).bind(eventId, prospect.id, params.event_type, classification, params.content || null, timestamp).run();
+    if (params.provider_event_id && Number(inserted?.meta?.changes || 0) === 0) {
+      return {
+        success: true,
+        prospect_id: prospect.id,
+        classification,
+        auto_stopped: true,
+        message: "Duplicate provider event ignored."
+      };
+    }
   } catch (e) {
     console.warn("Failed to insert prospect_events:", e);
+    if (params.provider_event_id) {
+      return {
+        success: false,
+        prospect_id: prospect.id,
+        classification,
+        auto_stopped: true,
+        message: "Provider event persistence failed; side effects skipped."
+      };
+    }
   }
 
   let autoStopped = false;
@@ -8152,7 +8199,7 @@ export async function handleProspectEvent(
       autoStopped = true;
       newStatus = 'hold';
       newOutcome = 'delivery_delayed';
-      await recordNegativeSignal(db, 'bounce', `Transient delivery bounce for ${prospect.name}`);
+      // A transient delay is not a permanent bounce and must not consume the hard-bounce budget.
       break;
 
     case 'failed':
@@ -8180,6 +8227,17 @@ export async function handleProspectEvent(
       if (prospect.email) {
         await db.prepare("INSERT OR REPLACE INTO suppression (key, reason, created_at) VALUES (?, ?, ?)")
           .bind(prospect.email.toLowerCase(), `Bounced on ${timestamp}`, timestamp).run();
+      }
+      break;
+
+    case 'complained':
+      autoStopped = true;
+      newStatus = 'suppressed';
+      newOutcome = 'complained';
+      await recordNegativeSignal(db, 'complaint', `Provider complaint for ${prospect.id}`);
+      if (prospect.email) {
+        await db.prepare("INSERT OR REPLACE INTO suppression (key, reason, created_at) VALUES (?, ?, ?)")
+          .bind(prospect.email.toLowerCase(), `Provider complaint on ${timestamp}`, timestamp).run();
       }
       break;
 
@@ -8254,7 +8312,6 @@ export async function handleProspectEvent(
       autoStopped = true;
       newStatus = 'discarded';
       newOutcome = 'negative';
-      await recordNegativeSignal(db, 'complaint', `Complaint/negative response for ${prospect.name}`);
       if (prospect.email) {
         await db.prepare("INSERT OR REPLACE INTO suppression (key, reason, created_at) VALUES (?, ?, ?)")
           .bind(prospect.email.toLowerCase(), `Negative response on ${timestamp}`, timestamp).run();
