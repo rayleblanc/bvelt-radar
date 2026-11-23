@@ -1,0 +1,32 @@
+name: Temporary Vite lockfile regeneration
+on:
+  push:
+    branches:
+      - fix/radar-vite-security-20261123
+permissions:
+  contents: write
+jobs:
+  regenerate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+          token: ${{ github.token }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Update Vite to patched release and regenerate lockfile
+        run: |
+          npm install --save-dev vite@5.4.21 --package-lock-only --ignore-scripts --no-audit --no-fund
+          npm audit --json > /tmp/npm-audit.json || true
+          node -e 'const r=JSON.parse(require("node:fs").readFileSync("/tmp/npm-audit.json","utf8")); console.log("post-update npm audit:", JSON.stringify(r.metadata?.vulnerabilities ?? {}));'
+      - name: Commit regenerated package manifests
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json
+          if ! git diff --cached --quiet; then
+            git commit -m "fix(deps): update Vite to patched 5.4.21 release"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          fi
