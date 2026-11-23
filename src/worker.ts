@@ -12,6 +12,7 @@
  */
 
 import { buildRadarEvidenceProvenance } from './evidenceProvenance.js';
+import { validateDiscoveryPayload } from './discoveryPayload.js';
 import { normalizeResendDeliveryEvent, resolveAmbiguousResendBounce, verifySvixWebhookSignature } from './resendWebhookSecurity.js';
 import { TENANT_TARGET_MAP, resolveTenantBuyerSegmentsForProfile } from "./tenantBuyerSegments.js";
 import { validateTenantProfileContract } from './tenantProfileContract.js';
@@ -6297,7 +6298,30 @@ export function isDiscoveryInfrastructureFailure(reason: unknown): boolean {
 }
 
 async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void> {
-  const { city, trade, overrides } = job.payload;
+  const payload: any = job.payload || {};
+  const payloadError = validateDiscoveryPayload(payload);
+  if (payloadError) {
+    const now = new Date().toISOString();
+    const message = `Invalid discovery payload: ${payloadError}`;
+    console.warn("[Job: discovery] rejected malformed payload", {
+      job_id: job.job_id || null,
+      run_id: job.run_id || null,
+      mode: job.mode || null,
+      reason: payloadError
+    });
+    if (env.RADAR_DB && job.job_id) {
+      await env.RADAR_DB.batch([
+        env.RADAR_DB.prepare(
+          "UPDATE radar_jobs SET status = 'failed', last_error = ?, updated_at = ? WHERE id = ?"
+        ).bind(message, now, job.job_id),
+        env.RADAR_DB.prepare(
+          "UPDATE queue_jobs SET status = 'failed', error = ?, completed_at = ? WHERE job_id = ?"
+        ).bind(message, now, job.job_id)
+      ]);
+    }
+    return;
+  }
+  const { city, trade, overrides } = payload;
 
   // Skip city+trade pairs already dense in D1 (founder or tenant scope).
   // Prevents burning budget on "todo lo que halla ya existe".
