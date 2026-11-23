@@ -6438,7 +6438,7 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
       } catch (e) {}
     }
 
-    // Do NOT burn geo_coverage on infrastructure failures (timeout/4xx/abort).
+    // Do NOT burn geo_coverage on provider/infrastructure failures (timeout/4xx/5xx/cooldown).
     // Only mark when sources honestly returned zero matches.
     const isHonestEmpty =
       reason.includes("0 matches") ||
