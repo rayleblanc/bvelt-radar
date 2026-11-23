@@ -2010,6 +2010,10 @@ export default {
         }
 
         const responsePayload = Array.isArray(rawBody) ? { batch: true, count: results.length, results } : results[0];
+        if (results.some((result: any) => result?.message === "Provider event persistence failed; side effects skipped.")) {
+          // Ask Resend to retry when the idempotency receipt could not be committed.
+          return Response.json({ success: false, error: "provider_event_persistence_failed" }, { status: 503, headers: corsHeaders });
+        }
         return Response.json(responsePayload, { headers: corsHeaders });
       }
 
