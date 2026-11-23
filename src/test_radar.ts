@@ -1063,11 +1063,11 @@ tests.push({
             }
             if (sql.includes("UPDATE radar_jobs SET status")) {
               dbUpdates.radar_jobs_status = args[0];
-              dbUpdates.radar_jobs_last_error = args[0];
+              dbUpdates.radar_jobs_last_error = args[1];
             }
             if (sql.includes("UPDATE queue_jobs SET status")) {
               dbUpdates.queue_jobs_status = args[0];
-              dbUpdates.queue_jobs_error = args[0];
+              dbUpdates.queue_jobs_error = args[1];
             }
             return Promise.resolve({ success: true });
           }
