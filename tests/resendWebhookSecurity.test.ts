@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { normalizeResendDeliveryEvent, verifySvixWebhookSignature } from "../src/resendWebhookSecurity";
+import { normalizeResendDeliveryEvent, resolveAmbiguousResendBounce, verifySvixWebhookSignature } from "../src/resendWebhookSecurity";
 
 function toBase64(bytes: Uint8Array): string {
   let binary = "";
@@ -49,4 +49,17 @@ test("Svix signature rejects stale timestamps and missing headers", async () => 
   });
   assert.equal(await verifySvixWebhookSignature("{}", headers, "whsec_AA=="), false);
   assert.equal(await verifySvixWebhookSignature("{}", new Headers(), "whsec_AA=="), false);
+});
+
+test("ambiguous provider bounce preserves explicit transient event evidence", () => {
+  assert.deepEqual(resolveAmbiguousResendBounce(true), {
+    logStatus: "delayed",
+    dispatchStatus: "delivery_delayed",
+    outcome: "delivery_delayed"
+  });
+  assert.deepEqual(resolveAmbiguousResendBounce(false), {
+    logStatus: "delivery_uncertain",
+    dispatchStatus: "delivery_uncertain",
+    outcome: "delivery_uncertain"
+  });
 });
