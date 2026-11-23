@@ -287,3 +287,14 @@ Not yet validated or deployed:
 - Remaining suppression counts: 45 `resend_bounced` (16 direct permanent evidence, 29 unverified) + 4 `resend_transient_hold`.
 - NEVER call `/fix-suppression` with `retry_resend_bounces=true`: it bulk-deletes all remaining exact `resend_bounced` suppression rows and reactivates prospects, including permanent and unverified rows. Use targeted, evidence-backed corrections only.
 - No outbound email, bulk unsuppression or production deployment occurred. Full handoff evidence is in the canonical Bvelt plan.
+
+
+### Live continuation handoff — 23-11-2026 13:56 UTC
+- Canonical program state is in LocalFlowPro `docs/MASTER_PLAN_BVELT_ECOSYSTEM_2026-12-10.md`, latest section **Live continuation audit — 23-11-2026 13:56 UTC**.
+- PR #67 merged: `8cbee655ce66391554b4f28913000423f3a25535`; CI run `45188565664` green (build, Radar tests including malformed discovery payload regression, Sidecar tests). No open PRs.
+- Production D1 contains one historical failed tenant discovery job from 2026-11-09 because `trade` was missing. New mainline guard rejects malformed city/trade payloads and records an explicit failed state; the historical record was not rewritten or retried.
+- Last 24h exact Worker logs: 0 error-level Radar events, 23 warning-level provider/source degradations (Abstract 401/429, BizData 502/timeouts, one zero-result observation). No pending/processing queue backlog.
+- D1 suppressions: 45 `resend_bounced` (16 permanent evidence, 29 unverified) + 4 `resend_transient_hold`; all four transient rows remain blocked with HOLD/DELIVERY_DELAYED and delayed dispatch-log state. Never invoke bulk `retry_resend_bounces=true`.
+- Latest 100% Radar deployment is version `bb91b6c3-5f50-4feb-8c81-fc8c23a3e098` from 2026-11-23 10:27:54 UTC; exact Git SHA parity is not exposed and this deployment predates PR #67.
+- `RESEND_WEBHOOK_SIGNING_SECRET` is not listed in current Worker bindings; Svix enforcement is not active in production. Existing query-token fallback remains. `GITHUB_ACTIONS_TOKEN_SECRET` is not listed; the empty legacy plain-text binding is not a usable credential, so optional Sidecar remains unavailable.
+- Do not change provider/model IDs or enable Founder auto-outreach. No production deploy, secret/webhook change, D1 mutation, or email send occurred in this continuation.
