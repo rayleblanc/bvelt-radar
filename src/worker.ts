@@ -9849,10 +9849,19 @@ export function normalizeBizDataBusinesses(data: any, city: string, trade: strin
   }));
 }
 
-export async function fetchBizDataBusinesses(city: string, trade: string): Promise<{ businesses: any[]; status: string }> {
+export async function fetchBizDataBusinesses(city: string, trade: string, env?: Env): Promise<{ businesses: any[]; status: string }> {
   const category = mapTradeToBizDataCategory(trade);
   if (!category) {
     return { businesses: [], status: "skipped_unsupported_category" };
+  }
+
+  // BizData is an optional discovery source. Share its cooldown across isolates so
+  // upstream outages do not cause repeated requests for every city/trade pair.
+  const providerCooldown = env?.RADAR_DB
+    ? await getProviderCooldown(env.RADAR_DB, "bizdata", "business-directory")
+    : null;
+  if (providerCooldown) {
+    return { businesses: [], status: `cooldown active (${providerCooldown.failureClass})` };
   }
 
   try {
@@ -9866,10 +9875,22 @@ export async function fetchBizDataBusinesses(city: string, trade: string): Promi
       const results = normalizeBizDataBusinesses(data, city, trade);
       return { businesses: results, status: `success (${results.length} businesses)` };
     } else {
+      if (env?.RADAR_DB && [401, 403, 408, 429].includes(res.status) || (env?.RADAR_DB && res.status >= 500)) {
+        await recordProviderCooldownFailure(env.RADAR_DB, "bizdata", "business-directory", {
+          failureClass: classifyProviderHttpStatus(res.status),
+          status: res.status,
+          retryAfter: res.headers.get("retry-after")
+        });
+      }
       console.warn(`[BizData] HTTP ${res.status} for ${city} - ${trade}, skipping source (do not abort)`);
       return { businesses: [], status: `HTTP ${res.status} (skipped)` };
     }
   } catch (err: any) {
+    if (env?.RADAR_DB) {
+      await recordProviderCooldownFailure(env.RADAR_DB, "bizdata", "business-directory", {
+        failureClass: classifyProviderError(err)
+      });
+    }
     console.warn(`[BizData] Error for ${city} - ${trade}: ${err.message}, skipping source (do not abort)`);
     return { businesses: [], status: `error: ${err.message} (skipped)` };
   }
@@ -10376,7 +10397,7 @@ export async function fetchLocalBusinessesWithDiagnostics(
   if (bizDataExplicitlyOff) {
     bizdataStatus = "disabled (ENABLE_BIZDATA=0)";
   } else if (viableCount < bizDataThreshold) {
-    const bizDataRes = await fetchBizDataBusinesses(city, trade);
+    const bizDataRes = await fetchBizDataBusinesses(city, trade, env);
     bizdataStatus = bizDataRes.status;
     rawBusinesses.push(...bizDataRes.businesses);
     viableCount = countViableCandidates([...permitCandidates, ...rawBusinesses]);
@@ -12562,7 +12583,7 @@ export async function verifyEmail(email: string, env: Env): Promise<EmailVerific
   }
 
   // Fail closed: format validity and MX presence are not proof that a mailbox exists.
-  // Transient provider failures are not cached, so a later run can verify again.
+  // Provider failures are shared-cooldown guarded; retry only after the provider window expires.
   return {
     valid: false,
     deliverability: "UNVERIFIED",
