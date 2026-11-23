@@ -306,3 +306,13 @@ Not yet validated or deployed:
 - Resend webhook subscriptions now include `email.delivery_delayed`, `email.failed`, `email.suppressed` in addition to received/delivered/complained/bounced. Endpoint remains enabled.
 - `RESEND_WEBHOOK_SIGNING_SECRET` is still absent from Cloudflare Worker secrets. Cloudflare secret-write was blocked by tool safety; do not bypass. Production still uses query-token compatibility auth; Svix enforcement is not active.
 - No D1 data, suppression, outbound email, or auto-outreach changes were made. Four transient contacts remain blocked; 45 `resend_bounced` remain blocked (16 permanent evidence, 29 unverified).
+
+
+### Live handoff — 23-11-2026 14:08 UTC
+- Canonical state is LocalFlowPro `docs/MASTER_PLAN_BVELT_ECOSYSTEM_2026-12-10.md`, section **Continuation checkpoint — 23-11-2026 14:08 UTC**.
+- PR #68 merged to Radar main: `fdf794383f512357e150d86d1d4a8a7b6560777e`. CI run `45190534940` green (TypeScript/Vite build, full Radar suite, Sidecar tests). No open PRs. Duplicate PR #69 closed unmerged.
+- Abstract API verification now has shared D1-backed cooldown for auth/rate-limit/server/network failures. Email verification remains fail-closed/UNVERIFIED; Gemini/Groq cascade untouched.
+- Current production deployment read-back predates PR #68: version `001e85a9-5105-4fb4-96eb-bae2c01890ed`, created 14:01:29Z. Do not claim this code is live until a post-merge deployment serves 100%.
+- Last 60-minute Radar telemetry: 0 errors/0 warnings; last 24h contains 23 external provider/source warnings (Abstract 401/429; BizData 502/timeouts). D1: 3,298 completed, 1,152 completed_zero_prospects, one historical failed Naples discovery job; no active backlog.
+- Datadog log/metric/monitor connectors return no usable project data; use Cloudflare telemetry + D1.
+- No D1, secrets, suppressions, outbound email, or auto-outreach mutation was made.
