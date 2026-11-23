@@ -12483,9 +12483,17 @@ export async function verifyEmail(email: string, env: Env): Promise<EmailVerific
     }
   } catch (e) {}
 
-  // 4. Abstract API verification using exact variable ABSTRACT_API_KEY
+  // 4. Abstract API verification using exact variable ABSTRACT_API_KEY.
+  // Share cooldown state across isolates so invalid credentials and provider rate limits
+  // do not generate repeated calls while the provider is rejecting this integration.
   let providerFailure = env.ABSTRACT_API_KEY ? "Abstract API verification unavailable" : "ABSTRACT_API_KEY missing";
-  if (env.ABSTRACT_API_KEY) {
+  const abstractCooldown = env.ABSTRACT_API_KEY
+    ? await getProviderCooldown(env.RADAR_DB, "abstract", "email-validation")
+    : null;
+  if (abstractCooldown) {
+    providerFailure = `Abstract API cooldown active (${abstractCooldown.failureClass})`;
+  }
+  if (env.ABSTRACT_API_KEY && !abstractCooldown) {
     try {
       const url = `https://emailvalidation.abstractapi.com/v1/?api_key=${env.ABSTRACT_API_KEY}&email=${encodeURIComponent(normEmail)}`;
       const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
@@ -12536,9 +12544,19 @@ export async function verifyEmail(email: string, env: Env): Promise<EmailVerific
         return result;
       }
       providerFailure = `Abstract API HTTP ${res.status}`;
+      await recordProviderCooldownFailure(env.RADAR_DB, "abstract", "email-validation", {
+        failureClass: classifyProviderHttpStatus(res.status),
+        status: res.status,
+        retryAfter: res.headers.get("Retry-After")
+      });
       console.warn(`[Abstract API Verification Warning] ${providerFailure}`);
     } catch (e: any) {
       providerFailure = "Abstract API request failed";
+      await recordProviderCooldownFailure(env.RADAR_DB, "abstract", "email-validation", {
+        failureClass: classifyProviderError(e),
+        status: Number.isFinite(Number(e?.status)) ? Number(e.status) : null,
+        retryAfter: e?.headers?.get?.("Retry-After") || null
+      });
       console.warn("[Abstract API Verification Warning]", e?.message || e);
     }
   }

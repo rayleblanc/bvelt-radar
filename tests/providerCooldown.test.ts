@@ -8,7 +8,7 @@ import {
   providerCooldownKey,
   type ProviderCooldownDatabase
 } from "../src/providerCooldown";
-import { generateAICopy, WORKERS_AI_FALLBACK_MODEL } from "../src/worker";
+import { generateAICopy, verifyEmail, WORKERS_AI_FALLBACK_MODEL } from "../src/worker";
 
 type StoredRow = { value: string; expires_at: number };
 
@@ -216,6 +216,48 @@ describe("provider/model cooldown policy", () => {
     assert.equal(second.source, "template");
     assert.equal(workersAiCalls, 1, "Workers AI is called once and skipped while its cooldown is active");
     assert.equal(JSON.parse(stored!.value).failureClass, "rate_limited");
+  });
+
+  it("shares Abstract API cooldowns across email verifications after auth failures", async () => {
+    const rows = new Map<string, StoredRow>();
+    const db = createDb(rows);
+    const originalFetch = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      return new Response("invalid API key", { status: 401 });
+    }) as typeof fetch;
+
+    try {
+      const env: any = { RADAR_DB: db, ABSTRACT_API_KEY: "unit-test-invalid-key" };
+      const first = await verifyEmail("jordan@acmeplumbing.com", env);
+      const second = await verifyEmail("alex@acmeplumbing.com", env);
+      const stored = rows.get(providerCooldownKey("abstract", "email-validation"));
+
+      assert.equal(first.deliverability, "UNVERIFIED");
+      assert.equal(second.deliverability, "UNVERIFIED");
+      assert.match(second.reason, /cooldown active/i);
+      assert.equal(calls, 1, "the provider is called once while the shared auth cooldown is active");
+      assert.equal(JSON.parse(stored!.value).failureClass, "auth_error");
+      assert.equal(JSON.parse(stored!.value).status, 401);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("honors Abstract API Retry-After when recording a 429 cooldown", async () => {
+    const rows = new Map<string, StoredRow>();
+    const store = createProviderCooldownStore();
+    const db = createDb(rows);
+    const now = Date.UTC(2026, 10, 23, 12, 0, 0);
+    const record = await store.recordFailure(db, "abstract", "email-validation", {
+      failureClass: "rate_limited",
+      status: 429,
+      retryAfter: "120",
+      now
+    });
+    assert.equal(record?.cooldownUntil, now + 120_000);
+    assert.ok(rows.has(providerCooldownKey("abstract", "email-validation")));
   });
 
 });

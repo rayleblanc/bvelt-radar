@@ -1,4 +1,4 @@
-export type AIProviderName = "groq" | "gemini" | "workers_ai";
+export type AIProviderName = "groq" | "gemini" | "workers_ai" | "abstract";
 
 export type ProviderFailureClass =
   | "rate_limited"
@@ -113,7 +113,7 @@ function parseRecord(value: unknown): Omit<ProviderCooldownRecord, "cooldownUnti
     const parsed = typeof value === "string" ? JSON.parse(value) : value as any;
     if (
       parsed &&
-      (parsed.provider === "groq" || parsed.provider === "gemini" || parsed.provider === "workers_ai") &&
+      (parsed.provider === "groq" || parsed.provider === "gemini" || parsed.provider === "workers_ai" || parsed.provider === "abstract") &&
       typeof parsed.model === "string" &&
       typeof parsed.failureClass === "string" &&
       Number.isFinite(Number(parsed.recordedAt))
