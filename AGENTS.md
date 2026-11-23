@@ -341,7 +341,7 @@ Not yet validated or deployed:
 
 Canonical ecosystem plan: https://github.com/rayleblanc/LocalFlowPro/blob/main/docs/MASTER_PLAN_BVELT_ECOSYSTEM_2026-12-10.md (latest alignment checkpoint commit b9f6a5a).
 
-Radar application-code baseline: 1b8972c. PR #79 is open and clean; TypeScript, sidecar and Cloudflare Workers Builds preview checks pass, while worker-bundle is skipped. It is not merged. Active production Worker version 304 at 100% traffic still contains the pre-PR-79 missing-diagnostics fallback; do not call the PR deployed.
+Radar application-code baseline: 1b8972c. PR #79 is open and unmerged; the latest GitHub API response reports mergeability unknown. TypeScript, sidecar and Cloudflare Workers Builds preview checks pass, while worker-bundle is skipped. It is not merged. Active production Worker version 304 at 100% traffic still contains the pre-PR-79 missing-diagnostics fallback; do not call the PR deployed.
 
 Current D1 read-back: Radar used 1,950,942 rows read / 6,589 rows written on 2026-11-22 and 525,544 / 1,793 on the partial 2026-11-23 day. Tenant observation events remain zero; Radar-to-BEM sync state observed Founder scope only. Full data counts, D1 analytics, and the next technical block are in the canonical Bvelt master plan.
 
