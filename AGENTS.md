@@ -335,3 +335,14 @@ Not yet validated or deployed:
 - Latest production deployment is version `a91badb5-6317-46e2-8755-62b255da3f41` from PR #74 at 100%. PR #77 commit build `125ae673-754f-4a11-8732-2e3c50b57c32` was queued at 14:28:59Z; await success and deployment read-back.
 - Resend: 45 bounced rows (16 permanent, 29 unverified) + 4 transient holds; all remain blocked. Seven webhook subscriptions active. Svix signing secret absent; query-token fallback remains.
 - No open PRs. `FOUNDER_AUTO_OUTREACH=false`. No production D1 mutation, email send, suppression change or secret update.
+
+
+## Live handoff — 2026-11-23
+
+Canonical ecosystem plan: https://github.com/rayleblanc/LocalFlowPro/blob/main/docs/MASTER_PLAN_BVELT_ECOSYSTEM_2026-12-10.md (latest alignment checkpoint commit 1c80c86).
+
+Radar application-code baseline: 1b8972c. PR #79 is open and clean; TypeScript, sidecar and Cloudflare Workers Builds preview checks pass, while worker-bundle is skipped. It is not merged. Active production Worker version 304 at 100% traffic still contains the pre-PR-79 missing-diagnostics fallback; do not call the PR deployed.
+
+Current D1 read-back: Radar used 1,950,942 rows read / 6,589 rows written on 2026-11-22 and 525,544 / 1,793 on the partial 2026-11-23 day. Tenant observation events remain zero; Radar-to-BEM sync state observed Founder scope only. Full data counts, D1 analytics, and the next technical block are in the canonical Bvelt master plan.
+
+No Radar code merge, D1 mutation, secret change or production deployment was performed in this documentation alignment run.
