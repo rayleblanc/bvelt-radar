@@ -339,7 +339,7 @@ Not yet validated or deployed:
 
 ## Live handoff — 2026-11-23
 
-Canonical ecosystem plan: https://github.com/rayleblanc/LocalFlowPro/blob/main/docs/MASTER_PLAN_BVELT_ECOSYSTEM_2026-12-10.md (latest alignment checkpoint commit 1c80c86).
+Canonical ecosystem plan: https://github.com/rayleblanc/LocalFlowPro/blob/main/docs/MASTER_PLAN_BVELT_ECOSYSTEM_2026-12-10.md (latest alignment checkpoint commit b9f6a5a).
 
 Radar application-code baseline: 1b8972c. PR #79 is open and clean; TypeScript, sidecar and Cloudflare Workers Builds preview checks pass, while worker-bundle is skipped. It is not merged. Active production Worker version 304 at 100% traffic still contains the pre-PR-79 missing-diagnostics fallback; do not call the PR deployed.
 
