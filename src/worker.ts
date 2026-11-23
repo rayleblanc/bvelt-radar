@@ -3530,7 +3530,7 @@ export default {
         if (env.RADAR_DB) {
           try {
             await env.RADAR_DB.prepare(
-              "UPDATE radar_jobs SET status = 'completed', updated_at = ? WHERE id = ? AND status != 'completed_zero_prospects'"
+              "UPDATE radar_jobs SET status = 'completed', updated_at = ? WHERE id = ? AND status NOT IN ('completed_zero_prospects','completed_source_degraded')"
             ).bind(new Date().toISOString(), jobId).run();
           } catch (e) {}
         }
@@ -3836,6 +3836,7 @@ async function handleHealth(env: Env, headers: Record<string, string>, tenantId:
   let lastRunDate: string | null = null;
   let pendingJobs = 0;
   let completedJobs = 0;
+  let degradedJobs = 0;
   let failedJobs = 0;
   let staleJobs = 0;
   let lastError: string | null = null;
@@ -3909,11 +3910,12 @@ async function handleHealth(env: Env, headers: Record<string, string>, tenantId:
     if (jobStats.results) {
       for (const r of jobStats.results as any[]) {
         if (r.status === 'pending' || r.status === 'processing') pendingJobs += r.count;
-        if (r.status === 'completed' || r.status === 'completed_zero_prospects') completedJobs += r.count;
+        if (r.status === 'completed' || r.status === 'completed_zero_prospects' || r.status === 'completed_source_degraded') completedJobs += r.count;
+        if (r.status === 'completed_source_degraded') degradedJobs += r.count;
         if (r.status === 'failed') failedJobs += r.count;
       }
     }
-    const lastErrRow = await db.prepare("SELECT error FROM queue_jobs WHERE error IS NOT NULL AND status = 'failed' AND created_at >= datetime('now', '-7 days') ORDER BY created_at DESC LIMIT 1").first() as any;
+    const lastErrRow = await db.prepare("SELECT error FROM queue_jobs WHERE error IS NOT NULL AND status IN ('failed','completed_source_degraded') AND created_at >= datetime('now', '-7 days') ORDER BY created_at DESC LIMIT 1").first() as any;
     if (lastErrRow) lastError = lastErrRow.error;
     const staleRow = await db.prepare("SELECT COUNT(*) AS count FROM queue_jobs WHERE status IN ('pending','processing') AND created_at < datetime('now', '-24 hours')").first() as any;
     if (staleRow) staleJobs = Number(staleRow.count || 0);
@@ -4010,6 +4012,7 @@ async function handleHealth(env: Env, headers: Record<string, string>, tenantId:
       pending: pendingJobs,
       pending_or_processing: pendingJobs,
       completed_jobs: completedJobs,
+      degraded_jobs: degradedJobs,
       failed_jobs: failedJobs,
       stale_jobs: staleJobs,
       last_error: lastError
@@ -5225,7 +5228,7 @@ export async function recordQueueJobStatus(
       await db.prepare(`
         UPDATE queue_jobs
         SET status = ?, error = ?, completed_at = ?
-        WHERE job_id = ? AND status != 'completed_zero_prospects'
+        WHERE job_id = ? AND status NOT IN ('completed_zero_prospects','completed_source_degraded')
       `).bind(status, error || null, timestamp, job_id).run();
     }
   } catch (e) {
@@ -6297,6 +6300,15 @@ export function isDiscoveryInfrastructureFailure(reason: unknown): boolean {
     (value.includes("overpass") && value.includes("fail"));
 }
 
+export type DiscoveryCompletionStatus = "completed_zero_prospects" | "completed_source_degraded";
+
+/** Keep provider/infrastructure outages distinct from a verified empty market. */
+export function resolveDiscoveryCompletionStatus(reason: unknown): DiscoveryCompletionStatus {
+  return isDiscoveryInfrastructureFailure(reason)
+    ? "completed_source_degraded"
+    : "completed_zero_prospects";
+}
+
 async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void> {
   const payload: any = job.payload || {};
   const payloadError = validateDiscoveryPayload(payload);
@@ -6401,6 +6413,9 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
 
   if (scraped.length === 0) {
     console.warn(`[Job: discovery] 0 businesses found for ${city} - ${trade}:`, diagnostics.reason);
+    const reason = String(diagnostics?.reason || "").toLowerCase();
+    const isInfraFail = isDiscoveryInfrastructureFailure(reason);
+    const completionStatus = resolveDiscoveryCompletionStatus(reason);
     if (env.RADAR_DB) {
       try {
         const existingRun = await env.RADAR_DB.prepare("SELECT errors_json FROM runs WHERE id = ?").bind(job.run_id).first() as any;
@@ -6410,19 +6425,17 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
         }
         errorsArr.push(diagnostics);
         await env.RADAR_DB.prepare("UPDATE runs SET errors_json = ? WHERE id = ?").bind(JSON.stringify(errorsArr), job.run_id).run();
-        
-        await env.RADAR_DB.prepare("UPDATE radar_jobs SET status = 'completed_zero_prospects', last_error = ?, updated_at = ? WHERE id = ?")
-          .bind(diagnostics.reason, new Date().toISOString(), job.job_id).run();
 
-        await env.RADAR_DB.prepare("UPDATE queue_jobs SET status = 'completed_zero_prospects', error = ?, completed_at = ? WHERE job_id = ?")
-          .bind(diagnostics.reason, new Date().toISOString(), job.job_id).run();
+        await env.RADAR_DB.prepare("UPDATE radar_jobs SET status = ?, last_error = ?, updated_at = ? WHERE id = ?")
+          .bind(completionStatus, diagnostics.reason, new Date().toISOString(), job.job_id).run();
+
+        await env.RADAR_DB.prepare("UPDATE queue_jobs SET status = ?, error = ?, completed_at = ? WHERE job_id = ?")
+          .bind(completionStatus, diagnostics.reason, new Date().toISOString(), job.job_id).run();
       } catch (e) {}
     }
 
     // Do NOT burn geo_coverage on infrastructure failures (timeout/4xx/abort).
     // Only mark when sources honestly returned zero matches.
-    const reason = String(diagnostics?.reason || "").toLowerCase();
-    const isInfraFail = isDiscoveryInfrastructureFailure(reason);
     const isHonestEmpty =
       reason.includes("0 matches") ||
       reason.includes("0 businesses") ||
