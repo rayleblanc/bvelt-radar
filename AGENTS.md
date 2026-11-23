@@ -278,3 +278,12 @@ Not yet validated or deployed:
 - A read-only reconciliation of original Resend bounce payloads against D1 confirmed **4 transient bounces are incorrectly marked as permanent `resend_bounced` suppressions**. Sixteen other matched events were explicitly permanent. Of 49 unique historical suppression keys, 29 remain unverified against the current webhook history.
 - All 49 keys match a prospect; 48 match a dispatch log. Do not bulk-unsuppress. Keep the 29 unknown keys suppressed. Any correction must be a per-key, evidence-backed change to HOLD/DELIVERY_DELAYED, not automatic send eligibility, and must preserve consent/jurisdiction/cooldown gates.
 - No D1 or contact state was changed during the audit. Full counts and evidence are in the canonical Bvelt plan section **Resend suppression dry-run — original payload reconciliation (23-11-2026)**.
+
+
+### Four transient bounce rows corrected — 23-11-2026
+- PR #66 merged as `f2d9b6b920a671bc622701019ed8b31792478ed7`; CI run `45155676578` passed TypeScript/Vite build, Radar tests and Sidecar tests. Reconciliation preserves `delivery_delayed` evidence; ambiguous GET `last_event=bounced` remains `delivery_uncertain`.
+- Four original Resend payloads with `bounce.type=Transient` were reconciled in D1. Their prospect state is now HOLD / DELIVERY_DELAYED, dispatch logs are `delayed`, and suppression reason is `resend_transient_hold`. Suppression remains active; no contact was re-enabled or emailed.
+- To protect against the still-deployed old Worker, raw `dispatch_status` remains `bounced` until the new Worker is deployed; this excludes these four rows from the old reconciliation loop. After deployment, set it to `delivery_delayed` and verify reconciliation.
+- Remaining suppression counts: 45 `resend_bounced` (16 direct permanent evidence, 29 unverified) + 4 `resend_transient_hold`.
+- NEVER call `/fix-suppression` with `retry_resend_bounces=true`: it bulk-deletes all remaining exact `resend_bounced` suppression rows and reactivates prospects, including permanent and unverified rows. Use targeted, evidence-backed corrections only.
+- No outbound email, bulk unsuppression or production deployment occurred. Full handoff evidence is in the canonical Bvelt plan.
