@@ -251,3 +251,17 @@ Not yet validated or deployed:
 - Commits: `b0252ff8828dbf5acd3208c70020bb9493ea9cbb` (helper), `56fe743d00750a5151229c31f1779397836cad3c` (PWA action).
 - No changes to prospect phone data, score, send authorization, WhatsApp consent, automation, or outbound dispatch. This opens a manual chat only; it does not send.
 - Validation: source edits confirmed on main. GitHub Actions run for these two commits has not yet appeared in Actions history; Android/iOS device smoke tests and production Cloudflare deployment are still outstanding. Do not claim the live PWA has changed until deployed.
+
+
+## P7 implementation merged — 23-11-2026
+- PR #64 `fix(p7): harden Resend webhook lifecycle and bounce reconciliation` merged to `main` as `1c72c0fbbd7373753cbe7735640e2c721a02f0b5`.
+- CI run `45153883299` passed TypeScript/Vite build, `npm run test:radar`, and Sidecar tests. `worker-bundle` was skipped by workflow conditions.
+- Added `src/resendWebhookSecurity.ts` with Svix v1 raw-body HMAC verification and 300-second timestamp tolerance. Configure secret `RESEND_WEBHOOK_SIGNING_SECRET` in Cloudflare before production deployment. If present, signed verification is mandatory; until then, existing query-token auth remains as compatibility fallback. Do not claim production Svix verification until secret and deployment are confirmed.
+- Resend provider `svix-id` is used as the existing `prospect_events.id` idempotency key. Duplicate events are ignored; persistence failure skips side effects. No migration required.
+- Unknown Resend event types are ignored; provider complaints are separate from negative sales replies; transient/unknown bounce subtype is held as `delivery_delayed`, does not increment hard-bounce budget and is not permanently suppressed.
+- Reconciliation of GET `last_event=bounced` now produces `delivery_uncertain` / HOLD, because that status alone does not prove bounce subtype.
+- Live D1 read-back: 49 suppression rows with reason `resend_bounced` (older checkpoint had 48); 163 email dispatch log rows / 133 distinct message IDs. No historical row was changed. Audit all 49 against original Resend event payloads using a dry-run report before any suppression correction; never bulk-unsuppress.
+- Current webhook subscriptions remain `email.received`, `email.delivered`, `email.complained`, `email.bounced`. Add failed/delayed/suppressed event types only during a controlled Resend configuration update.
+- Last-seven-day Worker logs: 0 error-level Radar events, 24 warnings, mostly Abstract API 401/429 and isolated external-source/provider degradation. Do not confuse these with failed queue jobs or zero market coverage.
+- No Cloudflare secret, webhook setting, D1 row, suppression record, outbound email or production deployment was changed. Production deployment SHA remains unverified against current main.
+- Canonical full evidence and next actions are in the Bvelt plan section **Live audit and P7 correction — 23-11-2026**. This AGENTS file remains implementation rules, not a separate roadmap.
