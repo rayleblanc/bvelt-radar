@@ -3915,7 +3915,7 @@ async function handleHealth(env: Env, headers: Record<string, string>, tenantId:
         if (r.status === 'failed') failedJobs += r.count;
       }
     }
-    const legacyDegraded = await db.prepare(`SELECT COUNT(*) AS count FROM queue_jobs WHERE status = 'completed_zero_prospects' AND created_at >= datetime('now', '-24 hours') AND ${DISCOVERY_INFRA_ERROR_SQL}`).first() as any;
+    const legacyDegraded = await db.prepare(`SELECT COUNT(*) AS count FROM queue_jobs WHERE job_type = 'discovery' AND status = 'completed_zero_prospects' AND created_at >= datetime('now', '-24 hours') AND ${DISCOVERY_INFRA_ERROR_SQL}`).first() as any;
     if (legacyDegraded) degradedJobs += Number(legacyDegraded.count || 0);
     const lastErrRow = await db.prepare(`SELECT error FROM queue_jobs WHERE error IS NOT NULL AND created_at >= datetime('now', '-7 days') AND (status IN ('failed','completed_source_degraded') OR (status = 'completed_zero_prospects' AND ${DISCOVERY_INFRA_ERROR_SQL})) ORDER BY created_at DESC LIMIT 1`).first() as any;
     if (lastErrRow) lastError = lastErrRow.error;
