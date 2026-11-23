@@ -265,3 +265,10 @@ Not yet validated or deployed:
 - Last-seven-day Worker logs: 0 error-level Radar events, 24 warnings, mostly Abstract API 401/429 and isolated external-source/provider degradation. Do not confuse these with failed queue jobs or zero market coverage.
 - No Cloudflare secret, webhook setting, D1 row, suppression record, outbound email or production deployment was changed. Production deployment SHA remains unverified against current main.
 - Canonical full evidence and next actions are in the Bvelt plan section **Live audit and P7 correction — 23-11-2026**. This AGENTS file remains implementation rules, not a separate roadmap.
+
+
+### P7 retry-on-persistence-failure follow-up — 23-11-2026
+- PR #65 merged to main as `753a8cf20dd73aa6fe987a11f25d1eb05ce24553`; CI run `45154963151` passed TypeScript/Vite build, Radar tests and Sidecar tests.
+- When the provider event idempotency receipt cannot be persisted to D1, webhook returns HTTP 503 so Resend retries. No side effects are applied before receipt persistence.
+- Both PR #64 and PR #65 are merged; no open PR remains. Production is still not deployed and the dedicated Svix secret remains unconfigured.
+- See the canonical plan's 23-11-2026 live audit checkpoint for exact evidence and remaining production gates.
