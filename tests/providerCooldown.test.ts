@@ -8,7 +8,7 @@ import {
   providerCooldownKey,
   type ProviderCooldownDatabase
 } from "../src/providerCooldown";
-import { generateAICopy, WORKERS_AI_FALLBACK_MODEL } from "../src/worker";
+import { generateAICopy, verifyEmail, WORKERS_AI_FALLBACK_MODEL } from "../src/worker";
 
 type StoredRow = { value: string; expires_at: number };
 
@@ -216,6 +216,32 @@ describe("provider/model cooldown policy", () => {
     assert.equal(second.source, "template");
     assert.equal(workersAiCalls, 1, "Workers AI is called once and skipped while its cooldown is active");
     assert.equal(JSON.parse(stored!.value).failureClass, "rate_limited");
+  });
+
+  it("applies a shared cooldown to Abstract email verification after provider auth failures", async () => {
+    const rows = new Map<string, StoredRow>();
+    const db = createDb(rows);
+    const originalFetch = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      return new Response("provider unavailable", { status: 401 });
+    }) as typeof fetch;
+
+    const env: any = { RADAR_DB: db, ABSTRACT_API_KEY: "unit-test-invalid-key" };
+    try {
+      const first = await verifyEmail("prospect@example.com", env);
+      const second = await verifyEmail("another@example.com", env);
+      assert.equal(first.deliverability, "UNVERIFIED");
+      assert.equal(second.deliverability, "UNVERIFIED");
+      assert.equal(calls, 1, "shared provider cooldown prevents a second request for another prospect");
+      const stored = rows.get(providerCooldownKey("abstract_email", "emailvalidation"));
+      assert.ok(stored, "provider failure is persisted in shared D1 cache");
+      assert.equal(JSON.parse(stored.value).failureClass, "auth_error");
+      assert.equal(JSON.parse(stored.value).status, 401);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
 });
