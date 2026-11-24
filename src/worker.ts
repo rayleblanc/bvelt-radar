@@ -7629,15 +7629,9 @@ async function handleApproveJob(job: RadarJobMessage, env: Env): Promise<void> {
 
   if (['approved', 'drafted', 'queued', 'notified', 'sent', 'delivered', 'opened', 'clicked', 'bounced', 'unsubscribed', 'complained', 'replied'].includes(String(prospect.status || '').toLowerCase())) return;
 
-  const approvalTimestamp = new Date().toISOString();
-  await env.RADAR_DB.prepare(`
-    UPDATE prospects SET status = 'approved', updated_at = ? WHERE id = ?
-  `).bind(approvalTimestamp, prospect_id).run();
-  try {
-    const approvedChannel = sanitizeEmail(String(prospect.email || "")).valid ? "email" : "whatsapp";
-    await env.RADAR_DB.prepare("INSERT INTO prospect_events (id, prospect_id, event_type, content, created_at) VALUES (?, ?, ?, ?, ?)")
-      .bind("msg_" + crypto.randomUUID(), prospect_id, "message_send_authorized", JSON.stringify({ channel: approvedChannel, authorization: "telegram_human_approval", mode: "founder", tenant_id: "founder" }), approvalTimestamp).run();
-  } catch (eventError: any) { console.warn("[ApproveJob] send authorization event log failed:", eventError?.message || eventError); }
+  // This is an automated eligibility/queue step, not a Telegram callback.
+  // Human send authorization is recorded only by handleDecision after
+  // ownerManualApprovalAsserted has been verified.
 
   await enqueueJob(env, {
     run_id: job.run_id,
