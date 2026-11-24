@@ -253,7 +253,7 @@ export async function readScopedLearningStats(
     const rows = await db
       .prepare(
         `
-    WITH scoped_events AS (
+    WITH scoped_events AS MATERIALIZED (
       SELECT prospect_id, event_type, city, trade, variant_id, angle
       FROM learning_events
       WHERE mode = ? AND tenant_id = ?
