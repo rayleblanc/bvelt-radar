@@ -367,3 +367,13 @@ No Radar code merge, D1 mutation, secret change or production deployment was per
 - Resend Svix signing secret is still absent from Worker; legacy query-token auth remains. Do not claim Svix active.
 - Bvelt CI guard remains until 2026-12-01; P8/P9/P0 remain open. Exact BEM NULL-default migration finding and next steps are in the canonical plan.
 - No open PRs. No outbound emails, auto-outreach, or unblocking occurred.
+
+
+### Live handoff — 24-11-2026 14:38 UTC
+- Canonical plan: LocalFlowPro `docs/MASTER_PLAN_BVELT_ECOSYSTEM_2026-12-10.md`, section **Continuation checkpoint — 24-11-2026 14:38 UTC**.
+- Radar main `bf1c9691b961e6ed7b039dadd692e30815418caf`; PR #82 merged. Automated `handleApproveJob` no longer records a false `message_send_authorized/telegram_human_approval` event or marks the prospect `approved`. Real send authorization remains behind `handleDecision` and `ownerManualApprovalAsserted`. Historical records remain untouched.
+- CI run `45415110532`: TypeScript/Vite build passed, npm audit 0, Radar 50/50, Sidecar 21/21. Cloudflare Worker version 312 is active at 100%; source read-back confirms the fix, but Cloudflare metadata lacks a Git SHA annotation.
+- `RESEND_WEBHOOK_SIGNING_SECRET` is configured; Resend endpoint no longer contains a query token. Await a natural signed webhook event before calling live signature delivery fully verified.
+- D1 suppression ledger 44 `resend_bounced` + 5 `resend_transient_hold`; provider API has 39, leaving 10 internal-only blocked records (5/5) for recipient-level evidence reconciliation. Never bulk unsuppress.
+- `FOUNDER_AUTO_OUTREACH=false`. Do not send email during validation. Three historical queued prospects have no dispatch record or provider ID; historical synthetic authorization events are not proof of human approval.
+- No production D1 changes. No remittance systems queried. No open PRs.
