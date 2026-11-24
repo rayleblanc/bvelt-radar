@@ -1,7 +1,7 @@
 declare const process: any;
 import { resolveGithubActionsToken } from './research/githubActions';
 
-import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey, notifyOnce, isVerifiedDeliverableEmail, evaluateFounderOutreachEligibility, buildTechnicalAuditSnapshot, isEmailValidatedForOutreach, isCompletePostalAddress, sendTelegramWithRetry, extractEmailAddress, evaluateResearchEvidenceQuality, classifyReplyText, getTelegramApprovalFeedback, getManualSendPreflightError, hasAIGenerationProvider, WORKERS_AI_FALLBACK_MODEL, extractWorkersAiText, resolveProspectContactability, buildProspectEvidenceContext, buildScheduledRunId, getCurrentDaySenderCount, normalizeWhatsAppPhone, extractPhoneDigits, hasUsableContactChannel, hasEnrichableContactData, buildWhatsAppClickToChatUrl, buildWhatsAppOutreachBody, shouldUseManualWhatsAppFallback, isDiscoveryInfrastructureFailure, hasConfirmedWhatsAppOptIn, isValidWhatsAppConsentEvidenceRef, isOutreachPauseBlocking, isFounderManualDispatch, normalizeGeneratedMessage, selectHunterDomainEmail, recordRunFinalization, resolveGeoapifyProfile, ensureLegalFooter } from './worker';
+import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey, notifyOnce, isVerifiedDeliverableEmail, evaluateFounderOutreachEligibility, buildTechnicalAuditSnapshot, isEmailValidatedForOutreach, isCompletePostalAddress, sendTelegramWithRetry, extractEmailAddress, evaluateResearchEvidenceQuality, classifyReplyText, getTelegramApprovalFeedback, getManualSendPreflightError, hasAIGenerationProvider, WORKERS_AI_FALLBACK_MODEL, extractWorkersAiText, resolveProspectContactability, buildProspectEvidenceContext, buildScheduledRunId, getCurrentDaySenderCount, normalizeWhatsAppPhone, extractPhoneDigits, hasUsableContactChannel, hasEnrichableContactData, buildWhatsAppClickToChatUrl, buildWhatsAppOutreachBody, shouldUseManualWhatsAppFallback, isDiscoveryInfrastructureFailure, resolveDiscoveryCompletionStatus, hasConfirmedWhatsAppOptIn, isValidWhatsAppConsentEvidenceRef, isOutreachPauseBlocking, isFounderManualDispatch, normalizeGeneratedMessage, selectHunterDomainEmail, recordRunFinalization, resolveGeoapifyProfile, ensureLegalFooter } from './worker';
 import { DEFAULT_FOUNDER_MISSION, MissionConfig } from './worker';
 import { buildResendIdempotencyKey, buildBrandedEmailHtml, resolveBveltSender, inspectOutboundEmailAuth, normalizeOutreachBody, buildListUnsubscribeHeader, dispatchEmail } from './emailDispatcher';
 import { fetchPermitContractors } from './permitSources';
@@ -1047,7 +1047,11 @@ tests.push({
     assert(mockDiagnostics.bizdata_status === "skipped_unsupported_category", "BizData status recorded");
     assert(mockDiagnostics.overpass_status.includes("failed"), "Overpass status recorded");
 
-    // Test that database updates store diagnostics and do not mark silent success
+    // An Overpass timeout is degraded evidence, not an empty market.
+    const completionStatus = resolveDiscoveryCompletionStatus(mockDiagnostics.reason);
+    assert(completionStatus === "completed_source_degraded", "Provider failures must not be recorded as an empty market");
+
+    // Test that database updates preserve the degraded outcome.
     const dbUpdates: Record<string, any> = {};
     const mockDb = {
       prepare: (sql: string) => ({
@@ -1058,12 +1062,12 @@ tests.push({
               dbUpdates.runs_errors_json = args[0];
             }
             if (sql.includes("UPDATE radar_jobs SET status")) {
-              dbUpdates.radar_jobs_status = "completed_zero_prospects";
-              dbUpdates.radar_jobs_last_error = args[0];
+              dbUpdates.radar_jobs_status = args[0];
+              dbUpdates.radar_jobs_last_error = args[1];
             }
             if (sql.includes("UPDATE queue_jobs SET status")) {
-              dbUpdates.queue_jobs_status = "completed_zero_prospects";
-              dbUpdates.queue_jobs_error = args[0];
+              dbUpdates.queue_jobs_status = args[0];
+              dbUpdates.queue_jobs_error = args[1];
             }
             return Promise.resolve({ success: true });
           }
@@ -1075,15 +1079,15 @@ tests.push({
     const existingErrors = JSON.parse("[]");
     existingErrors.push(mockDiagnostics);
     await mockDb.prepare("UPDATE runs SET errors_json = ? WHERE id = ?").bind(JSON.stringify(existingErrors), "run-123").run();
-    await mockDb.prepare("UPDATE radar_jobs SET status = 'completed_zero_prospects', last_error = ?, updated_at = ? WHERE id = ?")
-      .bind(mockDiagnostics.reason, new Date().toISOString(), "job-123").run();
-    await mockDb.prepare("UPDATE queue_jobs SET status = 'completed_zero_prospects', error = ?, completed_at = ? WHERE job_id = ?")
-      .bind(mockDiagnostics.reason, new Date().toISOString(), "job-123").run();
+    await mockDb.prepare("UPDATE radar_jobs SET status = ?, last_error = ?, updated_at = ? WHERE id = ?")
+      .bind(completionStatus, mockDiagnostics.reason, new Date().toISOString(), "job-123").run();
+    await mockDb.prepare("UPDATE queue_jobs SET status = ?, error = ?, completed_at = ? WHERE job_id = ?")
+      .bind(completionStatus, mockDiagnostics.reason, new Date().toISOString(), "job-123").run();
 
     assert(dbUpdates.runs_errors_json.includes("Zero businesses discovered"), "Runs errors_json must capture diagnostics reason");
-    assert(dbUpdates.radar_jobs_status === "completed_zero_prospects", "Radar jobs must have completed_zero_prospects");
+    assert(dbUpdates.radar_jobs_status === "completed_source_degraded", "Radar jobs must preserve completed_source_degraded");
     assert(dbUpdates.radar_jobs_last_error === mockDiagnostics.reason, "Radar jobs must record reason");
-    assert(dbUpdates.queue_jobs_status === "completed_zero_prospects", "Queue jobs must have completed_zero_prospects");
+    assert(dbUpdates.queue_jobs_status === "completed_source_degraded", "Queue jobs must preserve completed_source_degraded");
   }
 });
 

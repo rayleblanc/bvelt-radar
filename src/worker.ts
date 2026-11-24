@@ -6291,7 +6291,9 @@ export async function reconcileResendDeliveries(env: Env): Promise<{ checked: nu
  * 1. DISCOVERY JOB: Scrapes directory businesses for 1 city + trade, enqueues enrich jobs
  */
 export function isDiscoveryInfrastructureFailure(reason: unknown): boolean {
-  const value = String(reason || "").toLowerCase();
+  const value = String(reason ?? "").trim().toLowerCase();
+  // Missing diagnostics are not evidence of an empty market: fail closed.
+  if (!value) return true;
   return value.includes("timeout") ||
     value.includes("aborted") ||
     value.includes("http 4") ||
@@ -6463,7 +6465,7 @@ async function handleDiscoveryJob(job: RadarJobMessage, env: Env): Promise<void>
       reason.includes("0 elements") ||
       reason.includes("empty") ||
       reason.includes("no results");
-    if (!isInfraFail && (isHonestEmpty || !reason)) {
+    if (!isInfraFail && isHonestEmpty) {
       const place = findPlace(city);
       if (place) {
         await markSearched(env.RADAR_DB, job.tenant_id || "founder", place, trade, {
