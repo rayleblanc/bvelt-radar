@@ -1,4 +1,5 @@
 import test from "node:test";
+import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
 import { normalizeResendDeliveryEvent, resolveAmbiguousResendBounce, shouldBlockBulkResendBounceRetry, verifySvixWebhookSignature } from "../src/resendWebhookSecurity";
 
@@ -70,4 +71,27 @@ test("bulk Resend bounce retry requests are blocked until each recipient has eve
   assert.equal(shouldBlockBulkResendBounceRetry(" TRUE "), true);
   assert.equal(shouldBlockBulkResendBounceRetry(false), false);
   assert.equal(shouldBlockBulkResendBounceRetry(undefined), false);
+});
+
+
+test("automated approve queue never records human send authorization", () => {
+  const workerSource = readFileSync(new URL("../src/worker.ts", import.meta.url), "utf8");
+  const start = workerSource.indexOf("async function handleApproveJob");
+  const end = workerSource.indexOf("async function handleOutreachJob", start);
+  assert.ok(start >= 0 && end > start, "approve and outreach handlers must remain discoverable");
+  const handler = workerSource.slice(start, end);
+  assert.doesNotMatch(handler, /UPDATE prospects SET status = 'approved'/);
+  assert.doesNotMatch(handler, /message_send_authorized|telegram_human_approval/);
+  assert.match(handler, /await enqueueJob\(env/);
+});
+
+test("send authorization remains behind explicit owner confirmation", () => {
+  const workerSource = readFileSync(new URL("../src/worker.ts", import.meta.url), "utf8");
+  const start = workerSource.indexOf("async function handleDecision");
+  assert.ok(start >= 0, "manual decision handler must exist");
+  const handler = workerSource.slice(start, start + 24000);
+  const ownerGuard = handler.indexOf("if (!ownerManualApprovalAsserted)");
+  const authorization = handler.indexOf('authorization: "explicit_user_action"');
+  assert.ok(ownerGuard >= 0, "manual send must require owner confirmation");
+  assert.ok(authorization > ownerGuard, "authorization event must follow the owner confirmation guard");
 });
