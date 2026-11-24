@@ -13,7 +13,7 @@
 
 import { buildRadarEvidenceProvenance } from './evidenceProvenance.js';
 import { validateDiscoveryPayload } from './discoveryPayload.js';
-import { normalizeResendDeliveryEvent, resolveAmbiguousResendBounce, verifySvixWebhookSignature } from './resendWebhookSecurity.js';
+import { normalizeResendDeliveryEvent, resolveAmbiguousResendBounce, shouldBlockBulkResendBounceRetry, verifySvixWebhookSignature } from './resendWebhookSecurity.js';
 import { TENANT_TARGET_MAP, resolveTenantBuyerSegmentsForProfile } from "./tenantBuyerSegments.js";
 import { validateTenantProfileContract } from './tenantProfileContract.js';
 import { getAlerts, tradeForEvent, eventAppliesToTrade, WeatherAlert } from './weatherSignals';
