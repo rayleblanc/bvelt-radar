@@ -68,3 +68,9 @@ export function resolveAmbiguousResendBounce(hasTransientEvidence: boolean): {
     ? { logStatus: "delayed", dispatchStatus: "delivery_delayed", outcome: "delivery_delayed" }
     : { logStatus: "delivery_uncertain", dispatchStatus: "delivery_uncertain", outcome: "delivery_uncertain" };
 }
+
+
+/** Bulk bounce reactivation is unsafe without per-recipient provider evidence. */
+export function shouldBlockBulkResendBounceRetry(requested: unknown): boolean {
+  return String(requested || "").trim().toLowerCase() === "true";
+}

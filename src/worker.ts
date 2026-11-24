@@ -13,7 +13,7 @@
 
 import { buildRadarEvidenceProvenance } from './evidenceProvenance.js';
 import { validateDiscoveryPayload } from './discoveryPayload.js';
-import { normalizeResendDeliveryEvent, resolveAmbiguousResendBounce, verifySvixWebhookSignature } from './resendWebhookSecurity.js';
+import { normalizeResendDeliveryEvent, resolveAmbiguousResendBounce, shouldBlockBulkResendBounceRetry, verifySvixWebhookSignature } from './resendWebhookSecurity.js';
 import { TENANT_TARGET_MAP, resolveTenantBuyerSegmentsForProfile } from "./tenantBuyerSegments.js";
 import { validateTenantProfileContract } from './tenantProfileContract.js';
 import { getAlerts, tradeForEvent, eventAppliesToTrade, WeatherAlert } from './weatherSignals';
@@ -1237,36 +1237,23 @@ export default {
         }
 
         
-        // (a1b) Selective retry of suppressions caused by sender-side Resend bounces
-        // (e.g. unverified onboarding@resend.dev domain). NOT part of the default self-heal:
-        // only runs when explicitly requested via POST /fix-suppression {"retry_resend_bounces": true}
-        // or ?retry_resend_bounces=true. Call it ONLY after the sender domain is verified in Resend.
+        // (a1b) Bulk retry of Resend bounce suppressions is intentionally disabled.
+        // A provider bounce may be permanent, transient, or historically unclassified.
+        // Clearing every resend_bounced row can re-enable invalid recipients; sender-domain
+        // verification alone is not evidence that a recipient address is deliverable.
         let retriedResendBounces = 0;
         let reactivatedBouncedProspects = 0;
+        let bounceRetryBlocked = false;
         try {
           let reqBody: any = {};
           try { reqBody = await request.json(); } catch { reqBody = {}; }
           const retryFlag = String(reqBody?.retry_resend_bounces || url.searchParams.get("retry_resend_bounces") || "").trim().toLowerCase() === "true";
-          if (retryFlag) {
-            const bounceRows = await env.RADAR_DB.prepare(
-              "SELECT key FROM suppression WHERE lower(COALESCE(reason,'')) = 'resend_bounced'"
-            ).all();
-            const bouncedEmails: string[] = [];
-            for (const item of ((bounceRows.results || []) as any[])) {
-              await env.RADAR_DB.prepare("DELETE FROM suppression WHERE key = ?").bind(item.key).run();
-              retriedResendBounces++;
-              bouncedEmails.push(String(item.key).trim().toLowerCase());
-            }
-            if (bouncedEmails.length > 0) {
-              const placeholders = bouncedEmails.map(() => '?').join(',');
-              const react = await env.RADAR_DB.prepare(
-                `UPDATE prospects SET status = 'qualified', cooldown_until = NULL, updated_at = ? WHERE lower(COALESCE(email,'')) IN (${placeholders}) AND status IN ('suppressed','bounced')`
-              ).bind(new Date().toISOString(), ...bouncedEmails).run();
-              reactivatedBouncedProspects = react?.meta?.changes || 0;
-            }
+          bounceRetryBlocked = shouldBlockBulkResendBounceRetry(retryFlag);
+          if (bounceRetryBlocked) {
+            console.warn("[fix-suppression] Bulk Resend bounce retry blocked; each recipient requires event-level evidence review.");
           }
         } catch (e: any) {
-          console.warn("[fix-suppression] resend_bounced retry error:", e);
+          console.warn("[fix-suppression] resend_bounced retry guard error:", e);
         }
 
         // (a2) Purge soft "Contacted on" suppressions older than 25 days (fixes cooldown-until-2027 leftovers)
@@ -1313,6 +1300,7 @@ export default {
           reactivated_prospects: reactivatedProspects,
           retried_resend_bounces: retriedResendBounces,
           reactivated_bounced_prospects: reactivatedBouncedProspects,
+          bounce_retry_blocked: bounceRetryBlocked,
           timestamp: new Date().toISOString()
         }, { headers: corsHeaders });
       }

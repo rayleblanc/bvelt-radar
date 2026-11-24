@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { normalizeResendDeliveryEvent, resolveAmbiguousResendBounce, verifySvixWebhookSignature } from "../src/resendWebhookSecurity";
+import { normalizeResendDeliveryEvent, resolveAmbiguousResendBounce, shouldBlockBulkResendBounceRetry, verifySvixWebhookSignature } from "../src/resendWebhookSecurity";
 
 function toBase64(bytes: Uint8Array): string {
   let binary = "";
@@ -62,4 +62,12 @@ test("ambiguous provider bounce preserves explicit transient event evidence", ()
     dispatchStatus: "delivery_uncertain",
     outcome: "delivery_uncertain"
   });
+});
+
+test("bulk Resend bounce retry requests are blocked until each recipient has event-level evidence", () => {
+  assert.equal(shouldBlockBulkResendBounceRetry(true), true);
+  assert.equal(shouldBlockBulkResendBounceRetry("true"), true);
+  assert.equal(shouldBlockBulkResendBounceRetry(" TRUE "), true);
+  assert.equal(shouldBlockBulkResendBounceRetry(false), false);
+  assert.equal(shouldBlockBulkResendBounceRetry(undefined), false);
 });
