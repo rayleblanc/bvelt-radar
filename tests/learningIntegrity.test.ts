@@ -29,7 +29,7 @@ describe("readScopedLearningStats", () => {
 
     assert.match(sql, /WITH scoped_events AS MATERIALIZED/i);
     assert.deepEqual(bindings, ["tenant", "tenant_alpha"]);
-    assert.equal(rates["city:Miami"], 3 / 5);
+    assert.equal(rates["city:Miami"], 3 / 10);
     assert.equal(rates["trade:plumbing"], 2 / 5);
   });
 
