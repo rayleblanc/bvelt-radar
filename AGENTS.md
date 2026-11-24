@@ -346,3 +346,14 @@ Radar application-code baseline: 1b8972c. PR #79 is open and unmerged; the lates
 Current D1 read-back: Radar used 1,950,942 rows read / 6,589 rows written on 2026-11-22 and 525,544 / 1,793 on the partial 2026-11-23 day. Tenant observation events remain zero; Radar-to-BEM sync state observed Founder scope only. Full data counts, D1 analytics, and the next technical block are in the canonical Bvelt master plan.
 
 No Radar code merge, D1 mutation, secret change or production deployment was performed in this documentation alignment run.
+
+
+### Live handoff — 24-11-2026 14:00 UTC
+- Canonical handoff: LocalFlowPro `docs/MASTER_PLAN_BVELT_ECOSYSTEM_2026-12-10.md`, section **Continuation checkpoint — 24-11-2026 14:00 UTC**.
+- Radar main SHA `3c308ef3758d5e052f77034d4d0e4f6946de6ca7`, PR #80 merged. CI run `45408251307` passed TypeScript build, full Radar tests, npm audit and Sidecar tests; Cloudflare preview and main build succeeded.
+- Production deployment `5bced316-9f65-4474-aab7-99e6f8ef104d`: version `1ac1f7b0-cb3c-4401-8dd2-f3481dc57ea8` / Worker 307 at 100% traffic.
+- Scoped learning query now materializes exact mode/tenant events once; monitor D1 rows_read and duration.
+- Last 30m: 0 errors/0 warnings for Bvelt and Radar. Last 24h: Bvelt 0/0; Radar 0 errors and 4 provider warnings (2 Abstract 401, 2 BizData 502) before the current deployment. Current queue has no backlog; one historical 9-Nov malformed Naples failure remains.
+- No production D1 mutations, migrations, secret changes, Resend suppressions, outbound email or auto-outreach changes.
+- Bvelt CI gate remains until 2026-12-01; P8/P9/P0 stay open. Exact remaining gates and BEM NULL-default schema drift are in the canonical plan.
+- No open PRs. Use Cloudflare telemetry + D1 + GitHub CI + Resend for operational evidence; Datadog has no usable project data.
