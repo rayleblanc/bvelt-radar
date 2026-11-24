@@ -387,3 +387,10 @@ No Radar code merge, D1 mutation, secret change or production deployment was per
 - Cloudflare telemetry scoped to `bvelt-radar`: ten CPU-exceeded error records clustered 2026-11-24 15:03:53–15:03:56Z, returning 503 on `GET /prospects`, `GET /api/prospects`, and `POST /api/prospects/attack-kit`; observed CPU 9–27ms. Last two-hour aggregate is zero. List handler defaults to 100 `SELECT *` rows and maps contactability; attack-kit performs auth/lookup/build and POST adds priority-target + AI-copy work. Root cause is not yet proven; profile and add bounded pagination/performance tests after the current release hold.
 - Datadog has no valid project indexes. Cloudflare telemetry, D1, GitHub CI and Resend are the current evidence sources. No remittance service or repository belongs in Radar diagnostics.
 - Do not bypass the canonical hold, mutate D1, unsuppress recipients, replay webhooks or enable auto-outreach. No application code, schema, settings or production data changed in this read-only audit. Canonical plan details are in LocalFlowPro `docs/MASTER_PLAN_BVELT_ECOSYSTEM_2026-12-10.md`.
+
+
+## CPU incident root cause confirmed — 24-11-2026 18:00 UTC
+- `src/App.tsx` requests `limit=1000` for the prospects inbox and retries the alias `/api/prospects` on any non-OK response. `src/worker.ts` accepts the unbounded parsed limit, runs `SELECT *`, then maps all rows through contactability/suppression checks. This confirms the paired list-route CPU failures and retry amplification.
+- After the hold: clamp limits server-side, add cursor pagination, project only required columns, and do not retry aliases on 5xx. Test large/invalid limits, cursor correctness, tenant isolation, counts and CPU budget.
+- The `POST /api/prospects/attack-kit` CPU failure is separate; it performs priority-target resolution, AI copy generation and kit building. Profile separately; preserve the Gemini/Groq cascade and model IDs.
+- No code was changed; do not bypass the canonical release hold.
