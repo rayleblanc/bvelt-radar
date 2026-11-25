@@ -507,3 +507,10 @@ Canonical source: LocalFlowPro `docs/MASTER_PLAN_BVELT_ECOSYSTEM_2026-12-10.md`,
 - Post-deploy settings read-back confirms `FOUNDER_AUTO_OUTREACH=false`, Founder caps unchanged, Gemini paid tier false, Gemini model list unchanged, `GITHUB_ACTIONS_TOKEN` empty. No secret values read or changed.
 - Bvelt D1 read-only: 789 market observations, 321 daily aggregates, 22 Founder ingest batches; 0 Tenant observations/events, 0 Radar learning outbox. Founder market ingest is active; Tenant identity/observation bridge remains unresolved.
 - No production D1 writes, migrations, suppression changes, secret changes, webhook replay or outbound email.
+
+
+### 25-11-2026 — Tenant ingest acknowledgement guard merged
+- PR #86 merged to main as `118b167b540f3fff7ea9b81bc06729e8152c4380`; Radar CI #898 passed (npm audit, TypeScript build, full Radar test suite, Sidecar tests).
+- Tenant sender now treats HTTP 2xx as transport success only. It requires JSON `{ok:true}` before reporting sync success or appending local `tenant_observation_events`; HTTP 200 with `ok:false` and malformed JSON fail closed with no history write.
+- No production D1 mutation, Tenant identity remap/bootstrap, Bvelt evidence creation, outbound email, suppression change or provider/model configuration change.
+- Deployment not yet verified. After exact main build/deployment read-back, this guard only prevents false-positive receipts; it does not solve the unresolved `tenant_custom_01` owner/profile mapping. Keep that scope UNKNOWN and unlinked.
