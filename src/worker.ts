@@ -11067,7 +11067,7 @@ export function buildOutreachIdempotencyKey(tenantId: string, prospectId: string
   return `idempotency:${tenantId}:${prospectId}:${sequenceId}:touch:${touch}`;
 }
 
-export export function resolveAICopyLanguage(
+export function resolveAICopyLanguage(
   missionLanguages?: string[] | null,
   tenantLanguagesJson?: string | null,
   founderLanguages?: string | null
@@ -11089,7 +11089,7 @@ export export function resolveAICopyLanguage(
   return founderLanguage || "en";
 }
 
-async function generateAICopy(
+export async function generateAICopy(
   prospect: any, 
   variantId: string, 
   env: Env,
