@@ -440,3 +440,10 @@ Canonical source: LocalFlowPro `docs/MASTER_PLAN_BVELT_ECOSYSTEM_2026-12-10.md`,
 - Sender call after queue qualification/outcome is present but skipped for the legacy ID. The refresh route's immediate post-enqueue call is too early to prove post-job sync. Tenant `source_evidence` callback path remains a separate trace item.
 - Preserve both scopes as UNKNOWN/unlinked. Resolve identity through versioned canonical profile bootstrap and read-back; then use idempotent mapping and verify accepted receipt + `radar_tenant_observation_events` / Bvelt receipt. Never bulk rewrite IDs or fabricate observations.
 - Radar CPU fixes are merged to main: PR #83 `5be3c20a3e62fd48906c2a0b0b47d410ac4e6030` (CI #893 passed) and PR #84 `b8362a6a60b0b303dad29ec49bde92e3c71d545a` (CI #895 passed). They are not yet deployed; migration 0033 is not applied. See canonical plan checkpoint in LocalFlowPro.
+
+
+### Sidecar credential read-back — 25-11-2026 17:08 UTC
+- Cloudflare Worker secret-name inventory only (no secret values): `BVELT_TENANT_INGEST_KEY` and `RADAR_SIDECAR_CALLBACK_KEY` exist; `GITHUB_ACTIONS_TOKEN_SECRET` is absent.
+- `maybeDispatchSidecarResearch` intentionally returns before reserving dispatch state when that secret is missing. Sidecar/Scrapling enrichment is therefore unavailable in current production; core discovery must continue without it.
+- This independently blocks new source_evidence from the Sidecar callback. Do not restore plaintext `GITHUB_ACTIONS_TOKEN`; owner must rotate/revoke any legacy token and set only least-privilege encrypted `GITHUB_ACTIONS_TOKEN_SECRET` through authorized secret-write flow. Never read/print values.
+- Tenant sync ID mismatch is separate: legacy `tenant_custom_01` cannot pass the canonical `bvelt_…` sender guard. Resolve both gates independently, then run a controlled fixture callback and verify receipts.
