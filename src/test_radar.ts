@@ -52,6 +52,31 @@ function assert(condition: boolean, message: string) {
 }
 
 tests.push({
+  name: "Manual email preflight blocks unknown or consent-required jurisdictions despite owner approval",
+  run: async () => {
+    const { resolveFounderEmailPolicy } = await import("./worker");
+    const us = { email: "contact@example.com", city: "Austin, TX" };
+    const canada = { email: "contact@example.ca", city: "Toronto, ON" };
+    const unknown = { email: "contact@example.org", city: "Unknown City" };
+    const ukCorporate = { email: "contact@example.co.uk", city: "London, England", recipient_type: "corporate" };
+    const ukUnknownSubscriber = { email: "contact@example.co.uk", city: "London, England" };
+
+    assert(resolveFounderEmailPolicy(us).status === "SEND_ALLOWED", "US commercial email remains eligible subject to sender and CAN-SPAM controls");
+    assert(getManualSendPreflightError(us) === null, "A jurisdiction classified SEND_ALLOWED may proceed to remaining gates");
+    assert(resolveFounderEmailPolicy(canada).status === "CONSENT_REQUIRED", "Canada must require a recorded lawful basis");
+    assert(getManualSendPreflightError(canada) === "email_policy_consent_required", "Owner approval alone must not bypass Canadian consent requirements");
+    assert(resolveFounderEmailPolicy(unknown).status === "POLICY_UNKNOWN", "Unknown jurisdiction must remain unclassified");
+    assert(getManualSendPreflightError(unknown) === "email_policy_policy_unknown", "Unknown jurisdiction must be blocked");
+    assert(resolveFounderEmailPolicy(ukCorporate).status === "SEND_ALLOWED", "Confirmed UK corporate subscribers may proceed to remaining gates");
+    assert(getManualSendPreflightError(ukCorporate) === null, "UK corporate route remains eligible");
+    assert(resolveFounderEmailPolicy(ukUnknownSubscriber).status === "OWNER_REVIEW", "Unconfirmed UK subscriber type must remain under review");
+    assert(getManualSendPreflightError(ukUnknownSubscriber) === "email_policy_owner_review", "UK owner-review state must block dispatch");
+    assert(getManualSendPreflightError({ email: "not-an-email", city: "Austin, TX" }) === "valid_email_required", "Email syntax validation must remain the first gate");
+  }
+});
+
+
+tests.push({
   name: "Manual and automatic email bodies share one complete legal footer",
   run: () => {
     const env: any = {
