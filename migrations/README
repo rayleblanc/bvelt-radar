@@ -43,6 +43,7 @@ Apply each file exactly once, in the order below. Several historical files share
 35. `0030_tenant_profile_contract.sql`
 36. `0031_source_evidence_provenance.sql`
 37. `0032_schema_migration_ledger.sql`
+38. `0033_prospects_keyset_pagination.sql`
 
 ## Production migration procedure
 
