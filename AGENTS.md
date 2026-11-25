@@ -421,3 +421,14 @@ Canonical source: LocalFlowPro `docs/MASTER_PLAN_BVELT_ECOSYSTEM_2026-12-10.md`,
 - Bvelt application-code hold remains through 2026-12-01T00:00:00Z. Until release gate opens, prepare and inspect only; no restricted bypass. The plan checkpoint defines exact post-gate test and merge order.
 - Owner action: rotate/revoke legacy plaintext GITHUB_ACTIONS_TOKEN, remove plaintext binding, set least-privilege GITHUB_ACTIONS_TOKEN_SECRET via supported secret path. Never read/print token values.
 - No D1 writes, migrations, secrets, outbound communication or production deploy were performed in this audit. No remittance services or repositories are in scope.
+
+
+### 25-11-2026 — CPU incident fixes merged, not yet deployed
+- PR #83 merged: `5be3c20a3e62fd48906c2a0b0b47d410ac4e6030`; Radar CI #893 passed. Prospect reads now clamp to 100, use keyset cursor `created_at DESC, id DESC`, explicit projection, validated cursor and bounded UI page traversal. 5xx no longer triggers alias retry.
+- Migration `0033_prospects_keyset_pagination.sql` adds index `COALESCE(tenant_id,'founder'), created_at DESC, id DESC` and records itself in the migration ledger. It is registered in migrations/README. Production ledger read-back is still 0030–0032; do not claim 0033 applied.
+- PR #84 merged: `b8362a6a60b0b303dad29ec49bde92e3c71d545a`; Radar CI #895 passed. Attack Kit POST skips getPriorityTargets/ICP expansion/geo ranking/daily_missions schema writes for a one-prospect draft. Message language resolves mission → tenant languages_json → Founder env → English. Gemini/Groq cascade and IDs untouched.
+- Latest main SHA `b8362a6a60b0b303dad29ec49bde92e3c71d545a`; zero open PRs.
+- Current production Worker deployment remains pre-merge version `35c62d4b-c393-446f-95dc-8fa2e97d9c46`, 100%, created 2026-11-25 16:36:26Z. Both code fixes are merged but NOT deployed.
+- Deployment order after release gate: inspect D1 schema/ledger; apply and verify 0033; build Worker bundle from exact main; deploy through established Cloudflare Workers Build; verify exact version and 100% traffic; smoke Founder/Tenant pagination (no duplicate/missing rows across page boundaries, strict tenant scope), Attack Kit GET/POST, then CPU telemetry.
+- No production D1 rows, suppressions, outbound email, secrets, queue state or Worker settings changed. No Gemini/Groq cascade/model IDs changed.
+- Keep open: Tenant evidence bridge (47 Tenant prospects, zero Tenant source_evidence/observation receipts in last read); P7 suppression reconciliation and natural Svix receipt; BEM monetary NULL migration; owner rotation of legacy plaintext GITHUB_ACTIONS_TOKEN. No replay, unsuppression or auto-outreach.
