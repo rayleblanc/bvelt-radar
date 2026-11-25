@@ -497,3 +497,13 @@ Canonical source: LocalFlowPro `docs/MASTER_PLAN_BVELT_ECOSYSTEM_2026-12-10.md`,
 - `/decision` is behind Worker admin authorization and rejects a send unless the explicit owner approval assertion is true; Telegram callback uses the authorized callback flow.
 - These 10 messages were owner-approved manual sends, not autonomous campaign sends. `FOUNDER_AUTO_OUTREACH=false` remains unchanged. No send occurred during audit.
 - Local Trust-Stack integration is disabled (decision reason `LOCAL_SAFETY_OK: Trust-Stack disabled; bounce/email checks only`); keep Trust-Stack evidence/consent gates open. Manual owner approval is not recipient opt-in.
+
+
+### 25-11-2026 — manual email jurisdiction gate live
+- PR #85 merged to main as `4645fa3213f53924c584bae2c83031fb59c513f3`; CI #897 passed (TypeScript, npm audit, Radar custom/integration tests, Sidecar tests).
+- Cloudflare Build `0609411f-3ee6-41fd-98b4-468dda95d150` succeeded; deployed version `12b7cb90-f86d-4cda-9ed3-212d83357ae0` at 100% traffic (deployment `8f955535-3c8e-4f3c-a8a7-1ea17f9e3ede`, 17:44:45Z).
+- Manual Founder/Tenant email preflight now requires `resolveFounderEmailPolicy(...).status === SEND_ALLOWED`. `CONSENT_REQUIRED`, `POLICY_UNKNOWN`, and `OWNER_REVIEW` fail closed before dispatch. Owner approval is not a substitute for jurisdictional lawful basis.
+- The 10 Nov 24 manual sends were explicitly owner-approved (10/10 authorization events assert `explicit_user_action` and `owner_manual_approval_asserted=true`); 1 policy was SEND_ALLOWED, 2 CONSENT_REQUIRED, 7 POLICY_UNKNOWN. Historical sends were not rewritten. No email was sent during this remediation.
+- Post-deploy settings read-back confirms `FOUNDER_AUTO_OUTREACH=false`, Founder caps unchanged, Gemini paid tier false, Gemini model list unchanged, `GITHUB_ACTIONS_TOKEN` empty. No secret values read or changed.
+- Bvelt D1 read-only: 789 market observations, 321 daily aggregates, 22 Founder ingest batches; 0 Tenant observations/events, 0 Radar learning outbox. Founder market ingest is active; Tenant identity/observation bridge remains unresolved.
+- No production D1 writes, migrations, suppression changes, secret changes, webhook replay or outbound email.
