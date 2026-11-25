@@ -1,7 +1,7 @@
 declare const process: any;
 import { resolveGithubActionsToken } from './research/githubActions';
 
-import worker, { resolveProspectsPageLimit, decodeProspectsCursor, encodeProspectsCursor, getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey, notifyOnce, isVerifiedDeliverableEmail, evaluateFounderOutreachEligibility, buildTechnicalAuditSnapshot, isEmailValidatedForOutreach, isCompletePostalAddress, sendTelegramWithRetry, extractEmailAddress, evaluateResearchEvidenceQuality, classifyReplyText, getTelegramApprovalFeedback, getManualSendPreflightError, hasAIGenerationProvider, WORKERS_AI_FALLBACK_MODEL, extractWorkersAiText, resolveProspectContactability, buildProspectEvidenceContext, buildScheduledRunId, getCurrentDaySenderCount, normalizeWhatsAppPhone, extractPhoneDigits, hasUsableContactChannel, hasEnrichableContactData, buildWhatsAppClickToChatUrl, buildWhatsAppOutreachBody, shouldUseManualWhatsAppFallback, isDiscoveryInfrastructureFailure, resolveDiscoveryCompletionStatus, hasConfirmedWhatsAppOptIn, isValidWhatsAppConsentEvidenceRef, isOutreachPauseBlocking, isFounderManualDispatch, normalizeGeneratedMessage, selectHunterDomainEmail, recordRunFinalization, resolveGeoapifyProfile, ensureLegalFooter } from './worker';
+import worker, { resolveAICopyLanguage, resolveProspectsPageLimit, decodeProspectsCursor, encodeProspectsCursor, getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey, notifyOnce, isVerifiedDeliverableEmail, evaluateFounderOutreachEligibility, buildTechnicalAuditSnapshot, isEmailValidatedForOutreach, isCompletePostalAddress, sendTelegramWithRetry, extractEmailAddress, evaluateResearchEvidenceQuality, classifyReplyText, getTelegramApprovalFeedback, getManualSendPreflightError, hasAIGenerationProvider, WORKERS_AI_FALLBACK_MODEL, extractWorkersAiText, resolveProspectContactability, buildProspectEvidenceContext, buildScheduledRunId, getCurrentDaySenderCount, normalizeWhatsAppPhone, extractPhoneDigits, hasUsableContactChannel, hasEnrichableContactData, buildWhatsAppClickToChatUrl, buildWhatsAppOutreachBody, shouldUseManualWhatsAppFallback, isDiscoveryInfrastructureFailure, resolveDiscoveryCompletionStatus, hasConfirmedWhatsAppOptIn, isValidWhatsAppConsentEvidenceRef, isOutreachPauseBlocking, isFounderManualDispatch, normalizeGeneratedMessage, selectHunterDomainEmail, recordRunFinalization, resolveGeoapifyProfile, ensureLegalFooter } from './worker';
 import { DEFAULT_FOUNDER_MISSION, MissionConfig } from './worker';
 import { buildResendIdempotencyKey, buildBrandedEmailHtml, resolveBveltSender, inspectOutboundEmailAuth, normalizeOutreachBody, buildListUnsubscribeHeader, dispatchEmail } from './emailDispatcher';
 import { fetchPermitContractors } from './permitSources';
@@ -3380,6 +3380,16 @@ tests.push({
     assert(decoded?.created_at === original.created_at && decoded?.id === original.id, "Cursor must round-trip both stable ordering fields");
     assert(decodeProspectsCursor("not-valid-json") === null, "Malformed cursor must be rejected");
     assert(decodeProspectsCursor(encodeURIComponent(JSON.stringify({ created_at: "", id: "p1" }))) === null, "Cursor without a timestamp must be rejected");
+  }
+});
+
+tests.push({
+  name: "Attack-kit message language resolves without discovery mission planning",
+  run: () => {
+    assert(resolveAICopyLanguage(["fr"], '["es"]', "en") === "fr", "An explicit mission language must take precedence");
+    assert(resolveAICopyLanguage(undefined, '["es","en"]', "en") === "es", "Tenant language must be used without discovery planning");
+    assert(resolveAICopyLanguage(undefined, "invalid-json", "fr;en") === "fr", "Founder language must be the fallback for invalid tenant language JSON");
+    assert(resolveAICopyLanguage(undefined, null, null) === "en", "English must remain the deterministic default");
   }
 });
 
