@@ -489,3 +489,11 @@ Canonical source: LocalFlowPro `docs/MASTER_PLAN_BVELT_ECOSYSTEM_2026-12-10.md`,
 - If the former token was valid/exposed, owner should still revoke it at GitHub. Do not restore it, add a new token, or enable Sidecar without explicit approval.
 - `SENDER_POSTAL_ADDRESS` and `RESEND_WEBHOOK_SIGNING_SECRET` exist as encrypted secrets; values were not read. Previously sent email body contains a physical address in its footer; do not log or reproduce the address.
 - `FOUNDER_AUTO_OUTREACH=false`; no autonomous outreach change. No secrets/settings/code/D1/email/deploy mutations.
+
+
+### 25-11-2026 — Nov 24 Founder send provenance verified
+- Resend's latest 10 delivered messages match 10 D1 dispatch rows and 10 Founder prospects exactly; all are `delivered`.
+- Every authorization event has `authorization=explicit_user_action` and `owner_manual_approval_asserted=true` (10/10); each run is `manual_send` and event sequence includes generated → authorized → confirmed → delivered.
+- `/decision` is behind Worker admin authorization and rejects a send unless the explicit owner approval assertion is true; Telegram callback uses the authorized callback flow.
+- These 10 messages were owner-approved manual sends, not autonomous campaign sends. `FOUNDER_AUTO_OUTREACH=false` remains unchanged. No send occurred during audit.
+- Local Trust-Stack integration is disabled (decision reason `LOCAL_SAFETY_OK: Trust-Stack disabled; bounce/email checks only`); keep Trust-Stack evidence/consent gates open. Manual owner approval is not recipient opt-in.
