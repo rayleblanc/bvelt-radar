@@ -482,3 +482,10 @@ Canonical source: LocalFlowPro `docs/MASTER_PLAN_BVELT_ECOSYSTEM_2026-12-10.md`,
 - The latest 10 Resend messages are delivered on Nov 24; no later messages in the current 92-message listing. Webhook delivery history: 81 events, all accepted.
 - Current telemetry query returned empty rows due an unvalidated dataset/filter; do not call this a zero-error window.
 - No D1 writes, email sends, webhook replay, suppression changes, secrets or Worker setting changes.
+
+
+### 25-11-2026 — Worker credential binding correction
+- Live production settings show `GITHUB_ACTIONS_TOKEN` as a plain-text binding with an empty value; encrypted `GITHUB_ACTIONS_TOKEN_SECRET` remains absent. Sidecar dispatch stays fail-closed. This supersedes the earlier statement that a non-empty plaintext token remained bound.
+- If the former token was valid/exposed, owner should still revoke it at GitHub. Do not restore it, add a new token, or enable Sidecar without explicit approval.
+- `SENDER_POSTAL_ADDRESS` and `RESEND_WEBHOOK_SIGNING_SECRET` exist as encrypted secrets; values were not read. Previously sent email body contains a physical address in its footer; do not log or reproduce the address.
+- `FOUNDER_AUTO_OUTREACH=false`; no autonomous outreach change. No secrets/settings/code/D1/email/deploy mutations.
