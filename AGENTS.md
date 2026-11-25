@@ -472,3 +472,13 @@ Canonical source: LocalFlowPro `docs/MASTER_PLAN_BVELT_ECOSYSTEM_2026-12-10.md`,
 - Production Worker binding `FOUNDER_AUTO_OUTREACH=false`; queue auto-email remains off and falls back to interactive Telegram approval. Keep false. `FOUNDER_AUTO_MAX_PER_DAY=8`, `FOUNDER_AUTO_MIN_SCORE=70`, `FOUNDER_WA_MAX_PER_DAY=5`.
 - `GITHUB_ACTIONS_TOKEN` exists as plaintext binding; `GITHUB_ACTIONS_TOKEN_SECRET` is absent. Sidecar dispatch requires the encrypted secret and does not fall back to plaintext. Owner must rotate/revoke legacy token and remove plaintext binding; never use plaintext token.
 - `RADAR_GLOBAL_PAUSE` unset; this does not change explicit auto-outreach false. Do not enable automatic sends. Tenant/Founder dispatch remains human-approved.
+
+
+### 25-11-2026 — latest production read-back
+- Latest main documentation SHA `fd83fc26f85726d97aadc058e507d0d9ca1209e5` is built successfully by Cloudflare Build `472ef1c7-ec96-4c17-b4d1-3cb27797dc73`; deployment version `03ba02fe-5e4d-4a2d-a7b1-6fed7d68f2e0` at 100%, 17:21:13Z. No open PRs.
+- D1 counts: Founder 810 (4 qualified); Tenant `tenant_custom_01` 47 (31 qualified). Migration ledger 0030–0032 only; 0033 remains pending.
+- Four D1 `delayed` dispatch rows each have a Resend email ID; provider `get_email` now reports `bounced` for all four. Do not change D1 state until exact webhook `data.email_id`, bounce subtype and ordering are matched. Keep suppression/cooldown holds.
+- Existing outbound message bodies include a physical street address in the founder signature. Keep sends paused and review legal mailing-address handling before any future outreach. Never copy the address into source, docs or logs.
+- The latest 10 Resend messages are delivered on Nov 24; no later messages in the current 92-message listing. Webhook delivery history: 81 events, all accepted.
+- Current telemetry query returned empty rows due an unvalidated dataset/filter; do not call this a zero-error window.
+- No D1 writes, email sends, webhook replay, suppression changes, secrets or Worker setting changes.
