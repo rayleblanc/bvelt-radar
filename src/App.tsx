@@ -424,27 +424,62 @@ export default function App() {
         return;
       }
 
-      // Founder mode never sends tenant_id (backend defaults to founder).
-      // Tenant mode always scopes to the selected tenant — isolation is strict.
+      // Founder mode never sends tenant_id (backend defaults to Founder).
+      // Tenant mode always scopes every page to the selected tenant.
       const prospectQuery = new URLSearchParams();
       if (isTenantMode) prospectQuery.set('tenant_id', selectedTenantId);
-      // READY is backed by the persisted approved queue, not merely the latest 100 records.
-      // The API already scopes this status by tenant and returns contactability per row.
-      prospectQuery.set('limit', '1000');
-      // Filter in the client after loading the complete bounded tenant-scoped workbench.
-      const queryParam = prospectQuery.toString() ? `?${prospectQuery.toString()}` : '';
+      prospectQuery.set('limit', '100');
+      let prospectsRoute = '/prospects';
+      let prospectsRes: Response | null = null;
+      const pList: any[] = [];
+      let cursor: string | null = null;
+      let pageCount = 0;
+      let hasMore = true;
 
-      // 3. GET /prospects
-      let prospectsRes = await fetch(`${apiUrl}/prospects${queryParam}`, {
-        credentials: 'include',
-      }).catch(() => null);
+      // Each Worker request is capped at 100 rows. Continue by keyset cursor so
+      // the workbench remains complete without one CPU-heavy unbounded request.
+      while (hasMore && pageCount < 50) {
+        const pageQuery = new URLSearchParams(prospectQuery);
+        if (cursor) pageQuery.set('cursor', cursor);
+        const pageUrl = `${apiUrl}${prospectsRoute}?${pageQuery.toString()}`;
+        let pageRes = await fetch(pageUrl, { credentials: 'include' }).catch(() => null);
 
-      if (!prospectsRes || !prospectsRes.ok) {
-        prospectsRes = await fetch(`${apiUrl}/api/prospects${queryParam}`, {
-          credentials: 'include',
+        // The alias is a compatibility fallback only for missing/unsupported routes
+        // or a network failure. Never amplify a 5xx by retrying the same request.
+        if (pageCount === 0 && prospectsRoute === '/prospects' &&
+            (!pageRes || pageRes.status === 404 || pageRes.status === 405)) {
+          prospectsRoute = '/api/prospects';
+          const fallbackQuery = new URLSearchParams(prospectQuery);
+          pageRes = await fetch(`${apiUrl}${prospectsRoute}?${fallbackQuery.toString()}`, {
+            credentials: 'include'
           }).catch(() => null);
+        }
+
+        prospectsRes = pageRes;
+        if (!pageRes || !pageRes.ok) break;
+
+        const pageData = await pageRes.json();
+        const pageRows: any[] = Array.isArray(pageData)
+          ? pageData
+          : (Array.isArray(pageData?.prospects) ? pageData.prospects : []);
+        pList.push(...pageRows);
+        pageCount++;
+
+        if (Array.isArray(pageData)) {
+          hasMore = false; // Backward compatibility with the former array response.
+          break;
+        }
+        hasMore = pageData?.has_more === true;
+        cursor = typeof pageData?.next_cursor === 'string' ? pageData.next_cursor : null;
+        if (hasMore && !cursor) {
+          throw new Error('La paginación de prospectos devolvió una página incompleta.');
+        }
       }
-      
+
+      if (hasMore && pageCount >= 50) {
+        throw new Error('El radar superó el límite seguro de páginas. Reduce el alcance antes de continuar.');
+      }
+
       // ROI funnel (founder or selected tenant)
       try {
         const roiTenant = isTenantMode && hasTenantSelected ? selectedTenantId : 'founder';
@@ -453,9 +488,6 @@ export default function App() {
       } catch { /* non-blocking */ }
 
       if (prospectsRes && prospectsRes.ok) {
-        const rawList = await prospectsRes.json();
-        const pList: any[] = Array.isArray(rawList) ? rawList : (rawList.prospects || []);
-        
         const normalized: Prospect[] = pList.map((p: any) => ({
           ...p,
           id: p.id || `p-${Math.random().toString(36).substring(7)}`,
@@ -487,6 +519,8 @@ export default function App() {
         setIsAuthenticated(false);
         setLoading(false);
         return;
+      } else {
+        throw new Error(`No se pudieron cargar los prospectos (HTTP ${prospectsRes?.status || 'sin respuesta'}).`);
       }
 
       setErrorState(null);
