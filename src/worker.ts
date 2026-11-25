@@ -12095,6 +12095,14 @@ export async function sendTenantObservationsToBvelt(
       return { ok: false, reason: `http_${res.status}`, tenant_id: tenantId };
     }
 
+    // HTTP 2xx alone is not proof that Bvelt accepted the Tenant batch.
+    // Require an explicit application-level acknowledgement before recording
+    // a successful sync or appending the local observation history.
+    const acknowledgement = await res.json().catch(() => null) as any;
+    if (!acknowledgement || acknowledgement.ok !== true) {
+      return { ok: false, reason: "invalid_ingest_acknowledgement", tenant_id: tenantId };
+    }
+
     // Append a private, deduplicated snapshot only when the observed state changes.
     // Contact details remain in the current prospect record and are not duplicated
     // into the longitudinal history payload.

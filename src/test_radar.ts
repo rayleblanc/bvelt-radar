@@ -2118,6 +2118,48 @@ tests.push({
   }
 });
 
+tests.push({
+  name: "Tenant observation history requires an explicit Bvelt application acknowledgement",
+  run: async () => {
+    const { sendTenantObservationsToBvelt } = await import("./worker");
+    const originalFetch = globalThis.fetch;
+    const cases = [
+      { label: "application rejection", response: () => new Response(JSON.stringify({ ok: false, error: "tenant_scope_rejected" }), { status: 200 }) },
+      { label: "malformed acknowledgement", response: () => new Response("not-json", { status: 200 }) }
+    ];
+
+    try {
+      for (const testCase of cases) {
+        let historyWrites = 0;
+        const env: any = {
+          BVELT_TENANT_INGEST_URL: "https://bvelt.app/api/radar/observations",
+          BVELT_TENANT_INGEST_KEY: "test_tenant_key",
+          RADAR_DB: {
+            prepare: () => ({
+              bind: () => ({
+                all: async () => ({ results: [{
+                  id: "p_ack_test", tenant_id: "bvelt_tenant_ack", name: "Ack Test",
+                  city: "Austin, TX", trade: "plumbing", website: null, phone: null,
+                  email: null, score: 70, status: "qualified", tenant_outcome: null,
+                  bvelt_angle: null, created_at: "2026-11-25T00:00:00.000Z", updated_at: null
+                }] })
+              })
+            }),
+            batch: async () => { historyWrites += 1; return [{ meta: { changes: 1 } }]; }
+          }
+        };
+        globalThis.fetch = (async () => testCase.response()) as any;
+        const result = await sendTenantObservationsToBvelt(env, "bvelt_tenant_ack");
+        assert(result.ok === false, testCase.label + " must not be reported as a successful Tenant sync");
+        assert(result.reason === "invalid_ingest_acknowledgement", testCase.label + " must return a stable failure reason");
+        assert(historyWrites === 0, testCase.label + " must not append local observation history");
+      }
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  }
+});
+
 // Tests 40-52: Comprehensive Scrapling Sidecar Research Suite
 tests.push({
   name: "Scrapling Research Suite: contracts, isolation, concurrency, security & callbacks",
