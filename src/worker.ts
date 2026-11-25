@@ -2707,9 +2707,9 @@ export default {
           const contactability = resolveProspectContactability(scopedProspect);
           if (method === "GET") return Response.json({ ...buildAttackKit(scopedProspect), contactability }, { headers: corsHeaders });
           const channel = body.channel === "whatsapp" ? "whatsapp" : "email";
-          const dayOfYear = getDayOfYear(new Date());
-          const { missionConfig } = await getPriorityTargets(dayOfYear, env, mode, targetTenant, undefined, true);
-          const generated = await generateAICopy(scopedProspect, scopedProspect.variant_id || scopedProspect.bvelt_angle || "missed_calls", env, missionConfig, channel);
+          // One draft does not require discovery target selection, ICP expansion,
+          // geospatial ranking or daily-mission writes.
+          const generated = await generateAICopy(scopedProspect, scopedProspect.variant_id || scopedProspect.bvelt_angle || "missed_calls", env, undefined, channel);
           const timestamp = new Date().toISOString();
           // WhatsApp drafts are channel-specific and must never overwrite the canonical email draft.
           if (channel === "email") {
@@ -11074,12 +11074,7 @@ export async function generateAICopy(
   missionConfig?: MissionConfig,
   channel: "email" | "whatsapp" = "email"
 ): Promise<{ subject: string; body: string; source: "gemini" | "groq" | "workers_ai" | "template" }> {
-  const language = (missionConfig?.languages && missionConfig.languages[0]) || "en";
-  const isSpanish = language.toLowerCase().startsWith("es");
   const outreachTouch = getOutreachTouch(prospect);
-  const founderLine = (!prospect.tenant_id || prospect.tenant_id === "founder" || prospect.mode === "founder")
-    ? pickFounderVoiceLine(String(prospect.id || prospect.name || "x"), outreachTouch, language)
-    : "";
   const isFollowUp = outreachTouch >= 2;
   const demoLink = "https://bvelt.app/";
   const evidenceContext = buildProspectEvidenceContext(prospect);
@@ -11096,6 +11091,25 @@ export async function generateAICopy(
     }
     if (!tenantInfo) throw new Error("tenant_configuration_missing");
   }
+
+  // The message path needs only a language, not a full discovery mission. Avoid
+  // invoking getPriorityTargets here: it expands ICP, reads geo targets and seeds
+  // daily_missions, all unrelated work for generating one reviewed draft.
+  let language = (missionConfig?.languages && missionConfig.languages[0]) ||
+    String(env.FOUNDING_LANGUAGES || "").split(";").map(value => value.trim()).filter(Boolean)[0] || "en";
+  if (tenantInfo && !missionConfig?.languages?.length) {
+    try {
+      const tenantLanguages = JSON.parse(tenantInfo.languages_json || "[]");
+      if (Array.isArray(tenantLanguages) && typeof tenantLanguages[0] === "string" && tenantLanguages[0].trim()) {
+        language = tenantLanguages[0].trim();
+      }
+    } catch { /* retain safe English fallback */ }
+  }
+  const isSpanish = language.toLowerCase().startsWith("es");
+  const founderLine = (!prospect.tenant_id || prospect.tenant_id === "founder" || prospect.mode === "founder")
+    ? pickFounderVoiceLine(String(prospect.id || prospect.name || "x"), outreachTouch, language)
+    : "";
+
   const tenantContext = tenantInfo ? JSON.stringify({
     tenant_name: tenantInfo.tenant_name, industry: tenantInfo.industry, niche: tenantInfo.niche,
     subniches: tenantInfo.subniches_json, services: tenantInfo.services_json, service_areas: tenantInfo.service_areas_json,
