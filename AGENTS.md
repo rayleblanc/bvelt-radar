@@ -447,3 +447,12 @@ Canonical source: LocalFlowPro `docs/MASTER_PLAN_BVELT_ECOSYSTEM_2026-12-10.md`,
 - `maybeDispatchSidecarResearch` intentionally returns before reserving dispatch state when that secret is missing. Sidecar/Scrapling enrichment is therefore unavailable in current production; core discovery must continue without it.
 - This independently blocks new source_evidence from the Sidecar callback. Do not restore plaintext `GITHUB_ACTIONS_TOKEN`; owner must rotate/revoke any legacy token and set only least-privilege encrypted `GITHUB_ACTIONS_TOKEN_SECRET` through authorized secret-write flow. Never read/print values.
 - Tenant sync ID mismatch is separate: legacy `tenant_custom_01` cannot pass the canonical `bvelt_…` sender guard. Resolve both gates independently, then run a controlled fixture callback and verify receipts.
+
+
+### P7 Resend/D1 read-only reconciliation — 25-11-2026 17:20 UTC
+- Webhook `5c77f537-b331-4e7e-a923-804af31d0093` enabled for received/delivered/complained/bounced/delivery_delayed/failed/suppressed. 81 events read, all webhook delivery status success; latest natural delivered events 2026-11-24 15:03Z.
+- Provider: 92 emails (65 delivered,24 bounced,3 suppressed), 39 permanent suppressions. All 39 normalized provider suppression keys match D1.
+- D1 `email_dispatch_logs`: 173 rows (64 delivered,36 bounced,4 delayed,69 dispatched), every row has provider message_id. D1 suppression: 44 resend_bounced + 5 resend_transient_hold. Five permanent-bounce keys are D1-only and predate webhook cutover; keep blocked, do not unsuppress/re-add automatically. Five transient holds are not permanent provider suppressions.
+- One inspected transient maps to Resend `email.bounced` with `bounce.type=Transient`; event name alone is insufficient. Four delayed/transient records still need exact message ID/subtype/order reconciliation.
+- 18 Founder prospects status=sent match latest D1 dispatch delivered; 10 match dispatched. Four hold records have D1 delayed but provider latest status bounced; preserve UNKNOWN until event-level evidence.
+- No outbound sends, webhook replay, suppression changes, status rewrites or production D1 writes. Continue reconciliation only; do not increase volume.
