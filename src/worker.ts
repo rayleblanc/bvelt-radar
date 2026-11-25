@@ -95,6 +95,34 @@ export interface RadarJobMessage {
 
 export const WORKERS_AI_FALLBACK_MODEL = "@cf/zai-org/glm-4.7-flash";
 
+export const PROSPECTS_PAGE_DEFAULT_LIMIT = 100;
+export const PROSPECTS_PAGE_MAX_LIMIT = 100;
+
+export function resolveProspectsPageLimit(raw: string | null): number {
+  if (raw === null || raw.trim() === "") return PROSPECTS_PAGE_DEFAULT_LIMIT;
+  const parsed = Number(raw);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) return PROSPECTS_PAGE_DEFAULT_LIMIT;
+  return Math.min(parsed, PROSPECTS_PAGE_MAX_LIMIT);
+}
+
+export function decodeProspectsCursor(raw: string | null): { created_at: string; id: string } | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(decodeURIComponent(raw));
+    if (typeof parsed?.created_at !== "string" || !parsed.created_at.trim() ||
+        typeof parsed?.id !== "string" || !parsed.id.trim() ||
+        parsed.created_at.length > 64 || parsed.id.length > 128) return null;
+    return { created_at: parsed.created_at, id: parsed.id };
+  } catch {
+    return null;
+  }
+}
+
+export function encodeProspectsCursor(row: { created_at: string; id: string }): string {
+  return encodeURIComponent(JSON.stringify({ created_at: row.created_at, id: row.id }));
+}
+
+
 export function normalizeGeneratedMessage(
   value: any,
   channel: "email" | "whatsapp"
@@ -1304,33 +1332,6 @@ export default {
           timestamp: new Date().toISOString()
         }, { headers: corsHeaders });
       }
-
-      export const PROSPECTS_PAGE_DEFAULT_LIMIT = 100;
-export const PROSPECTS_PAGE_MAX_LIMIT = 100;
-
-export function resolveProspectsPageLimit(raw: string | null): number {
-  if (raw === null || raw.trim() === "") return PROSPECTS_PAGE_DEFAULT_LIMIT;
-  const parsed = Number(raw);
-  if (!Number.isSafeInteger(parsed) || parsed < 1) return PROSPECTS_PAGE_DEFAULT_LIMIT;
-  return Math.min(parsed, PROSPECTS_PAGE_MAX_LIMIT);
-}
-
-export function decodeProspectsCursor(raw: string | null): { created_at: string; id: string } | null {
-  if (!raw) return null;
-  try {
-    const parsed = JSON.parse(decodeURIComponent(raw));
-    if (typeof parsed?.created_at !== "string" || !parsed.created_at.trim() ||
-        typeof parsed?.id !== "string" || !parsed.id.trim() ||
-        parsed.created_at.length > 64 || parsed.id.length > 128) return null;
-    return { created_at: parsed.created_at, id: parsed.id };
-  } catch {
-    return null;
-  }
-}
-
-export function encodeProspectsCursor(row: { created_at: string; id: string }): string {
-  return encodeURIComponent(JSON.stringify({ created_at: row.created_at, id: row.id }));
-}
 
 // 8. Single Production Prospects Fetching Endpoint
       if ((path === "/prospects" || path === "/api/prospects") && method === "GET") {
