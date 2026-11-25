@@ -55,11 +55,11 @@ tests.push({
   name: "Manual email preflight blocks unknown or consent-required jurisdictions despite owner approval",
   run: async () => {
     const { resolveFounderEmailPolicy } = await import("./worker");
-    const us = { email: "contact@example.com", city: "Austin, TX" };
-    const canada = { email: "contact@example.ca", city: "Toronto, ON" };
-    const unknown = { email: "contact@example.org", city: "Unknown City" };
-    const ukCorporate = { email: "contact@example.co.uk", city: "London, England", recipient_type: "corporate" };
-    const ukUnknownSubscriber = { email: "contact@example.co.uk", city: "London, England" };
+    const us = { email: "contact@northstarservices.com", city: "Austin, TX" };
+    const canada = { email: "office@torontoplumbing.ca", city: "Toronto, ON" };
+    const unknown = { email: "info@unknownmarket.org", city: "Unknown City" };
+    const ukCorporate = { email: "contact@ukcorporate.co.uk", city: "London, England", recipient_type: "corporate" };
+    const ukUnknownSubscriber = { email: "contact@ukcorporate.co.uk", city: "London, England" };
 
     assert(resolveFounderEmailPolicy(us).status === "SEND_ALLOWED", "US commercial email remains eligible subject to sender and CAN-SPAM controls");
     assert(getManualSendPreflightError(us) === null, "A jurisdiction classified SEND_ALLOWED may proceed to remaining gates");
@@ -500,7 +500,7 @@ tests.push({
   run: () => {
     assert(getManualSendPreflightError({ email: null }) === "valid_email_required", "Missing email must block send");
     assert(getManualSendPreflightError({ email: "not-an-email" }) === "valid_email_required", "Malformed email must block send");
-    assert(getManualSendPreflightError({ email: "valid@acmeplumbing.com" }) === null, "Valid email must pass preflight");
+    assert(getManualSendPreflightError({ email: "valid@acmeplumbing.com", city: "Austin, TX" }) === null, "Valid email must pass preflight");
   }
 });
 
