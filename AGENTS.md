@@ -533,3 +533,8 @@ Canonical source: LocalFlowPro `docs/MASTER_PLAN_BVELT_ECOSYSTEM_2026-12-10.md`,
 - P7 remains open: four delayed dispatch records have provider status bounced but exact webhook subtype/order not established; preserve their state and suppression holds. Five D1-only permanent suppression keys remain blocked. No replay, unsuppression, recipient reactivation, status rewrite or outbound email. Sender footer/address compliance remains unresolved; keep sending paused.
 - Production Founder auto-outreach remains false. Manual email requires SEND_ALLOWED jurisdiction classification; owner approval does not replace lawful basis. No auto-outreach, provider/model/cascade changes, production D1 writes, secret changes or emails during this checkpoint.
 - Legacy GITHUB_ACTIONS_TOKEN binding is empty/plaintext type and GITHUB_ACTIONS_TOKEN_SECRET is absent. Sidecar remains fail-closed. Owner must revoke any former token and add a least-privilege encrypted secret only through the authorized secret path; never restore plaintext or read/print token values.
+
+
+### CI branch review — 2026-11-25 21:57 UTC
+- Branch `ci/report-npm-audit-20261123` is 1 ahead / 38 behind main and changes only `.github/workflows/ci.yml`. It replaces the blocking `npm audit --audit-level=moderate` step with a `continue-on-error: true` report step. Do not merge: this weakens the supply-chain security gate. If richer JSON diagnostics are later needed, retain the blocking audit and add reporting separately.
+- No PR opened and no CI workflow change made. Preserve branch pending later cleanup decision; do not delete without a full diff/branch audit.
