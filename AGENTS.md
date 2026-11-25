@@ -514,3 +514,11 @@ Canonical source: LocalFlowPro `docs/MASTER_PLAN_BVELT_ECOSYSTEM_2026-12-10.md`,
 - Tenant sender now treats HTTP 2xx as transport success only. It requires JSON `{ok:true}` before reporting sync success or appending local `tenant_observation_events`; HTTP 200 with `ok:false` and malformed JSON fail closed with no history write.
 - No production D1 mutation, Tenant identity remap/bootstrap, Bvelt evidence creation, outbound email, suppression change or provider/model configuration change.
 - Deployment not yet verified. After exact main build/deployment read-back, this guard only prevents false-positive receipts; it does not solve the unresolved `tenant_custom_01` owner/profile mapping. Keep that scope UNKNOWN and unlinked.
+
+
+### P7 delayed dispatch exact-ID follow-up — 25-11-2026
+- Live D1 read shows four `delayed` rows (three Nov 19, one Nov 13); all four exact Resend email IDs currently return provider status `bounced`.
+- Nov 19 IDs: `01a1f56c-bb6b-75b9-a05e-5996409429ce`, `01a1f56c-d99f-7ea2-8ff4-58ddf9da859f`, `01a1f56d-9217-7e2d-b98e-caf94736cee0`; Nov 13: `01a1d69d-fb1a-7863-bc09-e826bbc717aa`.
+- Exact webhook bounce payload/subtype/order for these four IDs is still unverified. Do not rewrite D1 status or suppression based only on provider resource status.
+- Footer inspection found a legacy postal-only fragment and physical address signature in prior sent messages. Keep sends paused until sender footer is corrected and compliant.
+- No D1 write, email, webhook replay or suppression change.
