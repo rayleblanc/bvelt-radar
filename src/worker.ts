@@ -95,6 +95,34 @@ export interface RadarJobMessage {
 
 export const WORKERS_AI_FALLBACK_MODEL = "@cf/zai-org/glm-4.7-flash";
 
+export const PROSPECTS_PAGE_DEFAULT_LIMIT = 100;
+export const PROSPECTS_PAGE_MAX_LIMIT = 100;
+
+export function resolveProspectsPageLimit(raw: string | null): number {
+  if (raw === null || raw.trim() === "") return PROSPECTS_PAGE_DEFAULT_LIMIT;
+  const parsed = Number(raw);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) return PROSPECTS_PAGE_DEFAULT_LIMIT;
+  return Math.min(parsed, PROSPECTS_PAGE_MAX_LIMIT);
+}
+
+export function decodeProspectsCursor(raw: string | null): { created_at: string; id: string } | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(decodeURIComponent(raw));
+    if (typeof parsed?.created_at !== "string" || !parsed.created_at.trim() ||
+        typeof parsed?.id !== "string" || !parsed.id.trim() ||
+        parsed.created_at.length > 64 || parsed.id.length > 128) return null;
+    return { created_at: parsed.created_at, id: parsed.id };
+  } catch {
+    return null;
+  }
+}
+
+export function encodeProspectsCursor(row: { created_at: string; id: string }): string {
+  return encodeURIComponent(JSON.stringify({ created_at: row.created_at, id: row.id }));
+}
+
+
 export function normalizeGeneratedMessage(
   value: any,
   channel: "email" | "whatsapp"
@@ -1305,25 +1333,47 @@ export default {
         }, { headers: corsHeaders });
       }
 
-      // 8. Single Production Prospects Fetching Endpoint
+// 8. Single Production Prospects Fetching Endpoint
       if ((path === "/prospects" || path === "/api/prospects") && method === "GET") {
-        const limit = url.searchParams.get("limit") || "100";
+        const limit = resolveProspectsPageLimit(url.searchParams.get("limit"));
         const status = url.searchParams.get("status");
-        const tenantId = url.searchParams.get("tenant_id") || "founder";
-        
-        let queryStr = "SELECT * FROM prospects WHERE COALESCE(tenant_id,'founder') = ?";
+        const tenantId = (url.searchParams.get("tenant_id") || "founder").trim() || "founder";
+        const cursorRaw = url.searchParams.get("cursor");
+        const cursor = decodeProspectsCursor(cursorRaw);
+        if (cursorRaw && !cursor) {
+          return Response.json({ error: "invalid_cursor" }, { status: 400, headers: corsHeaders });
+        }
+        const projection = [
+          "id", "mode", "tenant_id", "name", "city", "trade", "website", "phone", "email",
+          "score", "signals_json", "score_breakdown", "draft_subject", "draft_body", "bvelt_angle",
+          "status", "outcome", "variant", "response_type", "last_reply_content", "identity_key",
+          "dedupe_reason", "suppression_reason", "cooldown_until", "last_contact_at", "last_reply_at",
+          "source", "created_at", "updated_at", "variant_id", "demo_token", "signal_event", "signal_area",
+          "provider_recipient_id", "provider_sequence_id", "provider_status", "opportunity_score",
+          "confidence_score", "evidence_json", "commercial_value_band", "pain_hypothesis_json",
+          "postal_code", "fit_score", "intent_score", "pain_score", "ability_to_pay_score",
+          "contactability_score", "timing_score", "evidence_score", "decision_state", "why_now_json",
+          "expected_value", "signal_freshness_score", "dispatch_provider", "dispatch_message_id",
+          "dispatch_status", "dispatch_error", "pagespeed_score", "dns_has_dmarc", "weather_context",
+          "tenant_outcome", "won_value_usd"
+        ].join(", ");
+        let queryStr = `SELECT ${projection} FROM prospects WHERE COALESCE(tenant_id, 'founder') = ?`;
         const params: any[] = [tenantId];
-        
         if (status) {
           queryStr += " AND status = ?";
           params.push(status);
         }
-        
-        queryStr += " ORDER BY created_at DESC LIMIT ?";
-        params.push(parseInt(limit, 10));
-
+        if (cursor) {
+          queryStr += " AND (created_at < ? OR (created_at = ? AND id < ?))";
+          params.push(cursor.created_at, cursor.created_at, cursor.id);
+        }
+        queryStr += " ORDER BY created_at DESC, id DESC LIMIT ?";
+        params.push(limit + 1);
         const results = await env.RADAR_DB.prepare(queryStr).bind(...params).all();
-        const prospects = await Promise.all((results.results || []).map(async (prospect: any) => {
+        const rows = (results.results || []) as any[];
+        const hasMore = rows.length > limit;
+        const pageRows = hasMore ? rows.slice(0, limit) : rows;
+        const prospects = await Promise.all(pageRows.map(async (prospect: any) => {
           const wasPaused = String(prospect.outcome || "").toLowerCase() === "radar_outreach_paused";
           const suppression = wasPaused
             ? await checkSuppressedComposite(env.RADAR_DB, prospect.email, prospect.website, prospect.phone, prospect.name, prospect.city, prospect.tenant_id || "founder")
@@ -1334,7 +1384,13 @@ export default {
             contactability: resolveProspectContactability(prospect)
           };
         }));
-        return Response.json(prospects, { headers: corsHeaders });
+        const last = pageRows[pageRows.length - 1];
+        return Response.json({
+          prospects,
+          next_cursor: hasMore && last ? encodeProspectsCursor({ created_at: String(last.created_at || ""), id: String(last.id || "") }) : null,
+          has_more: hasMore,
+          page_size: prospects.length
+        }, { headers: corsHeaders });
       }
 
       // 8b. Opportunity Intelligence Endpoints

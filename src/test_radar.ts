@@ -1,7 +1,7 @@
 declare const process: any;
 import { resolveGithubActionsToken } from './research/githubActions';
 
-import worker, { getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey, notifyOnce, isVerifiedDeliverableEmail, evaluateFounderOutreachEligibility, buildTechnicalAuditSnapshot, isEmailValidatedForOutreach, isCompletePostalAddress, sendTelegramWithRetry, extractEmailAddress, evaluateResearchEvidenceQuality, classifyReplyText, getTelegramApprovalFeedback, getManualSendPreflightError, hasAIGenerationProvider, WORKERS_AI_FALLBACK_MODEL, extractWorkersAiText, resolveProspectContactability, buildProspectEvidenceContext, buildScheduledRunId, getCurrentDaySenderCount, normalizeWhatsAppPhone, extractPhoneDigits, hasUsableContactChannel, hasEnrichableContactData, buildWhatsAppClickToChatUrl, buildWhatsAppOutreachBody, shouldUseManualWhatsAppFallback, isDiscoveryInfrastructureFailure, resolveDiscoveryCompletionStatus, hasConfirmedWhatsAppOptIn, isValidWhatsAppConsentEvidenceRef, isOutreachPauseBlocking, isFounderManualDispatch, normalizeGeneratedMessage, selectHunterDomainEmail, recordRunFinalization, resolveGeoapifyProfile, ensureLegalFooter } from './worker';
+import worker, { resolveProspectsPageLimit, decodeProspectsCursor, encodeProspectsCursor, getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey, notifyOnce, isVerifiedDeliverableEmail, evaluateFounderOutreachEligibility, buildTechnicalAuditSnapshot, isEmailValidatedForOutreach, isCompletePostalAddress, sendTelegramWithRetry, extractEmailAddress, evaluateResearchEvidenceQuality, classifyReplyText, getTelegramApprovalFeedback, getManualSendPreflightError, hasAIGenerationProvider, WORKERS_AI_FALLBACK_MODEL, extractWorkersAiText, resolveProspectContactability, buildProspectEvidenceContext, buildScheduledRunId, getCurrentDaySenderCount, normalizeWhatsAppPhone, extractPhoneDigits, hasUsableContactChannel, hasEnrichableContactData, buildWhatsAppClickToChatUrl, buildWhatsAppOutreachBody, shouldUseManualWhatsAppFallback, isDiscoveryInfrastructureFailure, resolveDiscoveryCompletionStatus, hasConfirmedWhatsAppOptIn, isValidWhatsAppConsentEvidenceRef, isOutreachPauseBlocking, isFounderManualDispatch, normalizeGeneratedMessage, selectHunterDomainEmail, recordRunFinalization, resolveGeoapifyProfile, ensureLegalFooter } from './worker';
 import { DEFAULT_FOUNDER_MISSION, MissionConfig } from './worker';
 import { buildResendIdempotencyKey, buildBrandedEmailHtml, resolveBveltSender, inspectOutboundEmailAuth, normalizeOutreachBody, buildListUnsubscribeHeader, dispatchEmail } from './emailDispatcher';
 import { fetchPermitContractors } from './permitSources';
@@ -3362,6 +3362,24 @@ tests.push({
     assert(electrical.allowed, "Matching electrical contractor evidence must remain eligible");
     const tenantBuyer = evaluateResearchEvidenceQuality("Sun Garden Chinese", { page_title: "Sun Garden Chinese Restaurant" }, "landscaping", "tenant");
     assert(tenantBuyer.allowed, "Founder category veto must not leak into Tenant mode");
+  }
+});
+
+tests.push({
+  name: "Prospect pagination clamps limits and validates stable keyset cursors",
+  run: () => {
+    assert(resolveProspectsPageLimit(null) === 100, "Missing limit must use the safe default");
+    assert(resolveProspectsPageLimit("1000") === 100, "Oversized requests must be clamped to 100 rows");
+    assert(resolveProspectsPageLimit("25") === 25, "Valid page size must be preserved");
+    assert(resolveProspectsPageLimit("0") === 100, "Zero must fall back to the safe default");
+    assert(resolveProspectsPageLimit("-4") === 100, "Negative limits must fall back to the safe default");
+    assert(resolveProspectsPageLimit("not-a-number") === 100, "Invalid limits must fall back to the safe default");
+    const original = { created_at: "2026-11-25T12:30:00.000Z", id: "prospect-100" };
+    const encoded = encodeProspectsCursor(original);
+    const decoded = decodeProspectsCursor(encoded);
+    assert(decoded?.created_at === original.created_at && decoded?.id === original.id, "Cursor must round-trip both stable ordering fields");
+    assert(decodeProspectsCursor("not-valid-json") === null, "Malformed cursor must be rejected");
+    assert(decodeProspectsCursor(encodeURIComponent(JSON.stringify({ created_at: "", id: "p1" }))) === null, "Cursor without a timestamp must be rejected");
   }
 });
 
