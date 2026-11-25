@@ -1357,7 +1357,7 @@ export default {
           "dispatch_status", "dispatch_error", "pagespeed_score", "dns_has_dmarc", "weather_context",
           "tenant_outcome", "won_value_usd"
         ].join(", ");
-        let queryStr = `SELECT ${projection} FROM prospects WHERE COALESCE(NULLIF(TRIM(tenant_id), ''), 'founder') = ?`;
+        let queryStr = `SELECT ${projection} FROM prospects WHERE COALESCE(tenant_id, 'founder') = ?`;
         const params: any[] = [tenantId];
         if (status) {
           queryStr += " AND status = ?";
