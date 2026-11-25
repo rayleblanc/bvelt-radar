@@ -466,3 +466,9 @@ Canonical source: LocalFlowPro `docs/MASTER_PLAN_BVELT_ECOSYSTEM_2026-12-10.md`,
 - Migration 0033 not applied; existing query plan uses `idx_prospects_identity_scoped` and temp B-tree for sort. Keep migration pending until allowed D1 gate.
 - Authenticated Founder/Tenant pagination and Attack Kit POST smoke tests are still pending; don't claim them passed.
 - Docs-only commit `d99f954557de80fd050a167d45097f4eaed3dfc7` generated queued build `1fb0967e-5eff-4f4c-b302-8d767f808c56` at 17:05Z; re-check completion.
+
+
+### Founder outreach automation and Sidecar bindings — 25-11-2026 18:05 UTC
+- Production Worker binding `FOUNDER_AUTO_OUTREACH=false`; queue auto-email remains off and falls back to interactive Telegram approval. Keep false. `FOUNDER_AUTO_MAX_PER_DAY=8`, `FOUNDER_AUTO_MIN_SCORE=70`, `FOUNDER_WA_MAX_PER_DAY=5`.
+- `GITHUB_ACTIONS_TOKEN` exists as plaintext binding; `GITHUB_ACTIONS_TOKEN_SECRET` is absent. Sidecar dispatch requires the encrypted secret and does not fall back to plaintext. Owner must rotate/revoke legacy token and remove plaintext binding; never use plaintext token.
+- `RADAR_GLOBAL_PAUSE` unset; this does not change explicit auto-outreach false. Do not enable automatic sends. Tenant/Founder dispatch remains human-approved.
