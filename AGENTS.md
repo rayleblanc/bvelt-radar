@@ -456,3 +456,13 @@ Canonical source: LocalFlowPro `docs/MASTER_PLAN_BVELT_ECOSYSTEM_2026-12-10.md`,
 - One inspected transient maps to Resend `email.bounced` with `bounce.type=Transient`; event name alone is insufficient. Four delayed/transient records still need exact message ID/subtype/order reconciliation.
 - 18 Founder prospects status=sent match latest D1 dispatch delivered; 10 match dispatched. Four hold records have D1 delayed but provider latest status bounced; preserve UNKNOWN until event-level evidence.
 - No outbound sends, webhook replay, suppression changes, status rewrites or production D1 writes. Continue reconciliation only; do not increase volume.
+
+
+### Production build/deploy read-back — 25-11-2026 17:25 UTC
+- Workers Builds auto-build on main is enabled. Both CPU fixes deployed successfully:
+  - Pagination main commit `5be3c20a3e62fd48906c2a0b0b47d410ac4e6030`: build `4d5d5546-fe40-4817-aa97-225fce5f2fdd` success; version `35b5df9a-61b6-4ede-a067-9d9d2b60badb`, 100%, 16:52:19Z.
+  - Attack Kit main commit `b8362a6a60b0b303dad29ec49bde92e3c71d545a`: build `41daeb19-4801-4be3-a9c4-a8aeed3b87c8` success; version `cc4f52db-0400-4de3-a04a-2d1987fcf37a`, 100%, 16:55:37Z.
+- Post-deploy 60m telemetry: zero errors, one Abstract API HTTP 401 warning, no CPU-limit event observed.
+- Migration 0033 not applied; existing query plan uses `idx_prospects_identity_scoped` and temp B-tree for sort. Keep migration pending until allowed D1 gate.
+- Authenticated Founder/Tenant pagination and Attack Kit POST smoke tests are still pending; don't claim them passed.
+- Docs-only commit `d99f954557de80fd050a167d45097f4eaed3dfc7` generated queued build `1fb0967e-5eff-4f4c-b302-8d767f808c56` at 17:05Z; re-check completion.
