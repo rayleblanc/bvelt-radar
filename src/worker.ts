@@ -4554,7 +4554,15 @@ export function getTelegramApprovalFeedback(result: any): { title: string; detai
 
 export function getManualSendPreflightError(prospect: any): string | null {
   const parsed = sanitizeEmail(prospect?.email);
-  return parsed.valid && parsed.email ? null : "valid_email_required";
+  if (!parsed.valid || !parsed.email) return "valid_email_required";
+
+  // Owner approval is not a substitute for a documented lawful basis.
+  // Manual and automated sends share the same jurisdiction gate.
+  const policy = resolveFounderEmailPolicy(prospect);
+  if (policy.status !== "SEND_ALLOWED") {
+    return `email_policy_${String(policy.status || "unknown").toLowerCase()}`;
+  }
+  return null;
 }
 
 export function hasAIGenerationProvider(env: any): boolean {
