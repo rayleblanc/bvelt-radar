@@ -11067,7 +11067,29 @@ export function buildOutreachIdempotencyKey(tenantId: string, prospectId: string
   return `idempotency:${tenantId}:${prospectId}:${sequenceId}:touch:${touch}`;
 }
 
-export async function generateAICopy(
+export export function resolveAICopyLanguage(
+  missionLanguages?: string[] | null,
+  tenantLanguagesJson?: string | null,
+  founderLanguages?: string | null
+): string {
+  const missionLanguage = Array.isArray(missionLanguages)
+    ? missionLanguages.find(value => typeof value === "string" && value.trim())
+    : null;
+  if (missionLanguage) return missionLanguage.trim();
+  if (tenantLanguagesJson) {
+    try {
+      const parsed = JSON.parse(tenantLanguagesJson);
+      if (Array.isArray(parsed)) {
+        const tenantLanguage = parsed.find(value => typeof value === "string" && value.trim());
+        if (tenantLanguage) return tenantLanguage.trim();
+      }
+    } catch { /* use founder/default language */ }
+  }
+  const founderLanguage = String(founderLanguages || "").split(";").map(value => value.trim()).filter(Boolean)[0];
+  return founderLanguage || "en";
+}
+
+async function generateAICopy(
   prospect: any, 
   variantId: string, 
   env: Env,
@@ -11095,16 +11117,11 @@ export async function generateAICopy(
   // The message path needs only a language, not a full discovery mission. Avoid
   // invoking getPriorityTargets here: it expands ICP, reads geo targets and seeds
   // daily_missions, all unrelated work for generating one reviewed draft.
-  let language = (missionConfig?.languages && missionConfig.languages[0]) ||
-    String(env.FOUNDING_LANGUAGES || "").split(";").map(value => value.trim()).filter(Boolean)[0] || "en";
-  if (tenantInfo && !missionConfig?.languages?.length) {
-    try {
-      const tenantLanguages = JSON.parse(tenantInfo.languages_json || "[]");
-      if (Array.isArray(tenantLanguages) && typeof tenantLanguages[0] === "string" && tenantLanguages[0].trim()) {
-        language = tenantLanguages[0].trim();
-      }
-    } catch { /* retain safe English fallback */ }
-  }
+  const language = resolveAICopyLanguage(
+    missionConfig?.languages,
+    tenantInfo?.languages_json || null,
+    env.FOUNDING_LANGUAGES || null
+  );
   const isSpanish = language.toLowerCase().startsWith("es");
   const founderLine = (!prospect.tenant_id || prospect.tenant_id === "founder" || prospect.mode === "founder")
     ? pickFounderVoiceLine(String(prospect.id || prospect.name || "x"), outreachTouch, language)
