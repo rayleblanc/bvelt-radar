@@ -13,7 +13,7 @@
 
 import { buildRadarEvidenceProvenance } from './evidenceProvenance.js';
 import { validateDiscoveryPayload } from './discoveryPayload.js';
-import { normalizeResendDeliveryEvent, resolveAmbiguousResendBounce, shouldBlockBulkResendBounceRetry, verifySvixWebhookSignature } from './resendWebhookSecurity.js';
+import { normalizeResendDeliveryEvent, resolveAmbiguousResendBounce, shouldApplyResendProspectEvent, shouldBlockBulkResendBounceRetry, verifySvixWebhookSignature } from './resendWebhookSecurity.js';
 import { TENANT_TARGET_MAP, resolveTenantBuyerSegmentsForProfile } from "./tenantBuyerSegments.js";
 import { validateTenantProfileContract } from './tenantProfileContract.js';
 import { getAlerts, tradeForEvent, eventAppliesToTrade, WeatherAlert } from './weatherSignals';
@@ -2039,10 +2039,12 @@ export default {
             email,
             event_type: eventType,
             content,
-            provider_event_id: providerEventId
+            provider_event_id: providerEventId,
+            provider_source: path === "/webhook/resend" ? "resend" : null,
+            provider_message_id: path === "/webhook/resend" && eventType !== "replied" ? providerMessageId : null
           }, env);
 
-          if (providerMessageId && eventType !== "replied") {
+          if (providerMessageId && eventType !== "replied" && (eventResult as any)?.success !== false && (eventResult as any)?.applied !== false) {
             const logStatus = eventType === "delivery_delayed" ? "delayed" : eventType;
             try {
               await env.RADAR_DB.prepare("UPDATE email_dispatch_logs SET status = ? WHERE message_id = ?")
@@ -8213,19 +8215,67 @@ export async function handleProspectEvent(
     event_type: string;
     content?: string | null;
     provider_event_id?: string | null;
+    provider_source?: "resend" | null;
+    provider_message_id?: string | null;
   },
   env: Env
-): Promise<{ success: boolean; prospect_id: string; classification: ReplyClassificationType; auto_stopped: boolean; message: string }> {
+): Promise<{ success: boolean; prospect_id: string; classification: ReplyClassificationType; auto_stopped: boolean; message: string; applied?: boolean }> {
   const db = env.RADAR_DB;
   const timestamp = new Date().toISOString();
   const replyAt = params.content && String(params.content).trim() ? timestamp : null;
 
   let prospect: any = null;
-  if (params.prospect_id) {
-    prospect = await db.prepare("SELECT * FROM prospects WHERE id = ?").bind(params.prospect_id).first();
-  }
-  if (!prospect && params.email) {
-    prospect = await db.prepare("SELECT * FROM prospects WHERE email = ?").bind(params.email.toLowerCase().trim()).first();
+  if (params.provider_source === "resend") {
+    let dispatchRows: any[] = [];
+    const normalizedEmail = String(params.email || "").trim().toLowerCase();
+    if (params.provider_message_id) {
+      const mapped = await db.prepare(`
+        SELECT prospect_id, tenant_id, recipient_email
+        FROM email_dispatch_logs
+        WHERE message_id = ? AND lower(provider) = 'resend'
+        GROUP BY prospect_id, tenant_id, recipient_email
+        LIMIT 2
+      `).bind(params.provider_message_id).all();
+      dispatchRows = (mapped as any)?.results || [];
+    } else if (params.event_type === "replied" && normalizedEmail) {
+      const mapped = await db.prepare(`
+        SELECT prospect_id, tenant_id, recipient_email
+        FROM email_dispatch_logs
+        WHERE lower(recipient_email) = ? AND lower(provider) = 'resend'
+        GROUP BY prospect_id, tenant_id, recipient_email
+        LIMIT 2
+      `).bind(normalizedEmail).all();
+      dispatchRows = (mapped as any)?.results || [];
+    }
+    const uniqueTargets = new Map<string, any>();
+    for (const row of dispatchRows) uniqueTargets.set(`${row.tenant_id || "founder"}:${row.prospect_id}`, row);
+    if (uniqueTargets.size !== 1) {
+      return {
+        success: true,
+        prospect_id: params.prospect_id || "unmatched",
+        classification: "unknown",
+        auto_stopped: true,
+        message: uniqueTargets.size ? "Ambiguous provider target ignored; no tenant state changed." : "Provider event has no matching dispatch receipt; ignored.",
+        applied: false
+      };
+    }
+    const target = [...uniqueTargets.values()][0];
+    if (params.prospect_id && String(params.prospect_id) !== String(target.prospect_id)) {
+      return { success: true, prospect_id: String(target.prospect_id), classification: "unknown", auto_stopped: true, message: "Provider entity reference mismatch; ignored.", applied: false };
+    }
+    if (normalizedEmail && String(target.recipient_email || "").trim().toLowerCase() !== normalizedEmail) {
+      return { success: true, prospect_id: String(target.prospect_id), classification: "unknown", auto_stopped: true, message: "Provider recipient does not match dispatch receipt; ignored.", applied: false };
+    }
+    prospect = await db.prepare(
+      "SELECT * FROM prospects WHERE id = ? AND COALESCE(tenant_id,'founder') = ?"
+    ).bind(String(target.prospect_id), String(target.tenant_id || "founder")).first();
+  } else {
+    if (params.prospect_id) {
+      prospect = await db.prepare("SELECT * FROM prospects WHERE id = ?").bind(params.prospect_id).first();
+    }
+    if (!prospect && params.email) {
+      prospect = await db.prepare("SELECT * FROM prospects WHERE email = ?").bind(params.email.toLowerCase().trim()).first();
+    }
   }
 
   if (!prospect) {
@@ -8234,7 +8284,8 @@ export async function handleProspectEvent(
       prospect_id: params.prospect_id || "unknown",
       classification: "unknown",
       auto_stopped: false,
-      message: "Prospect not found for event."
+      message: "Prospect not found for event.",
+      applied: false
     };
   }
 
@@ -8253,7 +8304,8 @@ export async function handleProspectEvent(
         prospect_id: prospect.id,
         classification,
         auto_stopped: true,
-        message: "Duplicate provider event ignored."
+        message: "Duplicate provider event ignored.",
+        applied: false
       };
     }
   } catch (e) {
@@ -8267,6 +8319,17 @@ export async function handleProspectEvent(
         message: "Provider event persistence failed; side effects skipped."
       };
     }
+  }
+
+  if (!shouldApplyResendProspectEvent(prospect.status, prospect.outcome, classification)) {
+    return {
+      success: true,
+      prospect_id: prospect.id,
+      classification,
+      auto_stopped: true,
+      message: "Out-of-order provider event ignored; no state regression.",
+      applied: false
+    };
   }
 
   let autoStopped = false;
@@ -8496,7 +8559,8 @@ export async function handleProspectEvent(
     auto_stopped: autoStopped,
     message: autoStopped
       ? `Event '${classification}' processed. Automation STOPPED for prospect ${prospect.name}. Status updated to ${newStatus}.`
-      : `Event '${classification}' logged. Prospect status set to ${newStatus}.`
+      : `Event '${classification}' logged. Prospect status set to ${newStatus}.`,
+    applied: true
   };
 }
 
