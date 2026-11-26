@@ -1,7 +1,7 @@
 import test from "node:test";
 import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
-import { normalizeResendDeliveryEvent, resolveAmbiguousResendBounce, shouldBlockBulkResendBounceRetry, verifySvixWebhookSignature } from "../src/resendWebhookSecurity";
+import { normalizeResendDeliveryEvent, resolveAmbiguousResendBounce, shouldApplyResendProspectEvent, shouldBlockBulkResendBounceRetry, verifySvixWebhookSignature } from "../src/resendWebhookSecurity";
 
 function toBase64(bytes: Uint8Array): string {
   let binary = "";
@@ -94,4 +94,19 @@ test("send authorization remains behind explicit owner confirmation", () => {
   const authorization = handler.indexOf('authorization: "explicit_user_action"');
   assert.ok(ownerGuard >= 0, "manual send must require owner confirmation");
   assert.ok(authorization > ownerGuard, "authorization event must follow the owner confirmation guard");
+});
+
+
+test("Resend delivery callbacks cannot regress later delivery or owner states", () => {
+  assert.equal(shouldApplyResendProspectEvent("opened", "opened", "delivered"), false);
+  assert.equal(shouldApplyResendProspectEvent("clicked", "clicked", "opened"), false);
+  assert.equal(shouldApplyResendProspectEvent("delivered", "delivered", "delivery_delayed"), false);
+  assert.equal(shouldApplyResendProspectEvent("hold", "delivery_delayed", "delivered"), true);
+  assert.equal(shouldApplyResendProspectEvent("sent", "sent", "delivered"), true);
+  assert.equal(shouldApplyResendProspectEvent("delivered", "delivered", "opened"), true);
+  assert.equal(shouldApplyResendProspectEvent("human_review", "positive", "delivered"), false);
+  assert.equal(shouldApplyResendProspectEvent("bounced", "bounced", "delivered"), false);
+  assert.equal(shouldApplyResendProspectEvent("suppressed", "complained", "opened"), false);
+  assert.equal(shouldApplyResendProspectEvent("delivered", "delivered", "complained"), true);
+  assert.equal(shouldApplyResendProspectEvent("delivered", "delivered", "unsubscribe"), true);
 });
