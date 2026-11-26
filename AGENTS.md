@@ -62,7 +62,7 @@ El ranking debe explicar servicio/relación, evidencia, momento, incertidumbre, 
 - Founder auto-outreach permanece false salvo cambio explícito y policy aprobada.
 - No outreach Tenant/Founder sin lawful basis/jurisdiction, consent cuando aplique, opt-out/suppression, sender readiness, quiet hours IANA, frequency caps, budget, cooldown, idempotency y owner approval cuando corresponda.
 - Owner approval no sustituye base legal ni consentimiento.
-- Email webhook: Svix raw-body signature, timestamp/replay protection, provider event ID/message ID, idempotent persistence y monotonic state transitions.
+- Email webhook: Svix raw-body signature, timestamp/replay protection e idempotencia por provider event ID. Los eventos de entrega deben mapearse al recibo exacto de email_dispatch_logs (provider + message_id + tenant + recipient); inbound replies solo se asocian si el email del remitente mapea inequívocamente a un dispatch histórico. Nunca confiar solo en prospect_id/email del payload. Ignorar targets ausentes/ambiguos/mismatch sin mutación. Transiciones monotónicas: eventos débiles tardíos no degradan delivered/opened/clicked ni respuestas humanas; bounce/complaint/suppression/unsubscribe prevalecen como safety states. No actualizar dispatch log si el evento fue duplicado, rechazado o no aplicado.
 - Delayed, delivered, permanent bounce, transient bounce, failed, suppressed, complaint y negative reply son eventos distintos.
 - Founder manual puede omitir solo automated daily quota; nunca reputation circuit breaker, suppression, cooldown, idempotency ni per-tenant limits.
 - WhatsApp/mailto/SMS link abierto es HANDOFF_REQUESTED, no SENT/DELIVERED.
