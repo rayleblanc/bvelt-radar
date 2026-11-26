@@ -74,3 +74,51 @@ export function resolveAmbiguousResendBounce(hasTransientEvidence: boolean): {
 export function shouldBlockBulkResendBounceRetry(requested: unknown): boolean {
   return String(requested || "").trim().toLowerCase() === "true";
 }
+
+
+/**
+ * Provider callbacks may be delayed or arrive out of order. Never let a weaker
+ * delivery event regress a later delivery state or undo a safety/owner decision.
+ */
+export function shouldApplyResendProspectEvent(
+  currentStatus: unknown,
+  currentOutcome: unknown,
+  incomingClassification: unknown
+): boolean {
+  const status = String(currentStatus || "").trim().toLowerCase();
+  const outcome = String(currentOutcome || "").trim().toLowerCase();
+  const incoming = String(incomingClassification || "").trim().toLowerCase();
+
+  const safetyEvents = new Set(["bounced", "complained", "unsubscribe", "suppressed", "negative"]);
+  if (safetyEvents.has(incoming)) return true;
+
+  const protectedStates = new Set([
+    "bounced", "complained", "suppressed", "unsubscribed",
+    "discarded", "disqualified", "blocked"
+  ]);
+  const protectedOutcomes = new Set([
+    "bounced", "complained", "unsubscribe", "negative", "provider_suppressed"
+  ]);
+  if (protectedStates.has(status) || protectedOutcomes.has(outcome)) return false;
+
+  const deliveryRank: Record<string, number> = {
+    sent: 1,
+    dispatched: 1,
+    delivery_delayed: 1.5,
+    delayed: 1.5,
+    failed: 1.5,
+    provider_error: 1.5,
+    delivered: 2,
+    opened: 3,
+    clicked: 4
+  };
+  const incomingRank = deliveryRank[incoming];
+  if (incomingRank !== undefined) {
+    if (status === "human_review" || ["positive", "question", "replied"].includes(outcome)) return false;
+    const currentRank = deliveryRank[status] ?? deliveryRank[outcome] ?? 0;
+    return incomingRank > currentRank;
+  }
+
+  // Human replies and explicit owner decisions supersede delivery progress.
+  return true;
+}
