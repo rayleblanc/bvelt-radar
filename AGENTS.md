@@ -9,6 +9,8 @@
 
 Radar observa y descubre empresas, compradores, señales y oportunidades; conserva evidencia original y la entrega al sistema BEM/Brain de Bvelt por contratos autenticados. No es la memoria canónica del negocio ni un motor de outreach sin controles.
 
+> **Historial preservado:** los checkpoints operativos de la versión anterior se conservan en `docs/archive/AGENTS_RADAR_HISTORY_2026-11-25.md`. Es un snapshot histórico, no un roadmap ni un estado vivo; las reglas activas están en este archivo y en el plan maestro.
+
 ## 2. Prioridad estratégica: Tenant primero
 
 **Tenant Radar es una capacidad principal de Bvelt y una prioridad de producto.** Debe ayudar a cada negocio autenticado a encontrar compradores directos, segmentos, socios de referencia, prescriptores, property managers, negocios complementarios y otras oportunidades justificadas por su actividad, servicios y territorio. No reducir Tenant a un buscador genérico de empresas.
