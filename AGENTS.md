@@ -3,7 +3,7 @@
 ## 1. Fuente canónica y responsabilidad
 
 - **Plan único del ecosistema:** https://github.com/rayleblanc/LocalFlowPro/blob/main/docs/MASTER_PLAN_BVELT_ECOSYSTEM_2026-12-10.md
-- Leer primero el bloque “Dirección estratégica vigente” y el último checkpoint fechado. Este archivo gobierna las reglas técnicas y operativas de Radar; no mantiene un roadmap alternativo.
+- Leer primero la sección 0 del plan maestro, en especial prioridades estratégicas y orden de ejecución, y el último checkpoint fechado. Este archivo gobierna las reglas técnicas y operativas de Radar; no mantiene un roadmap alternativo.
 - El estado de workers, D1, branches, CI, providers, suppressions y deployments cambia. Reconsultar la evidencia actual antes de modificar o declarar cualquier estado. No copiar snapshots históricos como si fueran actuales.
 - Radar es un servicio del ecosistema Bvelt. Mantener el scope en rayleblanc/bvelt-radar y rayleblanc/LocalFlowPro. No incorporar remesas/remittance ni proyectos ajenos.
 
@@ -137,3 +137,20 @@ Antes de cada cambio:
 9. Actualizar el plan canónico con SHA, checks, logs, deployment y limitaciones verificadas.
 
 **Regla final:** construir Radar Tenant como inteligencia comercial recurrente, contextual, verificable y útil para el negocio; mantener Founder como herramienta interna. Más prospects no equivalen a más valor. Priorizar fit, evidencia, oportunidad accionable, resultados medibles, coste y confianza.
+
+
+## 11. Estado operativo y restricciones de despliegue — 25-11-2026
+
+- La dirección canónica del ecosistema quedó reordenada en LocalFlowPro, commit c553adb7e59e9e850032c7803484e16b91aa898e: Bvelt comercial/operativo, BEM + Brain, Radar Tenant y Founder como herramienta interna subordinada. No mantener un plan paralelo aquí.
+- Radar main al inicio de este checkpoint: 621048e91f92d8d2b8f513015fd3b2a18d8458c9; no había PR abierto. PR #85 (jurisdiction gate) y #86 (acknowledgement Tenant) están merged. CI #897/#898 pasó TypeScript/build, npm audit bloqueante sin vulnerabilidades, suites Radar (95/96 tests custom), Node (50/50) y Sidecar (21/21). El build/deploy documental no sustituye estas pruebas.
+- Última versión Worker previamente verificada: ac637dec-74bc-44e9-bfe5-02034093d4cb al 100%, deployment 7b75ccb5-8c73-4ec1-8877-b01e7a131a99. Este estado es anterior a la nueva actualización de AGENTS; reconsultar Cloudflare después del commit. Una build documental no aporta cobertura adicional de tests.
+- La configuración Workers Builds de Radar tiene path_excludes vacío, build_command vacío y deploy command npx wrangler deploy; un cambio en este AGENTS.md puede activar un deploy automático. Esperar a que la cola termine y verificar build/version/traffic antes de nuevos commits Radar. No modificar la configuración de builds como parte de esta tarea.
+- Producción no demuestra Tenant listo: D1 registraba dos scopes (tenant_custom_01 y bvelt_Km9lvypo64VLDyCAbFRPvqRHJzf1) sin profile_id, business_id, snapshot o verification; 47 prospects legacy siguen unlinked. source_evidence tenía 63 Founder / 0 Tenant; tenant_observation_events 0. BEM D1 tenía 789 market observations, 14 in-app events y 0 entities/evidence/outcomes/Tenant events/learning outbox. No rekey, merge ni ingesta hasta probar owner/profile/business binding.
+- La respuesta Tenant {ok:true} explícita está integrada por PR #86 y evita falsos receipts ante HTTP 2xx sin aceptación de aplicación. No resuelve la identidad histórica ni crea evidencia/outcomes faltantes.
+- Cuatro dispatch D1 delayed permanecen sin reconciliar por subtype/orden exacto del webhook; mantener hold. No reenviar, reactivar recipients ni alterar suppression. Founder auto-outreach sigue false.
+- Envío de correo permanece sujeto a SEND_ALLOWED, lawful basis por jurisdicción, sender/footer conforme, suppression, opt-out, hard/temporary bounce handling, límites e idempotencia. Owner approval no sustituye lawful basis. No enviar durante auditorías.
+- Sidecar/Scrapling continúa opcional y degradado: GITHUB_ACTIONS_TOKEN_SECRET falta y GITHUB_ACTIONS_TOKEN es binding plaintext vacío. No usar ni restaurar el plaintext. La ausencia del secreto no puede detener core discovery.
+- D1 migration ledger se observó hasta 0032; 0033 no aplicada. No ejecutar migrations apply a ciegas. No hay queue backlog activo en el último read; el único discovery failure es histórico y no se replaya sin reconciliación.
+- La rama ci/report-npm-audit-20261123 debilita el gate al introducir continue-on-error; no mergear. Mantener npm audit --audit-level=moderate bloqueante.
+- Las ocho advertencias Radar del último periodo consultado fueron revisadas (Abstract 401, BizData timeout/502 y Geoapify timeout). No convertir errores de proveedor en cero resultados; reconsultar logs frescos para cualquier trabajo nuevo.
+- La nueva escritura de AGENTS puede disparar una build automática por la configuración actual. Verificar el resultado exacto, pero no interpretar un deploy de documentación como tests de producto o prueba del Tenant end-to-end.
