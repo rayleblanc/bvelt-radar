@@ -98,3 +98,14 @@ Cuando el propietario diga «continúa con el plan»:
 
 ## 11. Scope freeze
 No añadir ideas nuevas al plan activo durante el programa salvo vulnerabilidad/incidente real, requisito legal/proveedor o bloqueo directo demostrado de cliente. Las mejoras nuevas aprobadas ya están distribuidas en las fases 1–9 del plan único.
+
+
+## 12. Cierre finito y no-regresión
+- El plan maestro de LocalFlowPro es la única fuente de fases activas. Este archivo no debe convertirse en roadmap paralelo.
+- Ejecutar solo la primera fase incompleta. Al cerrarla, eliminarla de la lista activa del plan y dejar un registro histórico conciso; no conservar tareas resueltas como pendientes ni reabrir por mejoras opcionales.
+- Las reglas permanentes descubiertas durante una fase se conservan aquí como invariantes, no como tareas repetidas.
+- Reabrir una fase cerrada únicamente ante regresión demostrada, incidente real, obligación legal/proveedor o bloqueo directo de cliente con evidencia. Documentar el motivo y alcance exacto.
+- Después de cada cambio significativo, actualizar el checkpoint del plan y este AGENTS cuando cambie una regla operativa; releer los archivos y comprobar SHA/main, PRs y Cloudflare Builds/deployments disparados por documentación.
+- No declarar Tenant completo por build, D1 prospects ni HTTP 2xx: exige el ciclo autenticado hasta receipt/read-back, UI, acción elegible, outcome y aislamiento probado.
+- Radar Tenant es capacidad primaria pagada; Founder es reemplazable. No permitir que trabajo Founder consuma el presupuesto o retrase los gates de Tenant.
+- Mantener adquisición Founder sin outreach automático por defecto y sin exceder consentimiento, suppression, reputación ni jurisdicción. Los objetivos comerciales y límites de marketing están definidos en el plan maestro; no inventar canales ni presupuesto.
