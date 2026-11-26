@@ -81,7 +81,7 @@ El ranking debe explicar servicio/relación, evidencia, momento, incertidumbre, 
 Cuando el propietario diga «continúa con el plan»:
 1. Leer este archivo y el checkpoint del plan único.
 2. Revalidar main SHA, branches, PRs, GitHub workflows/logs, Cloudflare build/deploy/logs y D1 schema/ledger de solo lectura.
-3. Ejecutar la primera fase incompleta hasta cerrarla, sin pedir confirmaciones rutinarias.
+3. Ejecutar la primera fase incompleta hasta cerrarla, sin pedir confirmaciones rutinarias. La falta de clientes no bloquea fases técnicas: usar tenants/fixtures sintéticos y sandbox; nunca usar prospects reales para smoke ni fabricar outcomes.
 4. Hacer inspección dirigida una vez; implementar, testear, corregir y desplegar si el plan/hold lo permite. No quedarse en auditorías sucesivas.
 5. OWNER_ACTION/BLOCKED_EXTERNAL no detiene trabajo independiente. No ejecutar acciones externas sensibles sin autorización.
 6. Integrar en main; PR temporal solo si branch protection lo exige y debe fusionarse/cerrarse durante la misma fase. Cero PR propios abiertos al final.
