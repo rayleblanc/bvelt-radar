@@ -106,11 +106,11 @@ export function shouldApplyResendProspectEvent(
     dispatched: 1,
     delivery_delayed: 1.5,
     delayed: 1.5,
-    failed: 1.5,
-    provider_error: 1.5,
-    delivered: 2,
-    opened: 3,
-    clicked: 4
+    failed: 2,
+    provider_error: 2,
+    delivered: 3,
+    opened: 4,
+    clicked: 5
   };
   const incomingRank = deliveryRank[incoming];
   if (incomingRank !== undefined) {
