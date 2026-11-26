@@ -110,3 +110,17 @@ test("Resend delivery callbacks cannot regress later delivery or owner states", 
   assert.equal(shouldApplyResendProspectEvent("delivered", "delivered", "complained"), true);
   assert.equal(shouldApplyResendProspectEvent("delivered", "delivered", "unsubscribe"), true);
 });
+
+
+test("Resend webhook resolves targets only through tenant-scoped dispatch receipts", () => {
+  const workerSource = readFileSync(new URL("../src/worker.ts", import.meta.url), "utf8");
+  const start = workerSource.indexOf("export async function handleProspectEvent");
+  const end = workerSource.indexOf("\nasync function handleReplyEventJob", start);
+  assert.ok(start >= 0 && end > start, "provider event handler must exist");
+  const handler = workerSource.slice(start, end);
+  assert.match(handler, /params\.provider_source === "resend"/);
+  assert.match(handler, /WHERE message_id = \? AND lower\(provider\) = 'resend'/);
+  assert.match(handler, /COALESCE\(tenant_id,'founder'\) = \?/);
+  assert.match(handler, /Ambiguous provider target ignored/);
+  assert.match(handler, /Provider recipient does not match dispatch receipt/);
+});
