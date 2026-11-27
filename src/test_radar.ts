@@ -1,6 +1,6 @@
 declare const process: any;
 
-import worker, { resolveAICopyLanguage, resolveProspectsPageLimit, decodeProspectsCursor, encodeProspectsCursor, getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey, notifyOnce, isVerifiedDeliverableEmail, evaluateFounderOutreachEligibility, buildTechnicalAuditSnapshot, isEmailValidatedForOutreach, isCompletePostalAddress, sendTelegramWithRetry, extractEmailAddress, evaluateResearchEvidenceQuality, classifyReplyText, getTelegramApprovalFeedback, getManualSendPreflightError, hasAIGenerationProvider, WORKERS_AI_FALLBACK_MODEL, extractWorkersAiText, resolveProspectContactability, buildProspectEvidenceContext, buildScheduledRunId, getCurrentDaySenderCount, normalizeWhatsAppPhone, extractPhoneDigits, hasUsableContactChannel, hasEnrichableContactData, buildWhatsAppClickToChatUrl, buildWhatsAppOutreachBody, shouldUseManualWhatsAppFallback, isDiscoveryInfrastructureFailure, resolveDiscoveryCompletionStatus, hasConfirmedWhatsAppOptIn, isValidWhatsAppConsentEvidenceRef, isOutreachPauseBlocking, isFounderManualDispatch, normalizeGeneratedMessage, selectHunterDomainEmail, recordRunFinalization, resolveGeoapifyProfile, ensureLegalFooter } from './worker';
+import worker, { resolveAICopyLanguage, resolveProspectsPageLimit, decodeProspectsCursor, encodeProspectsCursor, getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey, notifyOnce, isVerifiedDeliverableEmail, evaluateFounderOutreachEligibility, buildTechnicalAuditSnapshot, isEmailValidatedForOutreach, isCompletePostalAddress, sendTelegramWithRetry, extractEmailAddress, evaluateResearchEvidenceQuality, classifyReplyText, getTelegramApprovalFeedback, getManualSendPreflightError, hasAIGenerationProvider, WORKERS_AI_FALLBACK_MODEL, extractWorkersAiText, resolveProspectContactability, buildProspectEvidenceContext, buildScheduledRunId, getCurrentDaySenderCount, normalizeWhatsAppPhone, extractPhoneDigits, hasUsableContactChannel, hasEnrichableContactData, buildWhatsAppClickToChatUrl, buildWhatsAppOutreachBody, shouldUseManualWhatsAppFallback, isDiscoveryInfrastructureFailure, resolveDiscoveryCompletionStatus, hasConfirmedWhatsAppOptIn, isValidWhatsAppConsentEvidenceRef, isOutreachPauseBlocking, isFounderManualDispatch, normalizeGeneratedMessage, selectHunterDomainEmail, recordRunFinalization, resolveGeoapifyProfile, ensureLegalFooter, normalizeRadarTargetStrings } from './worker';
 import { DEFAULT_FOUNDER_MISSION, MissionConfig } from './worker';
 import { buildResendIdempotencyKey, buildBrandedEmailHtml, resolveBveltSender, inspectOutboundEmailAuth, normalizeOutreachBody, buildListUnsubscribeHeader, dispatchEmail } from './emailDispatcher';
 import { fetchPermitContractors } from './permitSources';
@@ -21,6 +21,18 @@ interface TestResult {
 }
 
 const tests: Array<{ name: string; run: () => void | Promise<void> }> = [];
+
+tests.push({
+  name: "Discovery target normalization removes null, blank and non-string ICP entries",
+  run: () => {
+    assert.deepEqual(
+      normalizeRadarTargetStrings([null, undefined, "", "  ", " HVAC ", 42, {}, "plumbing", "HVAC"]),
+      ["HVAC", "plumbing"]
+    );
+    assert.deepEqual(normalizeRadarTargetStrings(null), []);
+    assert.deepEqual(normalizeRadarTargetStrings({ trades: ["plumbing"] }), []);
+  }
+});
 
 tests.push({
   name: "Founder manual email approvals bypass shared daily caps while Tenant approvals do not",

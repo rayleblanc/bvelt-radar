@@ -5633,8 +5633,14 @@ export async function startProspectingRun(
 
   const dayOfYear = getDayOfYear(new Date());
   const { activeCities, activeTrades, pairs } = await getPriorityTargets(dayOfYear, env, mode, tenantId, overrides);
+  const safeCities = normalizeRadarTargetStrings(activeCities);
+  const safeTrades = normalizeRadarTargetStrings(activeTrades);
+  const safePairs = (pairs || []).filter(pair =>
+    pair && typeof pair.city === "string" && pair.city.trim() &&
+    typeof pair.trade === "string" && pair.trade.trim()
+  ).map(pair => ({ city: pair.city.trim(), trade: pair.trade.trim() }));
 
-  if (mode === "tenant" && (!activeTrades || activeTrades.length === 0)) {
+  if (mode === "tenant" && safeTrades.length === 0 && safePairs.length === 0) {
     return {
       run_id: "no_buyer_segments",
       jobs_enqueued: 0,
@@ -5647,7 +5653,7 @@ export async function startProspectingRun(
   }
 
   // Abort early unless there is at least one complete city+niche target.
-  if ((!activeCities || activeCities.length === 0 || !activeTrades || activeTrades.length === 0) && (!pairs || pairs.length === 0)) {
+  if ((safeCities.length === 0 || safeTrades.length === 0) && safePairs.length === 0) {
     const reason = mode === "tenant"
       ? `Tenant "${tId}" no tiene mercados o segmentos compradores válidos. Configura cities_json e ICP buyer segments antes de correr el Radar.`
       : "La geografía automática no produjo objetivos. Comprueba el catálogo geográfico integrado y los segmentos de Founder; no requiere FOUNDING_CITIES ni FOUNDING_COUNTRIES.";
@@ -5685,8 +5691,8 @@ export async function startProspectingRun(
   // Cap jobs per run to avoid queue flood (max 8 discovery pairs)
   const MAX_JOBS = Math.max(1, Math.min(8, Math.floor(Number(env.RADAR_JOBS_PER_RUN) || 8)));
 
-  if (pairs && pairs.length > 0 && !hasOverrides) {
-    for (const pair of pairs.slice(0, MAX_JOBS)) {
+  if (safePairs.length > 0 && !hasOverrides) {
+    for (const pair of safePairs.slice(0, MAX_JOBS)) {
       const jobId = `discovery_${runId}_${pair.city.replace(/[^a-z0-9]/gi, '_')}_${pair.trade.replace(/[^a-z0-9]/gi, '_')}`.toLowerCase();
       await enqueueJob(env, {
         run_id: runId,
@@ -5700,8 +5706,8 @@ export async function startProspectingRun(
     }
   } else {
     // Cartesian product capped
-    outer: for (const city of activeCities) {
-      for (const trade of activeTrades) {
+    outer: for (const city of safeCities) {
+      for (const trade of safeTrades) {
         if (jobsEnqueued >= MAX_JOBS) break outer;
         const jobId = `discovery_${runId}_${city.replace(/[^a-z0-9]/gi, '_')}_${trade}`.toLowerCase();
         await enqueueJob(env, {
@@ -5717,13 +5723,13 @@ export async function startProspectingRun(
     }
   }
 
-  console.log(`[Queue Run Initiated] Run ${runId} enqueued ${jobsEnqueued} discovery jobs for cities=[${activeCities.join(', ')}] trades=[${activeTrades.join(', ')}]`);
+  console.log(`[Queue Run Initiated] Run ${runId} enqueued ${jobsEnqueued} discovery jobs for cities=[${safeCities.join(', ')}] trades=[${safeTrades.join(', ')}]`);
 
   return {
     run_id: runId,
     jobs_enqueued: jobsEnqueued,
-    active_cities: activeCities,
-    active_trades: activeTrades,
+    active_cities: safeCities,
+    active_trades: safeTrades,
     diagnostics: {
       bizdata_status: (env.ENABLE_BIZDATA === "0" || env.ENABLE_BIZDATA === "false") ? "disabled" : "auto-fallback",
       overpass_status: "ready",
@@ -8530,6 +8536,16 @@ async function runProspectingPipeline(
 /**
  * Deterministic Regional & Trade Target Selector
  */
+/** Keep malformed/null ICP config values out of discovery targets and Queue jobs. */
+export function normalizeRadarTargetStrings(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return Array.from(new Set(
+    value
+      .filter((item): item is string => typeof item === "string")
+      .map(item => item.trim())
+      .filter(Boolean)
+  ));
+}
 export async function getPriorityTargets(
   dayOfYear: number, 
   env: Env, 
@@ -8595,15 +8611,21 @@ export async function getPriorityTargets(
             tenantConfig.niche || "",
             expandedBuyerSegments
           );
+          // D1 JSON can contain null/objects from old or partially saved ICP profiles.
+          config.geographies = normalizeRadarTargetStrings(config.geographies);
+          config.niches = normalizeRadarTargetStrings(config.niches);
+          config.countries = normalizeRadarTargetStrings(config.countries).map(value => value.toUpperCase());
+          config.languages = normalizeRadarTargetStrings(config.languages).map(value => value.toLowerCase());
+          config.services = normalizeRadarTargetStrings(config.services);
         } catch (e) {
           console.error("Error parsing tenant config: ", e);
         }
 
-        const citiesList = JSON.parse(tenantConfig.cities_json || '[]');
+        const citiesList = normalizeRadarTargetStrings(JSON.parse(tenantConfig.cities_json || '[]'));
         const centerLabel = citiesList[0] || null;
         if (centerLabel && !skipPicks && config.niches.length > 0) {
           try {
-            tenantPicks = await pickTargets(env.RADAR_DB, {
+            tenantPicks = (await pickTargets(env.RADAR_DB, {
               tenantId,
               trades: config.niches,
               count: 6,
@@ -8611,7 +8633,10 @@ export async function getPriorityTargets(
               serviceRadiusKm: Number(tenantConfig.service_radius_km || 60),
               countries: config.countries,
               allowedCities: citiesList
-            });
+            })).filter(pick =>
+              pick && pick.place && Array.isArray(pick.place) &&
+              typeof pick.trade === "string" && pick.trade.trim()
+            );
           } catch (e) {
             console.warn("[getPriorityTargets] tenant pickTargets error:", e);
             tenantPicks = [];
@@ -8653,7 +8678,7 @@ export async function getPriorityTargets(
       }
     }
     // Convert broad market segments to searchable categories; preserve custom niches.
-    config.niches = expandFounderDiscoveryNiches(config.niches);
+    config.niches = normalizeRadarTargetStrings(expandFounderDiscoveryNiches(config.niches));
   }
 
   // Seed Today's Daily Mission
@@ -8758,6 +8783,12 @@ export async function getPriorityTargets(
       }
     }
   }
+  
+  config.geographies = normalizeRadarTargetStrings(config.geographies);
+  config.niches = normalizeRadarTargetStrings(config.niches);
+  config.countries = normalizeRadarTargetStrings(config.countries).map(value => value.toUpperCase());
+  config.languages = normalizeRadarTargetStrings(config.languages).map(value => value.toLowerCase());
+  config.services = normalizeRadarTargetStrings(config.services);
 
   let learningStats: Record<string, number> = {};
   if (env.RADAR_DB) {
@@ -8903,6 +8934,13 @@ export async function getPriorityTargets(
     activeCities = Array.from(new Set([sortedGeographies[cityIdx1], sortedGeographies[cityIdx2]]));
     activeTrades = Array.from(new Set([sortedNiches[tradeIdx1], sortedNiches[tradeIdx2]]));
   }
+
+  activeCities = normalizeRadarTargetStrings(activeCities);
+  activeTrades = normalizeRadarTargetStrings(activeTrades);
+  pairs = (pairs || []).filter(pair =>
+    pair && typeof pair.city === "string" && pair.city.trim() &&
+    typeof pair.trade === "string" && pair.trade.trim()
+  ).map(pair => ({ city: pair.city.trim(), trade: pair.trade.trim() }));
 
   return { activeCities, activeTrades, missionConfig: config, pairs };
 }

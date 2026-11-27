@@ -20,7 +20,7 @@ Radar descubre y conserva evidencia original; BEM en LocalFlowPro es memoria can
 
 ## 4. Tenant profile y ciclo de oportunidad
 El perfil versionado debe contener owner identity, trade/subtrades, services, capabilities, service areas, geografía, país/región/ciudad, ICP, buyer segments, exclusiones, idioma, IANA timezone, verification, provenance, snapshot version/hash y correlation/idempotency IDs.
-Perfil incompleto produce PENDING_CONFIGURATION; no crear misión genérica ni inferir ciudad/servicio/cobertura.
+Perfil incompleto produce PENDING_CONFIGURATION; no crear misión genérica ni inferir ciudad/servicio/cobertura. Sanitize persisted target arrays before ranking or enqueueing: discard null, blank, and non-string city/trade values; `startProspectingRun` must reject incomplete city+trade pairs before creating Queue jobs. The historical 2026-11-09 Naples job with a missing trade is not replayable and must not be reactivated.
 Ciclo requerido:
 profile confirmado → discovery → source evidence → entity resolution → opportunity/relationship → D1 durable → authenticated BEM ingest → {ok:true} → receipt/read-back → UI → action eligibility → outcome → learning.
 HTTP 2xx sin aceptación JSON explícita no es receipt.
