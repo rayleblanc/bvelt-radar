@@ -25,12 +25,12 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [];
 tests.push({
   name: "Discovery target normalization removes null, blank and non-string ICP entries",
   run: () => {
-    assert.deepEqual(
-      normalizeRadarTargetStrings([null, undefined, "", "  ", " HVAC ", 42, {}, "plumbing", "HVAC"]),
-      ["HVAC", "plumbing"]
+    assert(
+      JSON.stringify(normalizeRadarTargetStrings([null, undefined, "", "  ", " HVAC ", 42, {}, "plumbing", "HVAC"])) === JSON.stringify(["HVAC", "plumbing"]),
+      "Normalization must trim, filter and deduplicate target strings"
     );
-    assert.deepEqual(normalizeRadarTargetStrings(null), []);
-    assert.deepEqual(normalizeRadarTargetStrings({ trades: ["plumbing"] }), []);
+    assert(JSON.stringify(normalizeRadarTargetStrings(null)) === "[]", "Null targets must normalize to an empty list");
+    assert(JSON.stringify(normalizeRadarTargetStrings({ trades: ["plumbing"] })) === "[]", "Non-array targets must normalize to an empty list");
   }
 });
 
@@ -2158,9 +2158,9 @@ tests.push({
         }
       };
       const result = await pushMarketObservationsToBem(env);
-      assert.equal(result.ok, false, "Mismatched application receipt must not be accepted");
-      assert.equal(result.reason, "invalid_ingest_acknowledgement");
-      assert.equal(cursorWrites, 0, "Founder cursor must not advance without the exact receipt");
+      assert(result.ok === false, "Mismatched application receipt must not be accepted");
+      assert(result.reason === "invalid_ingest_acknowledgement", "Mismatched receipts must return the invalid acknowledgement reason");
+      assert(cursorWrites === 0, "Founder cursor must not advance without the exact receipt");
     } finally {
       globalThis.fetch = originalFetch;
     }
