@@ -2000,7 +2000,7 @@ tests.push({
         tracker.postCalled = true;
         authHeader = init?.headers?.["Authorization"] || "";
         postBody = JSON.parse(init?.body || "{}");
-        return new Response(JSON.stringify({ ok: true, accepted: 2 }), { status: 200 });
+        return new Response(JSON.stringify({ ok: true, accepted: postBody.items.length, run_id: postBody.run_id }), { status: 200 });
       }
       return originalFetch(url, init);
     }) as any;
@@ -2055,7 +2055,7 @@ tests.push({
           tenantPostCalled = true;
           tenantHeaderTenantId = init?.headers?.["X-Bvelt-Tenant-Id"] || "";
           tenantPostBody = JSON.parse(init?.body || "{}");
-          return new Response(JSON.stringify({ ok: true, accepted: 1 }), { status: 200 });
+          return new Response(JSON.stringify({ ok: true, mode: "tenant", tenant_id: tenantPostBody.tenant_id, accepted: tenantPostBody.items.length }), { status: 200 });
         }
         return originalFetch2(url, init);
       }) as any;
@@ -2109,13 +2109,62 @@ tests.push({
 });
 
 tests.push({
+  name: "Founder BEM cursor advances only after an exact application receipt",
+  run: async () => {
+    const { pushMarketObservationsToBem } = await import("./worker");
+    const originalFetch = globalThis.fetch;
+    let cursorWrites = 0;
+    globalThis.fetch = (async (_url: any, init?: any) => {
+      const payload = JSON.parse(init?.body || "{}");
+      return new Response(JSON.stringify({
+        ok: true,
+        accepted: payload.items.length,
+        run_id: "wrong-run-id"
+      }), { status: 200 });
+    }) as any;
+    try {
+      const env: any = {
+        BVELT_INGEST_URL: "https://bvelt.app/api/radar/observations",
+        BVELT_INGEST_KEY: "test_ingest_key",
+        RADAR_DB: {
+          prepare: (sql: string) => ({
+            bind: () => ({
+              all: async () => ({ results: [{
+                id: "p_founder_ack", tenant_id: "founder", name: "Ack Test",
+                city: "Austin, TX", trade: "plumbing", website: null, phone: null,
+                email: null, score: 70, outcome: null, status: "qualified",
+                created_at: "2026-11-25T00:00:00.000Z"
+              }] }),
+              first: async () => null,
+              run: async () => {
+                if (sql.includes("INSERT INTO radar_bem_sync_state")) cursorWrites += 1;
+                return { success: true, meta: { changes: 1 } };
+              }
+            }),
+            run: async () => ({ success: true, meta: { changes: 1 } })
+          })
+        }
+      };
+      const result = await pushMarketObservationsToBem(env);
+      assert.equal(result.ok, false, "Mismatched application receipt must not be accepted");
+      assert.equal(result.reason, "invalid_ingest_acknowledgement");
+      assert.equal(cursorWrites, 0, "Founder cursor must not advance without the exact receipt");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  }
+});
+
+tests.push({
   name: "Tenant observation history requires an explicit Bvelt application acknowledgement",
   run: async () => {
     const { sendTenantObservationsToBvelt } = await import("./worker");
     const originalFetch = globalThis.fetch;
     const cases = [
       { label: "application rejection", response: () => new Response(JSON.stringify({ ok: false, error: "tenant_scope_rejected" }), { status: 200 }) },
-      { label: "malformed acknowledgement", response: () => new Response("not-json", { status: 200 }) }
+      { label: "malformed acknowledgement", response: () => new Response("not-json", { status: 200 }) },
+      { label: "wrong tenant receipt", response: () => new Response(JSON.stringify({ ok: true, mode: "tenant", tenant_id: "another_tenant", accepted: 1 }), { status: 200 }) },
+      { label: "partial acceptance", response: () => new Response(JSON.stringify({ ok: true, mode: "tenant", tenant_id: "bvelt_tenant_ack", accepted: 0 }), { status: 200 }) }
     ];
 
     try {

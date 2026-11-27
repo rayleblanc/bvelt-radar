@@ -11774,6 +11774,33 @@ export async function sendRadarDigest(
  * Push 24-hour market observations from D1 to BEM ingestion API
  * and optionally notify Telegram via notifyOnce daily digest.
  */
+export function isValidFounderBemAcknowledgement(
+  acknowledgement: any,
+  expectedRunId: string,
+  expectedCount: number
+): boolean {
+  return Boolean(
+    acknowledgement &&
+    acknowledgement.ok === true &&
+    acknowledgement.run_id === expectedRunId &&
+    acknowledgement.accepted === expectedCount
+  );
+}
+
+export function isValidTenantBemAcknowledgement(
+  acknowledgement: any,
+  expectedTenantId: string,
+  expectedCount: number
+): boolean {
+  return Boolean(
+    acknowledgement &&
+    acknowledgement.ok === true &&
+    acknowledgement.mode === "tenant" &&
+    acknowledgement.tenant_id === expectedTenantId &&
+    acknowledgement.accepted === expectedCount
+  );
+}
+
 export async function pushMarketObservationsToBem(env: Env): Promise<{
   ok?: boolean;
   skipped?: boolean;
@@ -11852,7 +11879,7 @@ export async function pushMarketObservationsToBem(env: Env): Promise<{
     const payload = {
       source: "bvelt-radar",
       observed_at: new Date().toISOString(),
-      run_id: `founder-cursor-${founderOnly[founderOnly.length - 1]?.id || "empty"}`,
+      run_id: `founder-cursor-${founderOnly[founderOnly.length - 1]?.id || "empty"}`.slice(0, 180),
       items
     };
 
@@ -11877,7 +11904,13 @@ export async function pushMarketObservationsToBem(env: Env): Promise<{
       return { ok: false, status: res.status };
     }
 
-    // Advance the cursor only after Bvelt confirms the batch was accepted.
+    // HTTP 2xx is not a receipt: require the exact run ID and accepted row count.
+    const acknowledgement = await res.json().catch(() => null) as any;
+    if (!isValidFounderBemAcknowledgement(acknowledgement, payload.run_id, items.length)) {
+      return { ok: false, status: res.status, reason: "invalid_ingest_acknowledgement" };
+    }
+
+    // Advance the cursor only after Bvelt confirms this exact batch was accepted.
     const lastAccepted = founderOnly[founderOnly.length - 1];
     if (lastAccepted?.created_at && lastAccepted?.id) {
       await env.RADAR_DB.prepare(`
@@ -12012,7 +12045,7 @@ export async function sendTenantObservationsToBvelt(
     // Require an explicit application-level acknowledgement before recording
     // a successful sync or appending the local observation history.
     const acknowledgement = await res.json().catch(() => null) as any;
-    if (!acknowledgement || acknowledgement.ok !== true) {
+    if (!isValidTenantBemAcknowledgement(acknowledgement, tenantId, items.length)) {
       return { ok: false, reason: "invalid_ingest_acknowledgement", tenant_id: tenantId };
     }
 
