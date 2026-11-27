@@ -90,10 +90,12 @@ Cuando el propietario diga «continúa con el plan»:
 9. Respuesta final breve: fase, commits, pruebas, deployment, logs y bloqueo real. Sin explicación extensa.
 
 ## 10. Hold y despliegue
-- Hold documentado de código/Actions y D1 productivo LocalFlowPro hasta 2026-12-01T00:00:00Z. Antes de esa fecha, preparación/lectura/documentación solamente; no bypass.
-- Tras esa fecha, verificar que el hold esté realmente levantado antes de código/migraciones.
-- Radar Workers Builds despliega cambios de documentación porque path_excludes está vacío. Después de cada cambio de AGENTS/docs, comprobar build logs, Worker version, deployment ID y traffic. No cambiar Workers Builds settings en esta tarea.
-- No afirmar deploy por CI; no afirmar Tenant operativo por prospects D1. Requiere acknowledgement BEM, receipt/read-back, UI y outcome.
+- La falta de créditos GitHub Actions hasta 2026-12-01T00:00:00Z bloquea solo esos workflows; no congela el trabajo Radar ni los despliegues Cloudflare.
+- Cloudflare Workers Builds es el pipeline de release independiente de Actions. El comando Wrangler ejecuta build TypeScript/Vite, `test:radar` y pytest del sidecar antes de desplegar; cualquier fallo debe detener el deploy.
+- Después de cada push a main, comprobar el build exact-SHA, logs completos, Worker version, deployment ID y traffic. Si un build queda queued/failed, investigar y no declarar deploy.
+- GitHub Actions queda como fallback opcional; ningún requisito de release debe depender exclusivamente de sus minutos.
+- Sidecar runtime actual aún dispatcha `radar-research.yml` mediante GitHub Actions; es enriquecimiento opcional, no core discovery/Queue/cron. No restaurar plaintext PAT. Evaluar reemplazo con Cloudflare Browser Run solo con límites free, rate limits, SSRF y aislamiento cubiertos.
+- No afirmar Tenant operativo por prospects D1. Requiere acknowledgement BEM, receipt/read-back, UI y outcome.
 - No dejar PR abierto, branch temporal huérfana, migration sin read-back o error propio sin corregir.
 
 ## 11. Scope freeze
