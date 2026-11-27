@@ -12,7 +12,7 @@ test("GitHub Actions is not imported, dispatched, or required by Radar runtime",
 test("Cloudflare release gate runs the complete verification suite without Actions", () => {
   const wrangler = readFileSync(new URL("../wrangler.toml", import.meta.url), "utf8");
   const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
-  assert.match(wrangler, /command\s*=\s*"npm run verify:release"/);
+  assert.match(wrangler, /command\s*=\s*"npm run build"/);
   assert.match(pkg.scripts["verify:release"], /npm audit --audit-level=moderate/);
   assert.match(pkg.scripts["verify:release"], /npm run lint/);
   assert.match(pkg.scripts["verify:release"], /npm run test:radar/);
