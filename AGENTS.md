@@ -111,3 +111,17 @@ No añadir ideas nuevas al plan activo durante el programa salvo vulnerabilidad/
 - No declarar Tenant completo por build, D1 prospects ni HTTP 2xx: exige el ciclo autenticado hasta receipt/read-back, UI, acción elegible, outcome y aislamiento probado.
 - Radar Tenant es capacidad primaria pagada; Founder es reemplazable. No permitir que trabajo Founder consuma el presupuesto o retrase los gates de Tenant.
 - Mantener adquisición Founder sin outreach automático por defecto y sin exceder consentimiento, suppression, reputación ni jurisdicción. Los objetivos comerciales y límites de marketing están definidos en el plan maestro; no inventar canales ni presupuesto.
+
+
+## 13. Regla vinculante: desarrollo continuo y cierre finito del programa
+La sección de cierre del plan maestro en LocalFlowPro prevalece sobre cualquier hold o checkpoint histórico que pueda interpretarse como congelación general.
+
+- La falta de créditos GitHub Actions afecta solo a workflows Actions. No bloquea commits, pruebas locales, Cloudflare Workers Builds, discovery, Queue/cron, ingest, BEM, Brain, Tenant ni el desarrollo del Worker.
+- Scrapling/sidecar es enriquecimiento opcional. Si su ejecución depende de Actions o de una credencial no disponible, bloquear únicamente ese enriquecimiento; no el core Radar ni la entrega Tenant.
+- Un P0 de seguridad bloquea solo el endpoint, acción o dato afectado. Mantener fail-closed donde corresponda y continuar los módulos independientes.
+- OWNER_ACTION, BLOCKED_EXTERNAL, CI_LIMIT y BUILD_QUEUE requieren dependencia concreta, evidencia, criterio de salida y lista de tareas que continúan. No usar “hold general” ni fechas de espera arbitrarias.
+- Tenant es la prioridad estratégica y capacidad pagada primaria; Founder es reemplazable y no debe desplazar el trabajo Tenant.
+- Completar el trabajo técnico controlable antes del 03-12-2026; dejar solo acciones externas concretas y seguras. Bvelt debe estar preparado para el primer cliente pagador antes del 10-12-2026.
+- Continuar por la primera tarea incompleta con dependencias satisfechas: inspección dirigida, implementación, pruebas, integración en main, lectura de logs exact-SHA y deployment cuando corresponda. No encadenar auditorías generales.
+- Cerrar y retirar cada fase de la lista activa cuando cumple sus criterios; registrar SHA, pruebas, logs, deployment y residuales. No mantener fases eternamente abiertas por un proveedor o autorización externa.
+- No afirmar Tenant E2E completo sin acknowledgement BEM, receipt/read-back, UI, action eligibility, outcome y aislamiento probado. Un residual externo puede permanecer deshabilitado sin bloquear el resto del producto.
