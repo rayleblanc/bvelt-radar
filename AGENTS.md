@@ -91,10 +91,10 @@ Cuando el propietario diga «continúa con el plan»:
 
 ## 10. Hold y despliegue
 - La falta de créditos GitHub Actions hasta 2026-12-01T00:00:00Z bloquea solo esos workflows; no congela el trabajo Radar ni los despliegues Cloudflare.
-- Cloudflare Workers Builds es el pipeline de release independiente de Actions. El comando Wrangler ejecuta build TypeScript/Vite, `test:radar` y pytest del sidecar antes de desplegar; cualquier fallo debe detener el deploy.
+- Cloudflare Workers Builds es el gate de release independiente de Actions. `wrangler.toml` invoca `npm run verify:release`, que ejecuta TypeScript lint, `test:radar`, pytest del sidecar y build Vite/Worker; cualquier fallo debe detener el deploy. No asumir que corrió hasta leer el log exact-SHA.
 - Después de cada push a main, comprobar el build exact-SHA, logs completos, Worker version, deployment ID y traffic. Si un build queda queued/failed, investigar y no declarar deploy.
 - GitHub Actions queda como fallback opcional; ningún requisito de release debe depender exclusivamente de sus minutos.
-- Sidecar runtime actual aún dispatcha `radar-research.yml` mediante GitHub Actions; es enriquecimiento opcional, no core discovery/Queue/cron. No restaurar plaintext PAT. Evaluar reemplazo con Cloudflare Browser Run solo con límites free, rate limits, SSRF y aislamiento cubiertos.
+- El Worker no despacha ni importa GitHub Actions. Scrapling queda como enriquecimiento manual/externo opcional; nunca condiciona Queue, cron, discovery, Tenant, BEM ni release. No añadir credenciales PAT al Worker ni restaurar dispatch automático. Una futura ejecución nativa requiere diseño/benchmark y SSRF/robots/rate-limit/aislamiento antes de activarse.
 - No afirmar Tenant operativo por prospects D1. Requiere acknowledgement BEM, receipt/read-back, UI y outcome.
 - No dejar PR abierto, branch temporal huérfana, migration sin read-back o error propio sin corregir.
 

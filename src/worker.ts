@@ -21,7 +21,6 @@ import { dispatchEmail, normalizeOutreachBody, BVELT_SITE, EmailDispatchResult, 
 import { auditDomainSecurityAndMx, auditWebsitePerformance, auditCityWeatherEmergency } from './openAudits';
 import { pickTargets, findPlace, findNearestPlace, formatPlaceLabel, markSearched, placeKey, radiusKm, haversineKm } from './geoFrontier';
 import { sanitizeEmail, sanitizeProspectEmail, isOffIcpName, isCategoryNameMismatch, hasMxRecords } from './emailSanitizer';
-import { dispatchScraplingResearch } from './research/githubActions';
 import { recordScopedLearningEvent, readScopedLearningStats } from './learningIntegrity';
 import { fetchPermitContractors as fetchMunicipalPermitContractors } from './permitSources';
 import marketUniverse from "../sidecar/config/market-universe.json";
@@ -190,9 +189,6 @@ export interface Env {
   AI?: { run(model: string, input: any): Promise<any> };
   BVELT_INGEST_URL?: string;
   BVELT_INGEST_KEY?: string;
-  GITHUB_ACTIONS_TOKEN_SECRET?: string;
-  GITHUB_ACTIONS_TOKEN?: string;
-  RADAR_RESEARCH_REPOSITORY?: string;
   RADAR_SIDECAR_CALLBACK_KEY?: string;
   RADAR_SERVICE_KEY?: string;
   BVELT_TENANT_INGEST_URL?: string;
@@ -2902,11 +2898,11 @@ export default {
             credential_present: Boolean(env.BVELT_INGEST_KEY || env.RADAR_SERVICE_KEY)
           },
           scrapling: {
-            ready: Boolean(String(env.GITHUB_ACTIONS_TOKEN_SECRET || "").trim() && String(env.RADAR_SIDECAR_CALLBACK_KEY || "").trim()),
-            github_token_secret_present: Boolean(String(env.GITHUB_ACTIONS_TOKEN_SECRET || "").trim()),
-            legacy_plain_text_token_present: Boolean(String(env.GITHUB_ACTIONS_TOKEN || "").trim()),
-            callback_key_present: Boolean(env.RADAR_SIDECAR_CALLBACK_KEY),
-            repository: env.RADAR_RESEARCH_REPOSITORY || "rayleblanc/bvelt-radar"
+            ready: false,
+            required: false,
+            runtime_dependency: false,
+            mode: "optional_manual_enrichment",
+            callback_key_present: Boolean(env.RADAR_SIDECAR_CALLBACK_KEY)
           },
           cron_trigger: { ready: true, schedule: "0 12,17,22 * * *" },
           worker_routes: { ready: true, active_routes: ["/health", "/prospects", "/run", "/decision", "/stats", "/api/events", "/api/tenants/config"] }
@@ -3715,147 +3711,6 @@ export async function associateResearchCandidate(
   }
 }
 
-export async function maybeDispatchSidecarResearch(
-  env: Env,
-  runId: string,
-  mode: string,
-  tenantId: string | null
-): Promise<boolean> {
-  if (!runId || !env.RADAR_DB) return false;
-  await ensureResearchSchema(env.RADAR_DB);
-  const m = (mode === 'tenant' ? 'tenant' : 'founder') as 'founder' | 'tenant';
-  const t = m === 'founder' ? 'founder' : (tenantId || '');
-  if (m === 'tenant' && (!t || t === 'founder')) {
-    console.warn(`[maybeDispatchSidecarResearch] Tenant mode requires valid non-founder tenant_id`);
-    return false;
-  }
-
-  // Scrapling is optional enrichment. Without the encrypted dispatch credential,
-  // skip before reserving D1 dispatch state; core discovery/queue completion remains healthy.
-  if (!env.GITHUB_ACTIONS_TOKEN_SECRET?.trim()) {
-    console.info("[maybeDispatchSidecarResearch] Optional sidecar unavailable: GITHUB_ACTIONS_TOKEN_SECRET not configured; core Radar run remains complete.");
-    return false;
-  }
-
-  try {
-    // 1. Verify all discovery jobs for this run are finished
-    const pendingRes = (await env.RADAR_DB.prepare(`
-      SELECT COUNT(*) as c FROM queue_jobs 
-      WHERE run_id = ? AND job_type = 'discovery' AND status IN ('pending', 'processing')
-    `).bind(runId).first()) as any;
-
-    if (pendingRes && pendingRes.c > 0) {
-      console.log(`[maybeDispatchSidecarResearch] Discovery jobs still running for run ${runId} (count=${pendingRes.c})`);
-      return false;
-    }
-
-    // 2. Check if eligible candidates with non-empty websites exist
-    const candidatesRes = (await env.RADAR_DB.prepare(`
-      SELECT COUNT(*) as cnt 
-      FROM research_run_candidates c
-      JOIN prospects p ON c.prospect_id = p.id
-      WHERE c.run_id = ? AND c.mode = ? AND c.tenant_id = ?
-        AND p.mode = ? AND COALESCE(p.tenant_id, 'founder') = ?
-        AND p.website IS NOT NULL AND p.website != ''
-    `).bind(runId, m, t, m, t).first()) as any;
-
-    const candidateCount = candidatesRes?.cnt || 0;
-    if (candidateCount === 0) {
-      console.log(`[maybeDispatchSidecarResearch] No website candidates found for run ${runId}, tenant ${t}`);
-      return false;
-    }
-
-    // 3 & 4. Atomic reservation in D1 before calling GitHub Actions using UNIQUE(run_id, tenant_id)
-    const now = new Date().toISOString();
-    const existingDispatch = (await env.RADAR_DB.prepare(`
-      SELECT id, status, attempts, updated_at FROM sidecar_dispatches WHERE run_id = ? AND tenant_id = ?
-    `).bind(runId, t).first()) as any;
-
-    let dispatchId: string;
-    if (existingDispatch) {
-      // Completed work is immutable. A queued/running dispatch that never calls
-      // back is recoverable after the workflow's 25-minute hard timeout plus grace.
-      if (existingDispatch.status === 'completed') return false;
-      if (['queued', 'running', 'dispatching'].includes(existingDispatch.status)) {
-        const lastUpdate = Date.parse(String(existingDispatch.updated_at || ""));
-        const stale = !Number.isFinite(lastUpdate) || Date.now() - lastUpdate > 40 * 60 * 1000;
-        if (!stale || Number(existingDispatch.attempts || 0) >= 3) {
-          console.log(`[maybeDispatchSidecarResearch] Dispatch remains ${existingDispatch.status}; stale=${stale}, attempts=${existingDispatch.attempts}`);
-          return false;
-        }
-        dispatchId = existingDispatch.id;
-        const reclaimed = await env.RADAR_DB.prepare(`
-          UPDATE sidecar_dispatches
-          SET status = 'dispatching', attempts = attempts + 1, last_error = 'STALE_DISPATCH_RECOVERED', updated_at = ?
-          WHERE id = ? AND status = ? AND updated_at = ?
-        `).bind(now, dispatchId, existingDispatch.status, existingDispatch.updated_at).run();
-        if (!(reclaimed as any)?.meta?.changes) return false;
-      }
-      // If failed, allow controlled recovery (max 3 attempts)
-      else if (existingDispatch.status === 'failed') {
-        if (existingDispatch.attempts >= 3) {
-          console.warn(`[maybeDispatchSidecarResearch] Max retry attempts reached for run ${runId}, tenant ${t}`);
-          return false;
-        }
-        dispatchId = existingDispatch.id;
-        const updateRes = await env.RADAR_DB.prepare(`
-          UPDATE sidecar_dispatches 
-          SET status = 'dispatching', attempts = attempts + 1, updated_at = ? 
-          WHERE run_id = ? AND tenant_id = ? AND status = 'failed'
-        `).bind(now, runId, t).run();
-
-        if (!updateRes || (updateRes as any).meta?.changes === 0) {
-          return false;
-        }
-      } else {
-        return false;
-      }
-    } else {
-      // Atomically insert new reservation
-      dispatchId = `disp_${Date.now()}_${crypto.randomUUID().replace(/-/g, '').substring(0, 8)}`;
-      try {
-        await env.RADAR_DB.prepare(`
-          INSERT INTO sidecar_dispatches (
-            id, run_id, mode, tenant_id, status, attempts, workflow_file, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, 'dispatching', 1, 'radar-research.yml', ?, ?)
-        `).bind(dispatchId, runId, m, t, now, now).run();
-      } catch (insertErr: any) {
-        console.log(`[maybeDispatchSidecarResearch] Dispatch already created concurrently: ${insertErr.message}`);
-        return false;
-      }
-    }
-
-    // 5. Call GitHub Actions dispatch
-    const dispatchResult = await dispatchScraplingResearch(env, {
-      run_id: runId,
-      mode: m,
-      tenant_id: t
-    });
-
-    const updateTime = new Date().toISOString();
-    if (dispatchResult.queued) {
-      await env.RADAR_DB.prepare(`
-        UPDATE sidecar_dispatches 
-        SET status = 'queued', updated_at = ? 
-        WHERE id = ? AND status NOT IN ('completed', 'running')
-      `).bind(updateTime, dispatchId).run();
-      console.log(`[maybeDispatchSidecarResearch] Successfully dispatched Scrapling research for run ${runId} (${candidateCount} candidates)`);
-      return true;
-    } else {
-      // 6. Record failure without blocking main pipeline
-      await env.RADAR_DB.prepare(`
-        UPDATE sidecar_dispatches 
-        SET status = 'failed', last_error = ?, updated_at = ? 
-        WHERE id = ?
-      `).bind(dispatchResult.reason || 'DISPATCH_FAILED', updateTime, dispatchId).run();
-      console.warn(`[maybeDispatchSidecarResearch] Dispatch failed: ${dispatchResult.reason}`);
-      return false;
-    }
-  } catch (err: any) {
-    console.error(`[maybeDispatchSidecarResearch] Error in dispatch check for run ${runId}:`, err);
-    return false;
-  }
-}
 
 export function isSidecarCallbackAuthorized(request: Request, env: Env): boolean {
   const secret = (env.RADAR_SIDECAR_CALLBACK_KEY || '').trim();
@@ -5379,15 +5234,9 @@ export async function processQueueJob(job: RadarJobMessage, env: Env): Promise<v
         console.warn(`[Queue Router] Unknown job type: ${job.type}`);
     }
     await recordQueueJobStatus(env.RADAR_DB, job.job_id, job.run_id, job.type, 'completed');
-    if (job.type === 'discovery') {
-      await maybeDispatchSidecarResearch(env, job.run_id, job.mode || 'founder', job.tenant_id || (job.mode === 'tenant' ? job.tenant_id : 'founder'));
-    }
   } catch (err: any) {
     console.error(`[Queue Router Error] Job [${job.type} / ${job.job_id}] failed:`, err);
     await recordQueueJobStatus(env.RADAR_DB, job.job_id, job.run_id, job.type, 'failed', err.message || String(err));
-    if (job.type === 'discovery') {
-      await maybeDispatchSidecarResearch(env, job.run_id, job.mode || 'founder', job.tenant_id || (job.mode === 'tenant' ? job.tenant_id : 'founder'));
-    }
     throw err;
   }
 }

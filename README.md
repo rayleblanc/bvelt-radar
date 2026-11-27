@@ -10,13 +10,13 @@
 
 Los indicadores proceden de agregaciones D1 por tenant/realm, no de los primeros 100 prospectos cargados en el navegador. Los estados aprobados no se cuentan como pendientes de aprobación.
 
-**GitHub Actions no es requisito para descubrir ni trabajar prospectos.** `POST /run` usa Cloudflare Queues y el Worker; Scrapling/Actions es enriquecimiento opcional. Si falta el secret cifrado, el sidecar se omite sin bloquear el motor principal.
+**GitHub Actions no es requisito de producto ni de release.** `POST /run` usa Cloudflare Queues y el Worker; el Worker no realiza dispatch a Actions. Scrapling queda como utilidad manual/externa opcional, fuera del camino crítico.
 
 **Plan maestro único:** [Bvelt Ecosystem Master Plan](https://github.com/rayleblanc/LocalFlowPro/blob/main/docs/MASTER_PLAN_BVELT_ECOSYSTEM_2026-12-10.md). Las reglas específicas de Radar están en AGENTS.md; este README es referencia operativa, no un plan paralelo.
 
 **bvelt-radar** es un Cloudflare Worker autónomo para prospección B2B y descubrimiento de negocios de servicios en los mercados y nichos configurados para **Bvelt**.
 
-> **Outbound contact is gated:** Radar may discover, qualify and prepare prospect decisions, but real email delivery is not assumed to be enabled. It requires verified sender/domain configuration, compliance and suppression controls. Scrapling dispatch requires the encrypted Worker Secret GITHUB_ACTIONS_TOKEN_SECRET; the legacy plaintext binding is not accepted.
+> **Outbound contact is gated:** Radar may discover, qualify and prepare prospect decisions, but real email delivery is not assumed to be enabled. It requires verified sender/domain configuration, compliance and suppression controls. GitHub Actions is not a runtime dependency. Scrapling is optional manual enrichment and does not block core discovery, Tenant, queues, cron or deployment.
 
 ---
 
@@ -88,7 +88,7 @@ curl -F "url=https://bvelt-radar.TU_SUBDOMINIO.workers.dev/telegram-webhook" \
 
 En **Cloudflare Workers Builds** configura:
 
-- **Build command:** `npm run build`
+- **Build command:** `npm run verify:release`
 - **Deploy command:** `npm run deploy`
 
 El script de despliegue ejecuta `npx wrangler deploy`. No uses `npm wrangler deploy`.

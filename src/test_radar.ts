@@ -1,7 +1,6 @@
 declare const process: any;
-import { resolveGithubActionsToken } from './research/githubActions';
 
-import worker, { resolveAICopyLanguage, resolveProspectsPageLimit, decodeProspectsCursor, encodeProspectsCursor, getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, maybeDispatchSidecarResearch, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey, notifyOnce, isVerifiedDeliverableEmail, evaluateFounderOutreachEligibility, buildTechnicalAuditSnapshot, isEmailValidatedForOutreach, isCompletePostalAddress, sendTelegramWithRetry, extractEmailAddress, evaluateResearchEvidenceQuality, classifyReplyText, getTelegramApprovalFeedback, getManualSendPreflightError, hasAIGenerationProvider, WORKERS_AI_FALLBACK_MODEL, extractWorkersAiText, resolveProspectContactability, buildProspectEvidenceContext, buildScheduledRunId, getCurrentDaySenderCount, normalizeWhatsAppPhone, extractPhoneDigits, hasUsableContactChannel, hasEnrichableContactData, buildWhatsAppClickToChatUrl, buildWhatsAppOutreachBody, shouldUseManualWhatsAppFallback, isDiscoveryInfrastructureFailure, resolveDiscoveryCompletionStatus, hasConfirmedWhatsAppOptIn, isValidWhatsAppConsentEvidenceRef, isOutreachPauseBlocking, isFounderManualDispatch, normalizeGeneratedMessage, selectHunterDomainEmail, recordRunFinalization, resolveGeoapifyProfile, ensureLegalFooter } from './worker';
+import worker, { resolveAICopyLanguage, resolveProspectsPageLimit, decodeProspectsCursor, encodeProspectsCursor, getPriorityTargets, calculateMultiFactorScore, buildLegalFooter, formatProspectTelegramMessage, expandTenantIcp, ensureResearchSchema, associateResearchCandidate, pushMarketObservationsToBem, resolveTenantAuthContext, isAuthorized, tenantBuyerNameFits, isNonBusinessEntity, expandFounderDiscoveryNiches, checkTradeCoherence, resolveOutreachTouchCount, shouldSendFounderFollowUp, buildOutreachIdempotencyKey, notifyOnce, isVerifiedDeliverableEmail, evaluateFounderOutreachEligibility, buildTechnicalAuditSnapshot, isEmailValidatedForOutreach, isCompletePostalAddress, sendTelegramWithRetry, extractEmailAddress, evaluateResearchEvidenceQuality, classifyReplyText, getTelegramApprovalFeedback, getManualSendPreflightError, hasAIGenerationProvider, WORKERS_AI_FALLBACK_MODEL, extractWorkersAiText, resolveProspectContactability, buildProspectEvidenceContext, buildScheduledRunId, getCurrentDaySenderCount, normalizeWhatsAppPhone, extractPhoneDigits, hasUsableContactChannel, hasEnrichableContactData, buildWhatsAppClickToChatUrl, buildWhatsAppOutreachBody, shouldUseManualWhatsAppFallback, isDiscoveryInfrastructureFailure, resolveDiscoveryCompletionStatus, hasConfirmedWhatsAppOptIn, isValidWhatsAppConsentEvidenceRef, isOutreachPauseBlocking, isFounderManualDispatch, normalizeGeneratedMessage, selectHunterDomainEmail, recordRunFinalization, resolveGeoapifyProfile, ensureLegalFooter } from './worker';
 import { DEFAULT_FOUNDER_MISSION, MissionConfig } from './worker';
 import { buildResendIdempotencyKey, buildBrandedEmailHtml, resolveBveltSender, inspectOutboundEmailAuth, normalizeOutreachBody, buildListUnsubscribeHeader, dispatchEmail } from './emailDispatcher';
 import { fetchPermitContractors } from './permitSources';
@@ -208,15 +207,6 @@ tests.push({
     assert(isDiscoveryInfrastructureFailure("Geoapify: request aborted due to timeout"), "Timeouts must remain retryable and must not exhaust a market");
     assert(isDiscoveryInfrastructureFailure("BizData: HTTP 400 (skipped)"), "Provider request errors must not be treated as honest zero-result markets");
     assert(!isDiscoveryInfrastructureFailure("Overpass: 0 elements, Geoapify: 0 matches"), "Successful zero-result searches may count toward market cooldown");
-  }
-});
-
-tests.push({
-  name: "GitHub dispatch fails closed unless the dedicated Worker Secret is configured",
-  run: () => {
-    assert(resolveGithubActionsToken({ GITHUB_ACTIONS_TOKEN_SECRET: " secret-token ", GITHUB_ACTIONS_TOKEN: "legacy-token" }) === "secret-token", "Dedicated Worker Secret must be trimmed and used");
-    assert(resolveGithubActionsToken({ GITHUB_ACTIONS_TOKEN: "legacy-token" }) === "", "Legacy plaintext binding must never authorize GitHub Actions");
-    assert(resolveGithubActionsToken({}) === "", "Missing Worker Secret must fail closed");
   }
 });
 
@@ -2555,59 +2545,22 @@ tests.push({
     const json10 = await res10.json() as any;
     assert(json10.rejected === 1, "10. Evidence with alien prospect_id must be rejected");
 
-    // 11. Dos despachos concurrentes para el mismo run
-    let fetchCallCount = 0;
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async (url: any, init?: any) => {
-      if (String(url).includes("api.github.com")) {
-        fetchCallCount++;
-        return new Response(null, { status: 204 });
-      }
-      return originalFetch(url, init);
-    }) as any;
+    // Empty callback is a valid terminal result; it does not require an Actions dispatch.
+    const req14 = new Request("https://radar.bvelt.app/api/research/evidence", {
+      method: "POST",
+      headers: { "Authorization": "Bearer valid_sidecar_key_123", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        run_id: "run_tenantA",
+        mode: "tenant",
+        tenant_id: "tenant_A",
+        records: []
+      })
+    });
+    const res14 = await worker.fetch(req14, mockEnv, {} as any);
+    assert(res14.status === 200, "14. Empty evidence callback must return 200");
+    const json14 = await res14.json() as any;
+    assert(json14.status === "ok" && json14.inserted === 0, "14. Empty evidence callback is a valid no-op receipt");
 
-    try {
-      const [dispatch1, dispatch2] = await Promise.all([
-        maybeDispatchSidecarResearch(mockEnv, "run_tenantA", "tenant", "tenant_A"),
-        maybeDispatchSidecarResearch(mockEnv, "run_tenantA", "tenant", "tenant_A")
-      ]);
-      assert(dispatch1 !== dispatch2, "11. Only one concurrent dispatch should succeed");
-      assert(fetchCallCount === 1, "11. GitHub Actions workflow should only be dispatched once");
-
-      // 12. Fallo de GitHub Actions
-      await associateResearchCandidate(mockDb, "run_fail_test", "founder", "founder", "p_founder_01");
-      globalThis.fetch = (async (url: any, init?: any) => {
-        if (String(url).includes("api.github.com")) {
-          return new Response("Workflow dispatch failed: rate limit exceeded", { status: 403 });
-        }
-        return originalFetch(url, init);
-      }) as any;
-
-      const failDispatchResult = await maybeDispatchSidecarResearch(mockEnv, "run_fail_test", "founder", "founder");
-      assert(failDispatchResult === false, "12. Dispatch with failing GitHub response must return false");
-      const failedRecord = dispatchesStore.find(d => d.run_id === "run_fail_test");
-      assert(failedRecord !== undefined, "12. Dispatch record must exist in D1");
-      assert(failedRecord.status === "failed", "12. Dispatch record status must be set to 'failed'");
-      assert(failedRecord.last_error.includes("403"), "12. Error message must record status 403");
-
-      // 14. Finalización sin evidencias (records: [])
-      const req14 = new Request("https://radar.bvelt.app/api/research/evidence", {
-        method: "POST",
-        headers: { "Authorization": "Bearer valid_sidecar_key_123", "Content-Type": "application/json" },
-        body: JSON.stringify({
-          run_id: "run_tenantA",
-          mode: "tenant",
-          tenant_id: "tenant_A",
-          records: []
-        })
-      });
-      const res14 = await worker.fetch(req14, mockEnv, {} as any);
-      assert(res14.status === 200, "14. Finalization without evidence must return 200");
-      const completedDispatch = dispatchesStore.find(d => d.run_id === "run_tenantA");
-      assert(completedDispatch && completedDispatch.status === "completed", "14. Dispatch status must transition to 'completed'");
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
   }
 });
 
