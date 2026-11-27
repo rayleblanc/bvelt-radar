@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "test:radar": "npx --yes tsx src/test_radar.ts && npx --yes tsx --test tests/emailTrustIcp.test.ts tests/tenantLearningIngest.test.ts tests/evidenceProvenance.test.ts tests/tenantProfileContract.test.ts tests/tenantBuyerSegments.test.ts tests/expandTenantIcp.test.ts tests/providerCooldown.test.ts tests/prospectFindingSchema.test.ts tests/resendWebhookSecurity.test.ts tests/discoveryPayload.test.ts tests/learningIntegrity.test.ts tests/noGithubActionsRuntimeDependency.test.ts",
     "deploy": "npx wrangler deploy",
-    "verify:release": "npm audit --audit-level=moderate && npm run lint && npm run test:radar && python -m pip install --disable-pip-version-check -r sidecar/requirements.txt pytest && python -m pytest sidecar/tests -q && npm run build"
+    "verify:release": "npm audit --audit-level=moderate && npm run lint && npm run test:radar && npm run build",
+    "test:sidecar": "python -m pip install --disable-pip-version-check -r sidecar/requirements.txt pytest && python -m pytest sidecar/tests -q"
   },
   "dependencies": {
     "lucide-react": "0.546.0",

@@ -91,7 +91,7 @@ Cuando el propietario diga «continúa con el plan»:
 
 ## 10. Hold y despliegue
 - La falta de créditos GitHub Actions hasta 2026-12-01T00:00:00Z bloquea solo esos workflows; no congela el trabajo Radar ni los despliegues Cloudflare.
-- Cloudflare Workers Builds es el gate de release independiente de Actions. `wrangler.toml` invoca `npm run verify:release`, que ejecuta TypeScript lint, `test:radar`, pytest del sidecar y build Vite/Worker; cualquier fallo debe detener el deploy. No asumir que corrió hasta leer el log exact-SHA.
+- Cloudflare Workers Builds es el gate de release independiente de Actions. Cloudflare Workers Builds ejecuta `npm run verify:release`: audit, TypeScript lint, `test:radar` y build Vite/Worker. El sidecar Scrapling es manual/externo y sus pruebas opcionales se ejecutan con `npm run test:sidecar`; no bloquea el core Worker release. No asumir que corrió hasta leer el log exact-SHA.
 - Después de cada push a main, comprobar el build exact-SHA, logs completos, Worker version, deployment ID y traffic. Si un build queda queued/failed, investigar y no declarar deploy.
 - GitHub Actions queda como fallback opcional; ningún requisito de release debe depender exclusivamente de sus minutos.
 - El Worker no despacha ni importa GitHub Actions. Scrapling queda como enriquecimiento manual/externo opcional; nunca condiciona Queue, cron, discovery, Tenant, BEM ni release. No añadir credenciales PAT al Worker ni restaurar dispatch automático. Una futura ejecución nativa requiere diseño/benchmark y SSRF/robots/rate-limit/aislamiento antes de activarse.

@@ -89,6 +89,7 @@ curl -F "url=https://bvelt-radar.TU_SUBDOMINIO.workers.dev/telegram-webhook" \
 En **Cloudflare Workers Builds** configura:
 
 - **Build command:** `npm run verify:release`
+- **Optional sidecar tests:** `npm run test:sidecar` (manual; Scrapling is not part of the core Worker release)
 - **Deploy command:** `npm run deploy`
 
 El script de despliegue ejecuta `npx wrangler deploy`. No uses `npm wrangler deploy`.
