@@ -17,6 +17,6 @@ test("Cloudflare release gate runs the complete verification suite without Actio
   assert.match(pkg.scripts["verify:release"], /npm run lint/);
   assert.match(pkg.scripts["verify:release"], /npm run test:radar/);
   assert.doesNotMatch(pkg.scripts["verify:release"], /python|pytest|sidecar/);
-  assert.match(pkg.scripts["test:sidecar"], /pytest sidecar\\/tests/);
+  assert.match(pkg.scripts["test:sidecar"], /pytest sidecar\/tests/);
   assert.match(pkg.scripts["verify:release"], /npm run build/);
 });
