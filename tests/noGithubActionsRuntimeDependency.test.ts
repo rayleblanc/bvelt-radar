@@ -13,6 +13,7 @@ test("Cloudflare release gate runs the complete verification suite without Actio
   const wrangler = readFileSync(new URL("../wrangler.toml", import.meta.url), "utf8");
   const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   assert.match(wrangler, /command\s*=\s*"npm run verify:release"/);
+  assert.match(pkg.scripts["verify:release"], /npm audit --audit-level=moderate/);
   assert.match(pkg.scripts["verify:release"], /npm run lint/);
   assert.match(pkg.scripts["verify:release"], /npm run test:radar/);
   assert.match(pkg.scripts["verify:release"], /pytest sidecar\/tests/);

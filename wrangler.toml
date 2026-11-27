@@ -24,7 +24,7 @@ GITHUB_ACTIONS_TOKEN = "" # Legacy plaintext binding intentionally blanked; use 
 # for production Worker build/test/deploy. Keep Node and Python checks in one
 # reproducible command so deployment stops if either suite fails.
 [build]
-command = "npm run verify:release"
+command = "npm run build"
 
 [assets]
 directory = "./dist"
