@@ -18,10 +18,13 @@ GITHUB_ACTIONS_TOKEN = "" # Legacy plaintext binding intentionally blanked; use 
 # - FOUNDER_SERVICE_KEY (required for founder routes)
 # - RADAR_SERVICE_KEY (service-to-service)
 # - BVELT_TENANT_INGEST_KEY (tenant observation push)
-# - GITHUB_ACTIONS_TOKEN_SECRET / RADAR_SIDECAR_CALLBACK_KEY (sidecar research)
+# - GITHUB_ACTIONS_TOKEN_SECRET / RADAR_SIDECAR_CALLBACK_KEY (legacy optional sidecar only)
 
+# Cloudflare Workers Builds is the release gate; GitHub Actions is not required
+# for production Worker build/test/deploy. Keep Node and Python checks in one
+# reproducible command so deployment stops if either suite fails.
 [build]
-command = "npm run build"
+command = "npm run build && npm run test:radar && python -m pip install -r sidecar/requirements.txt pytest && python -m pytest sidecar/tests -q"
 
 [assets]
 directory = "./dist"
