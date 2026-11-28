@@ -2153,6 +2153,7 @@ tests.push({
                 return { success: true, meta: { changes: 1 } };
               }
             }),
+            first: async () => null,
             run: async () => ({ success: true, meta: { changes: 1 } })
           })
         }
