@@ -3519,3 +3519,18 @@ async function runTests() {
 }
 
 runTests();
+tests.push({
+  name: "Founder scoring gives published business email full contact-path value",
+  run: () => {
+    const emailLead = calculateMultiFactorScore(
+      { name: "Local HVAC", trade: "hvac", city: "Austin, TX", website: "https://localhvac.example" },
+      "service@localhvac.example", false, null, true, true, {}, {}
+    );
+    const phoneOnlyLead = calculateMultiFactorScore(
+      { name: "Local HVAC", trade: "hvac", city: "Austin, TX", website: "https://localhvac.example" },
+      null, false, "+14155552671", true, true, {}, {}
+    );
+    assert(emailLead.breakdown.contactability >= 17, "A valid published business email plus website must score at least 17 contactability points before mailbox validation");
+    assert(emailLead.breakdown.contactability > phoneOnlyLead.breakdown.contactability, "An email path must not score below a phone-only lead by default");
+  }
+});
