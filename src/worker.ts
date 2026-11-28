@@ -9541,14 +9541,16 @@ export function calculateMultiFactorScore(
 
   let legacyContactability = 0;
   if (email) {
-    legacyContactability += isEmailValidated ? 10 : 5;
+    // Email presence is a real contact path even before third-party validation.
+    legacyContactability += 12;
+    if (isEmailValidated) legacyContactability += 3;
     if (!email.endsWith("@gmail.com") && !email.endsWith("@yahoo.com") && !email.endsWith("@hotmail.com") && !email.endsWith("@outlook.com")) {
-      legacyContactability += 4;
+      legacyContactability += 3;
     }
   }
   if (phone) legacyContactability += 4;
   if (item.website && isRealWebsite(item.website)) legacyContactability += 2;
-  if (phone && email && item.website && isRealWebsite(item.website)) legacyContactability = 20;
+  legacyContactability = Math.min(20, legacyContactability);
   if (!email && !phone) legacyContactability = 0;
 
   let legacyCommercial = 0;
