@@ -52,6 +52,7 @@ interface Prospect {
   id: string;
   name: string;
   city: string;
+  country_code?: string | null;
   trade: string;
   website: string | null;
   phone: string | null;
@@ -623,9 +624,18 @@ export default function App() {
     try { return JSON.parse(prospect.signals_json || "{}").is_email_validated === true; }
     catch { return false; }
   };
-  const hasDirectWhatsAppRecipient = (value?: string | null) => {
-    if (!value) return false;
-    const link = toWhatsAppUrl(value, "");
+  const getProspectPhoneCountry = (prospect: Prospect) => {
+    const explicit = String(prospect.country_code || "").trim().toUpperCase();
+    if (explicit) return explicit;
+    const location = String(prospect.city || "").toUpperCase();
+    if (/\b(ENGLAND|SCOTLAND|WALES|NORTHERN IRELAND|UK|UNITED KINGDOM)\b/.test(location)) return "GB";
+    if (/\b(CANADA|ONTARIO|QUEBEC|ALBERTA|BRITISH COLUMBIA)\b/.test(location)) return "CA";
+    if (/\b(AUSTRALIA|NSW|VICTORIA|QUEENSLAND|WESTERN AUSTRALIA)\b/.test(location)) return "AU";
+    return "US";
+  };
+  const hasDirectWhatsAppRecipient = (prospect: Prospect) => {
+    if (!prospect.phone) return false;
+    const link = toWhatsAppUrl(prospect.phone, "", getProspectPhoneCountry(prospect));
     return Boolean(link && /^https:\/\/wa\.me\/\d{8,15}(?:\?|$)/i.test(link));
   };
   const getWebsiteUrl = (value?: string | null) => {
@@ -1603,7 +1613,7 @@ const submitDecision = async (prospectId: string, action: string, ownerManualApp
                       const canSendEmail = Boolean(contactability?.commercial_prospect && contactability.manual_email_available && emailRecipient && !p.outreach_suppressed && !p.suppression_reason && !(p.cooldown_until && Date.parse(p.cooldown_until) > Date.now()));
                       // A prepared Founder WhatsApp draft is already human-reviewed for this channel.
                       // Opening wa.me is still only a manual handoff; it does not prove account or opt-in.
-                      const canOpenWhatsApp = canOpenDirectChannel || (isPreparedWhatsAppDraft && hasDirectWhatsAppRecipient(p.phone));
+                      const canOpenWhatsApp = canOpenDirectChannel || (isPreparedWhatsAppDraft && hasDirectWhatsAppRecipient(p));
 
                       return (
                         <div 
@@ -1722,9 +1732,9 @@ const submitDecision = async (prospectId: string, action: string, ownerManualApp
                                 Enviar correo
                               </button>
                             )}
-                            {canOpenWhatsApp && p.phone && hasDirectWhatsAppRecipient(p.phone) && toWhatsAppUrl(p.phone, whatsappMessageBody) && (
+                            {canOpenWhatsApp && p.phone && hasDirectWhatsAppRecipient(p.phone) && toWhatsAppUrl(p.phone, whatsappMessageBody, getProspectPhoneCountry(p)) && (
                               <a 
-                                href={toWhatsAppLaunchUrl(p.phone, whatsappMessageBody, window.navigator.userAgent) || toWhatsAppUrl(p.phone, whatsappMessageBody)!}
+                                href={toWhatsAppLaunchUrl(p.phone, whatsappMessageBody, window.navigator.userAgent, getProspectPhoneCountry(p)) || toWhatsAppUrl(p.phone, whatsappMessageBody)!}
                                 target="_self" 
                                 className="px-2.5 py-1 rounded-lg bg-emerald-950/50 border border-emerald-800/40 text-emerald-300 hover:bg-emerald-900/60 flex items-center gap-1 font-bold"
                                 onClick={(e) => {
