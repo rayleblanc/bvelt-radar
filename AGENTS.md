@@ -125,3 +125,10 @@ La sección de cierre del plan maestro en LocalFlowPro prevalece sobre cualquier
 - Continuar por la primera tarea incompleta con dependencias satisfechas: inspección dirigida, implementación, pruebas, integración en main, lectura de logs exact-SHA y deployment cuando corresponda. No encadenar auditorías generales.
 - Cerrar y retirar cada fase de la lista activa cuando cumple sus criterios; registrar SHA, pruebas, logs, deployment y residuales. No mantener fases eternamente abiertas por un proveedor o autorización externa.
 - No afirmar Tenant E2E completo sin acknowledgement BEM, receipt/read-back, UI, action eligibility, outcome y aislamiento probado. Un residual externo puede permanecer deshabilitado sin bloquear el resto del producto.
+
+
+## 14. Checkpoint de release 28-11-2026
+- Commit e4f7f9dda2d5883f4c0cee169ba4e9f79cab5e51 corrigió el mock D1 del test de recibo Founder: first() pertenece al prepared statement base y no solo al resultado de bind().
+- Cloudflare Workers Build 3356dfaa-2796-493d-91f2-df36108b37ad: SUCCESS; npm audit --audit-level=moderate sin vulnerabilidades, TypeScript lint, 97/97 tests, Vite build y Wrangler deploy completados.
+- Worker bvelt-radar versión #338 (5db72c0e-54c1-4f6a-b9f1-370311c66462) y deployment 79909d48-2715-4691-9872-63b31cd5e59d, con 100% del tráfico.
+- No abrir PR para este cierre. La build manual duplicada del mismo SHA fue cancelada tras el despliegue confirmado.
