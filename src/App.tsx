@@ -635,18 +635,26 @@ export default function App() {
   };
   const getWhatsAppOptions = (prospect: Prospect, message = "") => {
     if (!prospect.phone) return [] as Array<{ key: string; label: string; url: string }>;
-    // Option A: preserve exactly the digits found by the source (including a
-    // source-supplied country code, or its absence) for the owner's own test.
-    const sourceDigits = String(prospect.phone).replace(/(?:ext\.?|extension|x|#)\s*\d+\s*$/i, "").replace(/\D/g, "");
+    const raw = String(prospect.phone).replace(/(?:ext\.?|extension|x|#)\s*\d+\s*$/i, "").trim();
+    const sourceDigits = raw.replace(/\D/g, "");
+    const country = getProspectPhoneCountry(prospect);
+    const normalized = toWhatsAppUrl(raw, message, country);
+    const normalizedDigits = normalized?.match(/^https:\/\/wa\.me\/(\d{8,15})/)?.[1] || "";
+    const callingCodes: Record<string, string> = { US: "1", USA: "1", CA: "1", GB: "44", UK: "44", IE: "353", AU: "61", NZ: "64", DE: "49", FR: "33", ES: "34", PT: "351", IT: "39", NL: "31", BE: "32", CH: "41", AT: "43", SE: "46", NO: "47", DK: "45", FI: "358", ZA: "27" };
+    const code = callingCodes[country] || "1";
+    // Always expose both dialling forms. Keep the source form where it is
+    // already national; when the source includes its calling code, strip it
+    // for the no-code attempt. The second option is normalized E.164.
+    const noCodeDigits = sourceDigits.startsWith(code) && sourceDigits.length > 10
+      ? sourceDigits.slice(code.length)
+      : sourceDigits;
+    const query = message ? `?text=${encodeURIComponent(message)}` : "";
     const options: Array<{ key: string; label: string; url: string }> = [];
-    if (/^[1-9]\d{7,14}$/.test(sourceDigits)) {
-      const query = message ? `?text=${encodeURIComponent(message)}` : "";
-      options.push({ key: "source", label: "Número encontrado", url: `https://wa.me/${sourceDigits}${query}` });
+    if (/^[1-9]\d{6,14}$/.test(noCodeDigits)) {
+      options.push({ key: "national", label: "Sin código", url: `https://wa.me/${noCodeDigits}${query}` });
     }
-    // Option B: normalize using the prospect's market and add its calling code.
-    const normalized = toWhatsAppUrl(prospect.phone, message, getProspectPhoneCountry(prospect));
-    if (normalized && !options.some(option => option.url === normalized)) {
-      options.push({ key: "international", label: "Con prefijo", url: normalized });
+    if (/^[1-9]\d{7,14}$/.test(normalizedDigits)) {
+      options.push({ key: "international", label: "Con código", url: normalized || "" });
     }
     return options;
   };
