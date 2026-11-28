@@ -633,11 +633,24 @@ export default function App() {
     if (/\b(AUSTRALIA|NSW|VICTORIA|QUEENSLAND|WESTERN AUSTRALIA)\b/.test(location)) return "AU";
     return "US";
   };
-  const hasDirectWhatsAppRecipient = (prospect: Prospect) => {
-    if (!prospect.phone) return false;
-    const link = toWhatsAppUrl(prospect.phone, "", getProspectPhoneCountry(prospect));
-    return Boolean(link && /^https:\/\/wa\.me\/\d{8,15}(?:\?|$)/i.test(link));
+  const getWhatsAppOptions = (prospect: Prospect, message = "") => {
+    if (!prospect.phone) return [] as Array<{ key: string; label: string; url: string }>;
+    // Option A: preserve exactly the digits found by the source (including a
+    // source-supplied country code, or its absence) for the owner's own test.
+    const sourceDigits = String(prospect.phone).replace(/(?:ext\.?|extension|x|#)\s*\d+\s*$/i, "").replace(/\D/g, "");
+    const options: Array<{ key: string; label: string; url: string }> = [];
+    if (/^[1-9]\d{7,14}$/.test(sourceDigits)) {
+      const query = message ? `?text=${encodeURIComponent(message)}` : "";
+      options.push({ key: "source", label: "Número encontrado", url: `https://wa.me/${sourceDigits}${query}` });
+    }
+    // Option B: normalize using the prospect's market and add its calling code.
+    const normalized = toWhatsAppUrl(prospect.phone, message, getProspectPhoneCountry(prospect));
+    if (normalized && !options.some(option => option.url === normalized)) {
+      options.push({ key: "international", label: "Con prefijo", url: normalized });
+    }
+    return options;
   };
+  const hasDirectWhatsAppRecipient = (prospect: Prospect) => getWhatsAppOptions(prospect).length > 0;
   const getWebsiteUrl = (value?: string | null) => {
     if (!value) return null;
     try {
@@ -1613,7 +1626,7 @@ const submitDecision = async (prospectId: string, action: string, ownerManualApp
                       const canSendEmail = Boolean(contactability?.commercial_prospect && contactability.manual_email_available && emailRecipient && !p.outreach_suppressed && !p.suppression_reason && !(p.cooldown_until && Date.parse(p.cooldown_until) > Date.now()));
                       // A prepared Founder WhatsApp draft is already human-reviewed for this channel.
                       // Opening wa.me is still only a manual handoff; it does not prove account or opt-in.
-                      const canOpenWhatsApp = canOpenDirectChannel || (isPreparedWhatsAppDraft && hasDirectWhatsAppRecipient(p));
+                      const canOpenWhatsApp = Boolean(p.phone && hasDirectWhatsAppRecipient(p));
 
                       return (
                         <div 
@@ -1732,10 +1745,13 @@ const submitDecision = async (prospectId: string, action: string, ownerManualApp
                                 Enviar correo
                               </button>
                             )}
-                            {canOpenWhatsApp && p.phone && hasDirectWhatsAppRecipient(p.phone) && toWhatsAppUrl(p.phone, whatsappMessageBody, getProspectPhoneCountry(p)) && (
-                              <a 
-                                href={toWhatsAppLaunchUrl(p.phone, whatsappMessageBody, window.navigator.userAgent, getProspectPhoneCountry(p)) || toWhatsAppUrl(p.phone, whatsappMessageBody)!}
-                                target="_self" 
+                            {canOpenWhatsApp && getWhatsAppOptions(p, whatsappMessageBody).map(option => (
+                              <a
+                                key={option.key}
+                                href={option.key === "international"
+                                  ? (toWhatsAppLaunchUrl(p.phone, whatsappMessageBody, window.navigator.userAgent, getProspectPhoneCountry(p)) || option.url)
+                                  : option.url}
+                                target="_self"
                                 className="px-2.5 py-1 rounded-lg bg-emerald-950/50 border border-emerald-800/40 text-emerald-300 hover:bg-emerald-900/60 flex items-center gap-1 font-bold"
                                 onClick={(e) => {
                                   e.stopPropagation();
@@ -1744,9 +1760,9 @@ const submitDecision = async (prospectId: string, action: string, ownerManualApp
                                 }}
                               >
                                 <MessageSquare className="w-3.5 h-3.5 text-emerald-400" />
-                                WhatsApp <span className="text-[8px] opacity-70">· cuenta no comprobada</span>
+                                WhatsApp · {option.label}
                               </a>
-                            )}
+                            ))}
                             {currentMode === 'founder' && p.outcome === 'whatsapp_manual_ready' && (
                               <button
                                 type="button"
