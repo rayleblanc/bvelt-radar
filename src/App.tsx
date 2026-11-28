@@ -1631,7 +1631,7 @@ const submitDecision = async (prospectId: string, action: string, ownerManualApp
                         : ['weather_surge', 'stale_quotes', 'no_sms', 'missed_calls', 'general_intro'].includes(activeKitForProspect?.angle);
                       const canOpenDirectChannel = Boolean(contactability?.commercial_prospect && contactability.contact_available && hasVerifiedOutreachAngle);
                       const canUsePhoneChannel = Boolean(contactability?.commercial_prospect && contactability.channels?.phone && p.phone);
-                      const canSendEmail = Boolean(contactability?.commercial_prospect && contactability.manual_email_available && emailRecipient && !p.outreach_suppressed && !p.suppression_reason && !(p.cooldown_until && Date.parse(p.cooldown_until) > Date.now()));
+                      const canSendEmail = Boolean(contactability?.manual_email_available && emailRecipient && !p.outreach_suppressed && !p.suppression_reason && !(p.cooldown_until && Date.parse(p.cooldown_until) > Date.now()));
                       // A prepared Founder WhatsApp draft is already human-reviewed for this channel.
                       // Opening wa.me is still only a manual handoff; it does not prove account or opt-in.
                       const canOpenWhatsApp = Boolean(p.phone && hasDirectWhatsAppRecipient(p));
