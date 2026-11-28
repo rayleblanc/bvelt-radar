@@ -63,26 +63,36 @@ function assert(condition: boolean, message: string) {
 }
 
 tests.push({
-  name: "Manual email preflight blocks unknown or consent-required jurisdictions despite owner approval",
+  name: "Manual email preflight is owner-controlled while hard suppression remains enforced",
   run: async () => {
     const { resolveFounderEmailPolicy } = await import("./worker");
     const us = { email: "contact@northstarservices.com", city: "Austin, TX" };
     const canada = { email: "office@torontoplumbing.ca", city: "Toronto, ON" };
     const unknown = { email: "info@unknownmarket.org", city: "Unknown City" };
-    const ukCorporate = { email: "contact@ukcorporate.co.uk", city: "London, England", recipient_type: "corporate" };
     const ukUnknownSubscriber = { email: "contact@ukcorporate.co.uk", city: "London, England" };
 
-    assert(resolveFounderEmailPolicy(us).status === "SEND_ALLOWED", "US commercial email remains eligible subject to sender and CAN-SPAM controls");
-    assert(getManualSendPreflightError(us) === null, "A jurisdiction classified SEND_ALLOWED may proceed to remaining gates");
-    assert(resolveFounderEmailPolicy(canada).status === "CONSENT_REQUIRED", "Canada must require a recorded lawful basis");
-    assert(getManualSendPreflightError(canada) === "email_policy_consent_required", "Owner approval alone must not bypass Canadian consent requirements");
-    assert(resolveFounderEmailPolicy(unknown).status === "POLICY_UNKNOWN", "Unknown jurisdiction must remain unclassified");
-    assert(getManualSendPreflightError(unknown) === "email_policy_policy_unknown", "Unknown jurisdiction must be blocked");
-    assert(resolveFounderEmailPolicy(ukCorporate).status === "SEND_ALLOWED", "Confirmed UK corporate subscribers may proceed to remaining gates");
-    assert(getManualSendPreflightError(ukCorporate) === null, "UK corporate route remains eligible");
-    assert(resolveFounderEmailPolicy(ukUnknownSubscriber).status === "OWNER_REVIEW", "Unconfirmed UK subscriber type must remain under review");
-    assert(getManualSendPreflightError(ukUnknownSubscriber) === "email_policy_owner_review", "UK owner-review state must block dispatch");
-    assert(getManualSendPreflightError({ email: "not-an-email", city: "Austin, TX" }) === "valid_email_required", "Email syntax validation must remain the first gate");
+    assert(resolveFounderEmailPolicy(us).status === "SEND_ALLOWED", "US remains classified for automatic policy decisions");
+    assert(resolveFounderEmailPolicy(canada).status === "CONSENT_REQUIRED", "Canada remains classified for automatic policy decisions");
+    assert(resolveFounderEmailPolicy(unknown).status === "POLICY_UNKNOWN", "Unknown market remains classified for automatic policy decisions");
+    assert(resolveFounderEmailPolicy(ukUnknownSubscriber).status === "OWNER_REVIEW", "UK subscriber classification remains available to automation");
+    assert(getManualSendPreflightError(us) === null, "US manual email may proceed to suppression and sender checks");
+    assert(getManualSendPreflightError(canada) === null, "Manual owner action is not blocked by the automated jurisdiction score");
+    assert(getManualSendPreflightError(unknown) === null, "Unknown jurisdiction is surfaced for owner judgement, not hidden behind a UI block");
+    assert(getManualSendPreflightError(ukUnknownSubscriber) === null, "UK owner-review classification does not disable the manual action");
+    assert(getManualSendPreflightError({ email: "not-an-email", city: "Austin, TX" }) === "valid_email_required", "Malformed email remains blocked");
+    assert(getManualSendPreflightError({ email: "owner@example.com", status: "unsubscribed" }) === "recipient_suppressed", "Unsubscribed recipients remain blocked");
+  }
+});
+
+tests.push({
+  name: "WhatsApp phone normalization supports national numbers and keeps account status unverified",
+  run: () => {
+    assert(normalizeWhatsAppPhone("4155552671") === "14155552671", "US national 10-digit number must normalize to +1");
+    assert(normalizeWhatsAppPhone("1 (415) 555-2671") === "14155552671", "US national number stored with leading country code must normalize");
+    assert(normalizeWhatsAppPhone("+44 20 7946 0958", "GB") === "442079460958", "Explicit UK international number must remain intact");
+    assert(normalizeWhatsAppPhone("020 7946 0958", "GB") === "442079460958", "UK national number must normalize with country metadata");
+    assert(normalizeWhatsAppPhone("not-a-phone") === null, "Malformed phone must remain unavailable");
+    assert(toWhatsAppUrl("4155552671", "", "US") === "https://wa.me/14155552671", "US national number must produce a direct wa.me URL");
   }
 });
 
