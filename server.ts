@@ -1326,12 +1326,15 @@ function calculateMultiFactorScore(
   let contactabilityScore = 0;
   if (item.website) contactabilityScore += 5;
   if (email) {
-    contactabilityScore += isEmailValidated ? 12 : 6;
+    // A syntactically valid published business email is a usable contact path.
+    // Provider validation improves confidence; it must not halve lead value.
+    contactabilityScore += 12;
+    if (isEmailValidated) contactabilityScore += 2;
   }
   if (phone) contactabilityScore += 5;
-  
-  // Contact quality (professional domain vs generic email)
-  if (email && !email.endsWith("@gmail.com") && !email.endsWith("@yahoo.com") && !email.endsWith("@hotmail.com")) {
+
+  // Professional-domain evidence is additive, not a substitute for email presence.
+  if (email && !email.endsWith("@gmail.com") && !email.endsWith("@yahoo.com") && !email.endsWith("@hotmail.com") && !email.endsWith("@outlook.com")) {
     contactabilityScore += 3;
   }
   contactabilityScore = Math.min(25, contactabilityScore);
@@ -1377,7 +1380,8 @@ function calculateMultiFactorScore(
   // 4. DATA_CONFIDENCE (Max 10 pts)
   let dataConfidenceScore = 0;
   if (item.website) dataConfidenceScore += 5;
-  if (email && isEmailValidated) dataConfidenceScore += 5;
+  if (email) dataConfidenceScore += 3;
+  if (email && isEmailValidated) dataConfidenceScore += 2;
   dataConfidenceScore = Math.min(10, dataConfidenceScore);
 
   // 5. Normalization (0-100 total sum)
