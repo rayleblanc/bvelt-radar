@@ -3,11 +3,11 @@
  * IMPORTANT: syntactic validity is not proof that a line is active or has WhatsApp.
  * Founder prospecting currently defaults to the North American Numbering Plan (US/CA).
  */
-export type DefaultPhoneCountry = "US" | "CA";
+export type DefaultPhoneCountry = string;
 
 export function normalizePhoneE164(
   raw: unknown,
-  defaultCountry: DefaultPhoneCountry = "US"
+  defaultCountry: string = "US"
 ): string | null {
   if (raw == null) return null;
   let value = String(raw).trim();
@@ -25,24 +25,30 @@ export function normalizePhoneE164(
     return `+${digits}`;
   }
 
-  // US and Canada share country calling code +1.
-  if (defaultCountry === "US" || defaultCountry === "CA") {
-    if (digits.length === 10) return `+1${digits}`;
-    if (digits.length === 11 && digits.startsWith("1")) return `+${digits}`;
-  }
-  // Do not guess an international country code from an unprefixed number.
+  const callingCodes: Record<string, string> = {
+    US: "1", USA: "1", CA: "1", CANADA: "1",
+    GB: "44", UK: "44", IE: "353", AU: "61", NZ: "64",
+    DE: "49", FR: "33", ES: "34", PT: "351", IT: "39",
+    NL: "31", BE: "32", CH: "41", AT: "43", SE: "46",
+    NO: "47", DK: "45", FI: "358", ZA: "27"
+  };
+  const code = callingCodes[String(defaultCountry || "US").trim().toUpperCase()];
+  if (!code) return null;
+  if (code === "1" && digits.length === 10) return `+1${digits}`;
+  if (code === "1" && digits.length === 11 && digits.startsWith("1")) return `+${digits}`;
+  if (code !== "1" && digits.startsWith(code) && digits.length >= code.length + 7 && digits.length <= 15) return `+${digits}`;
+  if (code !== "1" && digits.length >= 7 && digits.length <= 12) return `+${code}${digits.replace(/^0+/, "")}`;
   return null;
 }
 
 export function toWhatsAppUrl(
   raw: unknown,
-  message = ""
+  message = "",
+  defaultCountry: string = "US"
 ): string | null {
   if (raw == null) return null;
   const value = String(raw).trim();
-  // WhatsApp direct links must never guess a country code from a national number.
-  if (!value.startsWith("+") && !value.startsWith("00")) return null;
-  const e164 = normalizePhoneE164(value);
+  const e164 = normalizePhoneE164(value, defaultCountry);
   if (!e164) return null;
   const digits = e164.slice(1);
   const query = message ? `?text=${encodeURIComponent(message)}` : "";
@@ -79,12 +85,13 @@ export function toTelUrl(
 export function toWhatsAppLaunchUrl(
   raw: unknown,
   message = "",
-  userAgent = ""
+  userAgent = "",
+  defaultCountry: string = "US"
 ): string | null {
-  const webUrl = toWhatsAppUrl(raw, message);
+  const webUrl = toWhatsAppUrl(raw, message, defaultCountry);
   if (!webUrl) return null;
   const value = String(raw).trim();
-  const e164 = normalizePhoneE164(value);
+  const e164 = normalizePhoneE164(value, defaultCountry);
   if (!e164) return null;
   const phone = e164.slice(1);
   const text = message ? `&text=${encodeURIComponent(message)}` : "";
