@@ -4469,8 +4469,12 @@ export function resolveProspectContactability(prospect: any): {
   // UI capability only: the owner must still explicitly confirm a lawful basis.
   // The endpoint enforces suppression, Trust-Stack, sender readiness, cooldown,
   // jurisdiction policy, sender governor, budget and idempotency.
-  const manualEmailAvailable = commercialProspect && emailAvailable &&
+  // Founder UI manual action is owner-controlled: ranking, ICP and jurisdiction
+  // classifications do not hide a syntactically valid published email. Hard
+  // suppression, replies and terminal delivery states remain unavailable.
+  const manualEmailAvailable = emailAvailable &&
     !["sent", "delivered", "opened", "clicked", "bounced", "unsubscribed", "complained", "suppressed", "blocked", "discarded", "rejected"].includes(status) &&
+    !["unsubscribed", "complained", "hard_bounce", "do_not_contact"].includes(outcome) &&
     !String(prospect?.last_reply_content || "").trim();
   return {
     commercial_prospect: commercialProspect,
