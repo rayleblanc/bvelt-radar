@@ -11291,8 +11291,8 @@ export async function generateAICopy(
   if (tenantInfo) {
     if (channel === "whatsapp") {
       const body = isSpanish
-        ? `Hola ${prospect.name || "equipo"}, soy de ${tenantInfo.tenant_name}. ¿Está bien si le hago una pregunta breve sobre cómo gestionan las consultas de clientes?`
-        : `Hi ${prospect.name || "team"}, I'm reaching out from ${tenantInfo.tenant_name}. Would it be okay if I asked how your team handles new customer enquiries?`;
+        ? `Hola ${prospect.name || "equipo"}: cuando entra una consulta de ${tenantInfo.industry || "servicios"} mientras están ocupados, ¿cómo se aseguran de responderla? Soy de ${tenantInfo.tenant_name}; puedo mostrarle una forma práctica de mantener ese seguimiento.`
+        : `Hi ${prospect.name || "team"} — when a new ${tenantInfo.industry || "service"} enquiry comes in while the team is busy, how do you make sure it gets a reply? I’m with ${tenantInfo.tenant_name}; I can show you a practical way to keep that follow-up moving.`;
       return { subject: "", body, source: "template" };
     }
     const services = tenantServices || String(tenantInfo.industry || "configured services");
@@ -11306,8 +11306,8 @@ export async function generateAICopy(
   }
   if (channel === "whatsapp") {
     const body = isSpanish
-      ? `Hola ${prospect.name || "equipo"}, encontré su negocio al buscar proveedores de ${prospect.trade || "servicios"} en ${prospect.city || "la zona"}. ¿Está bien si le hago una pregunta breve sobre cómo dan seguimiento a las consultas?`
-      : `Hi ${prospect.name || "team"}, I came across your business while looking at ${prospect.trade || "local service"} providers in ${prospect.city || "your area"}. Would it be okay if I asked how you follow up with new customer enquiries?`;
+      ? `Hola ${prospect.name || "equipo"}: cuando alguien pide presupuesto de ${prospect.trade || "un servicio"} mientras están trabajando, ¿cómo se aseguran de retomar esa consulta? Estoy creando Bvelt para ayudar a negocios de servicios a mantener esas conversaciones en seguimiento. ¿Hoy lo gestionan manualmente?`
+      : `Hi ${prospect.name || "team"} — when someone asks for a ${prospect.trade || "service"} quote while you are out on a job, what makes sure that enquiry gets picked up later? I’m building Bvelt to help service businesses keep those conversations moving. Is that handled manually today?`;
     return { subject: "", body, source: "template" };
   }
   const fallback = getTradePsychologyFallback(prospect.name, prospect.trade, prospect.city, bveltAngle, language, prospect.phone, prospect.demo_token, prospect.signal_event, prospect.signal_area, env, prospect.signals_json || prospect.signals);
@@ -11489,8 +11489,8 @@ function getTradePsychologyFallback(
     ? `Una pregunta sobre seguimiento de clientes en ${name}`
     : `A question about customer follow-up at ${name}`;
   let bodyBase = isSpanish
-    ? `Hola equipo de ${name},\n\nSoy Rainer, fundador de Bvelt. Estoy creando una herramienta para ayudar a negocios de servicios como el suyo a organizar el seguimiento de consultas de clientes.\n\n¿Cómo retoman hoy una consulta cuando no pueden atenderla en ese momento? Si le sirve, puedo compartir un ejemplo breve.`
-    : `Hi ${name} team,\n\nI'm Rainer, founder of Bvelt. I'm building a tool to help service businesses like yours organize follow-up for customer enquiries.\n\nHow do you currently pick up an enquiry when the team cannot respond straight away? If useful, I can share a short example.`;
+    ? `Hola equipo de ${name},\n\nCuando alguien pide un presupuesto mientras están en un trabajo, ¿cómo se aseguran de responderle después? Soy Rainer, estoy creando Bvelt para ayudar a negocios de servicios a mantener esas consultas en seguimiento.\n\n¿Cómo retoman hoy una consulta cuando no pueden atenderla en ese momento? Si le sirve, puedo compartir un ejemplo breve.`
+    : `Hi ${name} team,\n\nWhen a customer asks for a quote while your team is on a job, what makes sure that enquiry gets a reply later? I'm Rainer, building Bvelt to help service businesses keep those follow-ups from slipping through the cracks.\n\nHow do you currently pick up an enquiry when the team cannot respond straight away? If useful, I can share a short example.`;
 
   if (signalEvent && signalArea) {
     subject = isSpanish
