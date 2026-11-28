@@ -4410,14 +4410,16 @@ export function getTelegramApprovalFeedback(result: any): { title: string; detai
 }
 
 export function getManualSendPreflightError(prospect: any): string | null {
+  // Founder manual dispatch is a distinct, explicit owner action. Jurisdiction
+  // scoring/review is not a UI kill switch; hard suppression, opt-out, sender
+  // readiness, Trust-Stack, idempotency and provider checks remain server-side.
   const parsed = sanitizeEmail(prospect?.email);
   if (!parsed.valid || !parsed.email) return "valid_email_required";
-
-  // Owner approval is not a substitute for a documented lawful basis.
-  // Manual and automated sends share the same jurisdiction gate.
-  const policy = resolveFounderEmailPolicy(prospect);
-  if (policy.status !== "SEND_ALLOWED") {
-    return `email_policy_${String(policy.status || "unknown").toLowerCase()}`;
+  const status = String(prospect?.status || "").toLowerCase();
+  const outcome = String(prospect?.outcome || "").toLowerCase();
+  if (["unsubscribed", "complained", "bounced", "suppressed", "blocked", "discarded"].includes(status) ||
+      ["unsubscribed", "complained", "hard_bounce", "do_not_contact"].includes(outcome)) {
+    return "recipient_suppressed";
   }
   return null;
 }
@@ -11522,18 +11524,34 @@ export function hasEnrichableContactData(
   return validEmail || validPhone || realWebsite;
 }
 
-export function normalizeWhatsAppPhone(value: string | null | undefined): string | null {
-  // Strip a human-readable extension before extracting digits. An extension is
-  // not part of the WhatsApp subscriber number and must never enter the wa.me path.
-  const raw = String(value || "")
-    .trim()
-    .replace(/(?:ext\.?|extension|x|#)\s*\d+\s*$/i, "")
-    .trim();
+export function normalizeWhatsAppPhone(value: string | null | undefined, defaultCountry = "US"): string | null {
+  // Strip a human-readable extension before extracting digits.
+  const raw = String(value || "").trim().replace(/(?:ext\.?|extension|x|#)\s*\d+\s*$/i, "").trim();
   if (!raw) return null;
-  // Require explicit international notation (+CC or 00CC); never infer a country code.
-  const international = raw.startsWith("+") ? raw : raw.startsWith("00") ? "+" + raw.slice(2) : "";
-  if (!international) return null;
-  const digits = international.replace(/\D/g, "");
+  const hasInternationalPrefix = raw.startsWith("+") || raw.startsWith("00");
+  let digits = raw.replace(/\D/g, "");
+  if (raw.startsWith("00")) digits = digits.slice(2);
+  if (!hasInternationalPrefix) {
+    const country = String(defaultCountry || "US").trim().toUpperCase();
+    const callingCodes: Record<string, string> = {
+      US: "1", USA: "1", CA: "1", CANADA: "1",
+      GB: "44", UK: "44", IE: "353", AU: "61", NZ: "64",
+      DE: "49", FR: "33", ES: "34", PT: "351", IT: "39",
+      NL: "31", BE: "32", CH: "41", AT: "43", SE: "46",
+      NO: "47", DK: "45", FI: "358", ZA: "27"
+    };
+    const code = callingCodes[country];
+    if (!code) return null;
+    if (code === "1" && digits.length === 11 && digits.startsWith("1")) {
+      // Already has the NANP country code, but was stored without '+'.
+    } else if (code === "1" && digits.length === 10) {
+      digits = "1" + digits;
+    } else if (code !== "1" && digits.startsWith(code)) {
+      // National storage sometimes includes the calling code without '+'.
+    } else if (code !== "1" && digits.length >= 7 && digits.length <= 12) {
+      digits = code + digits.replace(/^0+/, "");
+    } else return null;
+  }
   return /^[1-9]\d{7,14}$/.test(digits) ? digits : null;
 }
 
