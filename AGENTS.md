@@ -129,6 +129,6 @@ La sección de cierre del plan maestro en LocalFlowPro prevalece sobre cualquier
 
 ## 14. Checkpoint de release 28-11-2026
 - Commit e4f7f9dda2d5883f4c0cee169ba4e9f79cab5e51 corrigió el mock D1 del test de recibo Founder: first() pertenece al prepared statement base y no solo al resultado de bind().
-- Cloudflare Workers Build 3356dfaa-2796-493d-91f2-df36108b37ad: SUCCESS; npm audit --audit-level=moderate sin vulnerabilidades, TypeScript lint, 97/97 tests, Vite build y Wrangler deploy completados.
-- Worker bvelt-radar versión #338 (5db72c0e-54c1-4f6a-b9f1-370311c66462) y deployment 79909d48-2715-4691-9872-63b31cd5e59d, con 100% del tráfico.
+- Cloudflare Workers Build 3356dfaa-2796-493d-91f2-df36108b37ad: SUCCESS; npm audit --audit-level=moderate sin vulnerabilidades, TypeScript lint, 97/97 tests, Vite build y Wrangler deploy completados para el release #338.
+- Worker bvelt-radar versión #339 (cde2d201-bc37-4fc0-8ca7-85d4f2a89db9) y deployment 2cbdd76c-eb39-45d9-abff-8cfbedc9ce6e, con 100% del tráfico. El script etag de #339 es idéntico al de #338 (`4429bf829b0b586f39c342b9b4331a0374bf7c5c8f07f5a038723236ce242122`); #339 es una promoción/upload duplicado del mismo código ya validado, no un cambio funcional.
 - No abrir PR para este cierre. La build manual duplicada del mismo SHA fue cancelada tras el despliegue confirmado.
