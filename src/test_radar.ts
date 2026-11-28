@@ -3534,3 +3534,20 @@ tests.push({
     assert(emailLead.breakdown.contactability > phoneOnlyLead.breakdown.contactability, "An email path must not score below a phone-only lead by default");
   }
 });
+tests.push({
+  name: "Founder manual email remains selectable regardless of score or ICP classification",
+  run: () => {
+    const lowScore = {
+      email: "owner@localbusiness.example",
+      status: "disqualified",
+      decision_state: "off_icp",
+      outcome: "below_minimum_score",
+      last_reply_content: ""
+    };
+    const capability = resolveProspectContactability(lowScore);
+    assert(capability.commercial_prospect === false, "Commercial ranking can still classify a lead as off ICP");
+    assert(capability.manual_email_available === true, "A valid email remains available for an explicit owner decision");
+    assert(getManualSendPreflightError(lowScore) === null, "Manual preflight must not reapply score or jurisdiction classification");
+    assert(getManualSendPreflightError({ email: "owner@localbusiness.example", outcome: "do_not_contact" }) === "recipient_suppressed", "Hard do-not-contact state remains protected");
+  }
+});
